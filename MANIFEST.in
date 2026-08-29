@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+include PYTHON_MODULE_INDEX.md
+recursive-include .codex *.md
+recursive-include docs *.md *.txt
+recursive-include tests *.py

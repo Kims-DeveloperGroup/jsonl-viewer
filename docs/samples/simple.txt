@@ -1,0 +1,15 @@
+JSONL VIEWER • READ ONLY • SIMPLE
+Session: session-01 • Conversation: conversation-01 • Agent: agent-01
+> 1 │ {
+> 1 │   "timestamp": "2026-08-29T09:00:00Z",
+> 1 │   "request_type": "request",
+> 1 │   "content": "Find the mismatch."
+> 1 │ }
+
+  2 │ {
+  2 │   "timestamp": "2026-08-29T09:00:01Z",
+  2 │   "request_type": "response",
+  2 │   "content": "The field is missing."
+  2 │ }
+Record 1/2 • source line 1 • 1 fields hidden
+↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
