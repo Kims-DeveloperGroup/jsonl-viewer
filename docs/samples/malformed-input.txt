@@ -1,0 +1,7 @@
+JSONL VIEWER • READ ONLY • SIMPLE
+Session: session-01 • Conversation: conversation-01 • Agent: agent-01
+! INPUT ERROR — JSONL record is malformed
+Source line 1 contains malformed JSON.
+Source bytes are unchanged. Press h for help or q to close.
+Immutable snapshot • no persistent viewer state
+↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h h…
