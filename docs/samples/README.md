@@ -5,7 +5,11 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `simple.txt`
 - `verbose.txt`
 - `search-matches.txt`
+- `nested-expanded-json.txt` — recursively expanded provider content and
+  response text with visible derived-display cues
 - `truncated-content.txt`
+- `truncated-nested-leaves.txt` — an expanded container whose long string leaf
+  is independently previewed while structure remains visible
 - `malformed-input.txt`
 - `tiny-terminal.txt`
 - `plain-no-color.txt`

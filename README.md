@@ -14,7 +14,10 @@ or terminal-driver implementations.
 - a three-name public API: `ViewerSpec`, `ViewerHost`, and `view_jsonl`;
 - Simple and Verbose views, with configurable date/time, request-type, and
   content fields ordered first;
-- a 4 KiB UTF-8 Simple content preview and explicit truncation metadata;
+- recursive, bounded expansion of string values that contain complete strict
+  JSON objects or arrays, including multiply encoded provider payloads;
+- per-string-leaf UTF-8 previews (4 KiB in Simple and 64 KiB in Verbose), with
+  explicit retained/full byte counts and aggregate display facts;
 - strict UTF-8 JSONL parsing with bounded, content-safe malformed-input views;
 - stable source-record line gutters, record navigation, paging, and exact
   go-to-line;
@@ -53,10 +56,30 @@ Search request_type='r' • 1/2 • @ current, * other
 ↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
 ```
 
+An encoded provider response is expanded as a derived, read-only display. The
+cue is visible without color, and genuine string leaves retain the JSON
+escaping required for quotes, backslashes, and control characters:
+
+```text
+> 1 │   "content": [expanded JSON string ×1] {
+> 1 │     "action": "provider_response",
+> 1 │     "response_text": [expanded JSON string ×1] {
+> 1 │       "status": "provider_error",
+> 1 │       "details": [
+> 1 │         "correlation token mismatch",
+> 1 │         {
+> 1 │           "retryable": false
+> 1 │         }
+> 1 │       ]
+> 1 │     }
+> 1 │   }
+Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
+```
+
 The [design system](docs/design-system.md) defines every visual role and user
-state. Seven [deterministic full-frame samples](docs/samples/README.md) cover
-Simple, Verbose, search, truncation, malformed input, tiny terminals, and
-plain / `NO_COLOR` output.
+state. Nine [deterministic full-frame samples](docs/samples/README.md) cover
+Simple, Verbose, search, nested expansion, leaf truncation, malformed input,
+tiny terminals, and plain / `NO_COLOR` output.
 
 ## Install and run
 
@@ -141,9 +164,29 @@ path only for a bounded binary read.
 - record-count bound: 10,000;
 - nesting bound: 64 levels;
 - value-node bound: 200,000 per record;
-- Simple string/content preview: at most 4,096 UTF-8 bytes at a complete code
+- nested-display expansion: at most 16 encoding layers, 64 projected display
+  levels, 200,000 derived nodes, and 16,777,216 cumulative decoded UTF-8 bytes
+  per record;
+- Simple string-leaf preview: at most 4,096 UTF-8 bytes at a complete code
   point; and
-- Verbose string preview: at most 65,536 UTF-8 bytes.
+- Verbose string-leaf preview: at most 65,536 UTF-8 bytes.
+
+Before applying a preview, the renderer recursively expands a displayed
+string only when its complete strict JSON value (apart from surrounding JSON
+whitespace) resolves to an object or array. Prose, fragments, scalar JSON,
+malformed JSON, duplicate object fields, and non-finite numbers remain genuine
+JSON strings. Expansion never truncates a container, key, structural token, or
+child. If an expansion would cross a safety bound, the renderer shows a
+`[JSON expansion skipped: REASON]` cue and the bounded original string instead;
+it never exposes a partial container.
+
+Expansion is a derived presentation, so a displayed object is not always a
+type-preserving JSON projection of the source record. The immutable source
+value remains a string, and search still evaluates the original enumerated
+top-level field rather than the derived children. A displayed leaf that is
+still a genuine string uses normal JSON escaping: embedded quotes and
+backslashes remain escaped, while unsafe control and format characters remain
+visible as `\uXXXX` text.
 
 Blank records, duplicate object fields, non-finite numbers, malformed JSON,
 invalid UTF-8, and exceeded bounds render content-safe diagnostics. Source

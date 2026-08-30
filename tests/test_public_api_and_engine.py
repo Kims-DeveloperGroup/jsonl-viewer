@@ -235,6 +235,40 @@ class EngineTests(unittest.TestCase):
         self.assertIn("Search content='ALPHA' • 1/1", host.frames[2])
         self.assertIn("Search content='needle' • 0/0", host.frames[3])
 
+    def test_embedded_json_search_uses_the_original_top_level_string(self) -> None:
+        content = json.dumps(
+            {"message": "line1\nline2"},
+            separators=(",", ":"),
+        )
+        source = (
+            json.dumps(
+                {
+                    "timestamp": "1",
+                    "request_type": "response",
+                    "content": content,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+        host = FakeHost(
+            (
+                "search\tcontent\t\\n",
+                "clear_search",
+                "search\tcontent\tline1\nline2",
+                "close",
+            ),
+            size=(160, 18),
+        )
+
+        view_jsonl(source, self.spec, host)
+
+        self.assertIn("Search content=", host.frames[2])
+        self.assertIn("• 1/1 • @ current", host.frames[2])
+        self.assertIn('"message": "line1\\nline2"', host.frames[2])
+        self.assertIn("Search content=", host.frames[4])
+        self.assertIn("• 0/0 • @ current", host.frames[4])
+
     def test_non_enumerated_search_does_not_inspect_values(self) -> None:
         host = FakeHost(("search\tsecret\tneedle", "close"))
         source = b'{"content":"safe","secret":"needle"}\n'
@@ -281,6 +315,56 @@ class EngineTests(unittest.TestCase):
         self.assertIn("VERBOSE", frame)
         self.assertIn("Verbose mode is required", frame)
         self.assertIn("Search latency_ms='12' • 1/1", frame)
+
+    def test_embedded_projection_pages_by_derived_lines_and_closes_cleanly(
+        self,
+    ) -> None:
+        content = json.dumps(
+            {f"field_{index:02}": f"value_{index:02}" for index in range(20)},
+            separators=(",", ":"),
+        )
+        source = (
+            json.dumps(
+                {
+                    "timestamp": "1",
+                    "request_type": "response",
+                    "content": content,
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "timestamp": "2",
+                    "request_type": "response",
+                    "content": "next record",
+                },
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+        before = hashlib.sha256(source).digest()
+        host = FakeHost(("page_down",) * 8 + ("close",), size=(80, 9))
+
+        view_jsonl(source, self.spec, host)
+
+        self.assertEqual(hashlib.sha256(source).digest(), before)
+        self.assertEqual(host.close_calls, 1)
+        self.assertTrue(
+            any('"field_19": "value_19"' in frame for frame in host.frames),
+            "derived projection did not page to its final child",
+        )
+        self.assertTrue(
+            any("Record 2/2" in frame for frame in host.frames),
+            "derived line count did not cross to the next source record",
+        )
+
+        tiny = FakeHost(("close",), size=(12, 4))
+        view_jsonl(source, self.spec, tiny)
+        self.assertEqual(tiny.close_calls, 1)
+        self.assertEqual(len(tiny.frames[-1].splitlines()), 4)
+        self.assertTrue(all(len(line) <= 12 for line in tiny.frames[-1].splitlines()))
+        self.assertIn("READ ONLY", tiny.frames[-1])
 
     def test_cancel_dismisses_search_then_closes_without_persistence(self) -> None:
         first = FakeHost(("search\tcontent\talpha", "cancel", "close"))

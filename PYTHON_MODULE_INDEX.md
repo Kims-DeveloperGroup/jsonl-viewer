@@ -100,17 +100,27 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer._render`
 
 - **Source:** `src/jsonl_viewer/_render.py`
-- **Responsibility:** Render deterministic bounded semantic ANSI/plain frames.
+- **Responsibility:** Render deterministic bounded semantic ANSI/plain frames
+  from call-local derived JSON projections.
 - **Supported surface:** No supported consumer API. The engine consumes private
   loading/frame renderers and the current record-line count; tests use the
   private SGR-stripping verifier.
 - **Direct internal dependencies:** `_model` and `contracts`.
-- **State, resources, and side effects:** Owns immutable role/bound metadata and
-  pure formatting behavior only. It performs no terminal or filesystem I/O.
-  Rendering reorders/project fields by `ViewerSpec`, formats multiline JSON,
-  projects the supplied scope label, exact ID, and optional subject into the
-  header, neutralizes controls, computes Unicode cell clipping, applies preview
-  bounds, and emits optional SGR without cursor/lifecycle controls.
+- **State, resources, and side effects:** Owns immutable role/bound metadata,
+  one call-local projection budget, and pure formatting behavior only. It
+  performs no terminal or filesystem I/O. Rendering reorders/project fields by
+  `ViewerSpec`, strictly and recursively expands only complete string-encoded
+  JSON objects or arrays without mutating source/search values, and rejects
+  duplicate, non-finite, malformed, scalar, fragment, and over-bound display
+  interpretations. Transactional layer/depth/node/decoded-byte bounds retain
+  an over-bound candidate as its original string with a content-safe cue.
+  String-leaf preview bounds apply only after expansion at complete UTF-8 code
+  points; visible per-leaf markers and footer aggregates report expansion,
+  skipped, and retained/full truncation facts without removing keys,
+  containers, delimiters, or child presence. The same renderer formats
+  multiline JSON, projects the supplied scope label, exact ID, and optional
+  subject into the header, neutralizes controls, computes Unicode cell
+  clipping, and emits optional SGR without cursor/lifecycle controls.
 - **Primary verification/documentation:** `tests/test_input_and_render.py`,
   `tests/test_documented_samples.py`, and `docs/design-system.md`.
 

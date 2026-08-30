@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Any, Iterable, NoReturn, cast
 
 from ._model import (
     InputDiagnostic,
@@ -22,6 +23,10 @@ from .contracts import ViewerSpec
 
 SIMPLE_CONTENT_PREVIEW_BYTES = 4_096
 VERBOSE_STRING_PREVIEW_BYTES = 65_536
+MAX_EXPANSION_LAYERS = 16
+MAX_PROJECTED_DISPLAY_DEPTH = 64
+MAX_DERIVED_VALUE_NODES = 200_000
+MAX_CUMULATIVE_DECODED_UTF8_BYTES = 16_777_216
 MAX_COLUMNS = 240
 MAX_ROWS = 100
 MIN_COLUMNS = 12
@@ -58,6 +63,37 @@ class _DisplayLine:
     path: tuple[str, ...]
 
 
+@dataclass(slots=True)
+class _ProjectionBudget:
+    derived_nodes: int = 0
+    decoded_utf8_bytes: int = 0
+
+
+@dataclass(slots=True)
+class _ProjectionFacts:
+    expanded_strings: int = 0
+    skipped_expansions: int = 0
+    truncated_leaves: int = 0
+    truncated_retained_utf8_bytes: int = 0
+    truncated_full_utf8_bytes: int = 0
+    content_preview: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Expansion:
+    value: JSONValue
+    layers: int
+
+
+@dataclass(frozen=True, slots=True)
+class _SkippedExpansion:
+    reason: str
+
+
+class _DuplicateObjectField(ValueError):
+    pass
+
+
 def strip_ansi(value: str) -> str:
     """Return semantic text without renderer-owned SGR sequences."""
 
@@ -85,6 +121,116 @@ def _neutralize_text(value: str) -> str:
 def _safe_json_token(value: str) -> str:
     encoded = json.dumps(value, ensure_ascii=False)
     return "".join(_neutralize_character(character) for character in encoded)
+
+
+def _object_without_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateObjectField("duplicate object field")
+        value[key] = item
+    return value
+
+
+def _reject_constant(_value: str) -> NoReturn:
+    raise ValueError("non-finite JSON number")
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite JSON number")
+    return parsed
+
+
+def _looks_like_nested_json(value: str) -> bool:
+    stripped = value.lstrip()
+    return bool(stripped) and stripped[0] in {'"', "[", "{"}
+
+
+def _strict_json_value(value: str) -> JSONValue | None:
+    try:
+        parsed = json.loads(
+            value,
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+            parse_float=_finite_float,
+        )
+    except (
+        _DuplicateObjectField,
+        json.JSONDecodeError,
+        OverflowError,
+        RecursionError,
+        ValueError,
+    ):
+        return None
+    return cast(JSONValue, parsed)
+
+
+def _candidate_node_count(
+    value: list[JSONValue] | dict[str, JSONValue],
+    *,
+    display_depth: int,
+    remaining_nodes: int,
+) -> tuple[int | None, str | None]:
+    stack: list[tuple[JSONValue, int]] = [(value, display_depth)]
+    nodes = 0
+    while stack:
+        item, depth = stack.pop()
+        if depth > MAX_PROJECTED_DISPLAY_DEPTH:
+            return None, "display depth limit"
+        nodes += 1
+        if nodes > remaining_nodes:
+            return None, "derived node limit"
+        if isinstance(item, dict):
+            stack.extend((child, depth + 1) for child in item.values())
+        elif isinstance(item, list):
+            stack.extend((child, depth + 1) for child in item)
+    return nodes, None
+
+
+def _nested_json_expansion(
+    value: str,
+    *,
+    display_depth: int,
+    budget: _ProjectionBudget,
+) -> _Expansion | _SkippedExpansion | None:
+    if not _looks_like_nested_json(value):
+        return None
+
+    current = value
+    for layer in range(1, MAX_EXPANSION_LAYERS + 1):
+        encoded_bytes = len(current.encode("utf-8", errors="strict"))
+        if (
+            budget.decoded_utf8_bytes + encoded_bytes
+            > MAX_CUMULATIVE_DECODED_UTF8_BYTES
+        ):
+            budget.decoded_utf8_bytes = MAX_CUMULATIVE_DECODED_UTF8_BYTES
+            return _SkippedExpansion("decoded byte limit")
+        parsed = _strict_json_value(current)
+        if parsed is None:
+            return None
+        budget.decoded_utf8_bytes += encoded_bytes
+        if isinstance(parsed, (dict, list)):
+            node_count, failure = _candidate_node_count(
+                parsed,
+                display_depth=display_depth,
+                remaining_nodes=MAX_DERIVED_VALUE_NODES - budget.derived_nodes,
+            )
+            if failure is not None:
+                if failure == "derived node limit":
+                    budget.derived_nodes = MAX_DERIVED_VALUE_NODES
+                return _SkippedExpansion(failure)
+            assert node_count is not None
+            budget.derived_nodes += node_count
+            return _Expansion(parsed, layer)
+        if not isinstance(parsed, str):
+            return None
+        current = parsed
+        if not _looks_like_nested_json(current):
+            return None
+
+    return _SkippedExpansion("encoding layer limit")
 
 
 def _character_cells(character: str) -> int:
@@ -169,16 +315,27 @@ def _utf8_prefix(value: str, maximum: int) -> tuple[str, int, int]:
     return "", 0, len(encoded)
 
 
-def _string_segments(value: str, *, maximum: int) -> tuple[_Segment, ...]:
+def _string_segments(
+    value: str,
+    *,
+    maximum: int,
+    path: tuple[str, ...],
+    content_field: str,
+    facts: _ProjectionFacts,
+) -> tuple[_Segment, ...]:
     prefix, retained, complete = _utf8_prefix(value, maximum)
     token = _safe_json_token(prefix)
     if retained == complete:
         return (_Segment(token, "string"),)
-    marker = f" … [truncated {retained}/{complete} UTF-8 bytes]"
+    facts.truncated_leaves += 1
+    facts.truncated_retained_utf8_bytes += retained
+    facts.truncated_full_utf8_bytes += complete
+    if path == (content_field,):
+        facts.content_preview = (retained, complete)
+    marker = f"[truncated {retained}/{complete} UTF-8 bytes] "
     return (
-        _Segment(token[:-1], "string"),
         _Segment(marker, "muted"),
-        _Segment('"', "string"),
+        _Segment(token[:-1] + '…"', "string"),
     )
 
 
@@ -186,9 +343,13 @@ def _format_value(
     value: JSONValue,
     *,
     indent: int,
+    display_depth: int,
     path: tuple[str, ...],
     prefix: tuple[_Segment, ...] = (),
     string_limit: int,
+    content_field: str,
+    budget: _ProjectionBudget,
+    facts: _ProjectionFacts,
 ) -> list[_DisplayLine]:
     leading = (_Segment(" " * indent),) + prefix
     if isinstance(value, dict):
@@ -204,9 +365,13 @@ def _format_value(
             child_lines = _format_value(
                 child,
                 indent=indent + 2,
+                display_depth=display_depth + 1,
                 path=path + (key,),
                 prefix=child_prefix,
                 string_limit=string_limit,
+                content_field=content_field,
+                budget=budget,
+                facts=facts,
             )
             if index + 1 < len(items):
                 last = child_lines[-1]
@@ -225,8 +390,12 @@ def _format_value(
             child_lines = _format_value(
                 child,
                 indent=indent + 2,
+                display_depth=display_depth + 1,
                 path=path,
                 string_limit=string_limit,
+                content_field=content_field,
+                budget=budget,
+                facts=facts,
             )
             if index + 1 < len(value):
                 last = child_lines[-1]
@@ -238,7 +407,43 @@ def _format_value(
         lines.append(_DisplayLine((_Segment(" " * indent + "]"),), path))
         return lines
     if isinstance(value, str):
-        token = _string_segments(value, maximum=string_limit)
+        expansion = _nested_json_expansion(
+            value,
+            display_depth=display_depth,
+            budget=budget,
+        )
+        if isinstance(expansion, _Expansion):
+            facts.expanded_strings += 1
+            cue = _Segment(
+                f"[expanded JSON string ×{expansion.layers}] ",
+                "muted",
+            )
+            return _format_value(
+                expansion.value,
+                indent=indent,
+                display_depth=display_depth,
+                path=path,
+                prefix=prefix + (cue,),
+                string_limit=string_limit,
+                content_field=content_field,
+                budget=budget,
+                facts=facts,
+            )
+        if isinstance(expansion, _SkippedExpansion):
+            facts.skipped_expansions += 1
+            leading += (
+                _Segment(
+                    f"[JSON expansion skipped: {expansion.reason}] ",
+                    "warning",
+                ),
+            )
+        token = _string_segments(
+            value,
+            maximum=string_limit,
+            path=path,
+            content_field=content_field,
+            facts=facts,
+        )
     elif value is None:
         token = (_Segment("null", "literal"),)
     elif type(value) is bool:
@@ -268,27 +473,30 @@ def _project_record(
     return ordered, len(value) - len(ordered), SIMPLE_CONTENT_PREVIEW_BYTES
 
 
-def record_line_count(record: Record, spec: ViewerSpec, mode: ViewMode) -> int:
+def _format_record(
+    record: Record,
+    spec: ViewerSpec,
+    mode: ViewMode,
+) -> tuple[list[_DisplayLine], _ProjectionFacts]:
     value, _, limit = _project_record(record, spec, mode)
-    return len(_format_value(value, indent=0, path=(), string_limit=limit))
-
-
-def _record_truncation(record: Record, spec: ViewerSpec, mode: ViewMode) -> str | None:
-    if not isinstance(record.value, dict):
-        return None
-    value = record.value.get(spec.content_field)
-    if not isinstance(value, str):
-        return None
-    maximum = (
-        SIMPLE_CONTENT_PREVIEW_BYTES
-        if mode is ViewMode.SIMPLE
-        else VERBOSE_STRING_PREVIEW_BYTES
+    budget = _ProjectionBudget()
+    facts = _ProjectionFacts()
+    lines = _format_value(
+        value,
+        indent=0,
+        display_depth=1,
+        path=(),
+        string_limit=limit,
+        content_field=spec.content_field,
+        budget=budget,
+        facts=facts,
     )
-    complete = len(value.encode("utf-8"))
-    if complete <= maximum:
-        return None
-    _, retained, _ = _utf8_prefix(value, maximum)
-    return f"content preview {retained}/{complete} UTF-8 bytes"
+    return lines, facts
+
+
+def record_line_count(record: Record, spec: ViewerSpec, mode: ViewMode) -> int:
+    lines, _ = _format_record(record, spec, mode)
+    return len(lines)
 
 
 def _header_lines(
@@ -410,9 +618,8 @@ def _record_lines(
     gutter_width: int,
     body_width: int,
     color: bool,
-) -> tuple[list[str], bool, int]:
-    value, _, string_limit = _project_record(record, spec, state.mode)
-    logical = _format_value(value, indent=0, path=(), string_limit=string_limit)
+) -> tuple[list[str], bool, int, _ProjectionFacts]:
+    logical, facts = _format_record(record, spec, state.mode)
     marker, marker_role = _record_marker(index, state)
     result: list[str] = []
     any_width_clip = False
@@ -433,7 +640,29 @@ def _record_lines(
             _Segment(" │ ", "gutter"),
         )
         result.append(_paint(gutter + clipped, color=color))
-    return result, any_width_clip, len(logical)
+    return result, any_width_clip, len(logical), facts
+
+
+def _projection_footer_pieces(facts: _ProjectionFacts | None) -> list[str]:
+    if facts is None:
+        return []
+    pieces: list[str] = []
+    if facts.content_preview is not None:
+        retained, complete = facts.content_preview
+        pieces.append(f"content preview {retained}/{complete} UTF-8 bytes")
+    if facts.expanded_strings or facts.skipped_expansions or facts.truncated_leaves:
+        summary = (
+            f"JSON display {facts.expanded_strings} expanded, "
+            f"{facts.skipped_expansions} skipped, "
+            f"{facts.truncated_leaves} truncated"
+        )
+        if facts.truncated_leaves:
+            summary += (
+                f" ({facts.truncated_retained_utf8_bytes}/"
+                f"{facts.truncated_full_utf8_bytes} UTF-8 bytes retained)"
+            )
+        pieces.append(summary)
+    return pieces
 
 
 def _footer_lines(
@@ -443,6 +672,7 @@ def _footer_lines(
     spec: ViewerSpec,
     width: int,
     width_clipped: bool,
+    projection_facts: _ProjectionFacts | None,
 ) -> list[tuple[str, str]]:
     status = ""
     role = "footer"
@@ -457,11 +687,17 @@ def _footer_lines(
             f"Search {search.field}={_neutralize_text(search.query)!r} • "
             f"{position} • @ current, * other"
         )
+        projection_status = _projection_footer_pieces(projection_facts)
+        if projection_status:
+            status = f"{status} • {' • '.join(projection_status)}"
         if state.message:
             status = f"{state.message} • {status}"
             role = "error" if state.message_is_error else "warning"
     elif state.message:
         status = state.message
+        projection_status = _projection_footer_pieces(projection_facts)
+        if projection_status:
+            status = f"{status} • {' • '.join(projection_status)}"
         role = "error" if state.message_is_error else "warning"
     elif snapshot is not None and snapshot.records:
         selected = snapshot.records[state.selected_index]
@@ -476,13 +712,18 @@ def _footer_lines(
         ]
         if hidden:
             pieces.append(f"{hidden} fields hidden")
-        truncation = _record_truncation(selected, spec, state.mode)
-        if truncation:
-            pieces.append(truncation)
+        projection_status = _projection_footer_pieces(projection_facts)
+        if (
+            projection_facts is not None
+            and projection_facts.content_preview is not None
+            and projection_status
+        ):
+            pieces.append(projection_status.pop(0))
         if width_clipped:
             pieces.append("width clipped")
+        pieces.extend(projection_status)
         status = " • ".join(pieces)
-        role = "muted" if truncation or width_clipped else "footer"
+        role = "muted" if projection_status or width_clipped else "footer"
     if not status:
         status = "Immutable snapshot • no persistent viewer state"
     help_text = (
@@ -532,6 +773,7 @@ def render_frame(
     body: list[tuple[str, str] | str] = []
     width_clipped = False
     selected_line_count = 0
+    selected_projection_facts: _ProjectionFacts | None = None
 
     if state.help_visible:
         body.extend(_help_body(width)[:available_body_rows])
@@ -545,7 +787,7 @@ def render_frame(
             body_width = max(1, width - gutter_width - 5)
             remaining = available_body_rows
             for index in range(state.selected_index, len(snapshot.records)):
-                record_lines, clipped, logical_count = _record_lines(
+                record_lines, clipped, logical_count, projection_facts = _record_lines(
                     snapshot.records[index],
                     index,
                     spec,
@@ -557,6 +799,7 @@ def render_frame(
                 width_clipped = width_clipped or clipped
                 if index == state.selected_index:
                     selected_line_count = logical_count
+                    selected_projection_facts = projection_facts
                     record_lines = record_lines[state.record_line_offset :]
                 if not record_lines:
                     continue
@@ -577,6 +820,7 @@ def render_frame(
         spec=spec,
         width=width,
         width_clipped=width_clipped,
+        projection_facts=selected_projection_facts,
     )
     rendered_header = [
         _paint((_Segment(text, role),), color=color) for text, role in header

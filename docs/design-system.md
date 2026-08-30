@@ -13,7 +13,9 @@ renderer, not illustrative mockups:
 - [Simple](samples/simple.txt)
 - [Verbose](samples/verbose.txt)
 - [current and non-current search matches](samples/search-matches.txt)
+- [recursively expanded provider JSON](samples/nested-expanded-json.txt)
 - [truncated content](samples/truncated-content.txt)
+- [truncated nested string leaves](samples/truncated-nested-leaves.txt)
 - [malformed input](samples/malformed-input.txt)
 - [tiny terminal](samples/tiny-terminal.txt)
 - [plain / `NO_COLOR`](samples/plain-no-color.txt)
@@ -46,6 +48,26 @@ That fixture uses the default `Conversation` label and no subject. Supplying
 `conversation_subject="subject"` changes its header projection to
 `Debate: FULL_ID — subject`; kind and subject are not concatenated into the ID.
 
+A provider response stored as encoded JSON is displayed with its nested
+structure instead of a wall of outer `\"` and `\\` escapes. This excerpt is
+from the exact [nested sample](samples/nested-expanded-json.txt):
+
+```text
+> 1 │   "content": [expanded JSON string ×1] {
+> 1 │     "action": "provider_response",
+> 1 │     "response_text": [expanded JSON string ×1] {
+> 1 │       "status": "provider_error",
+> 1 │       "details": [
+> 1 │         "correlation token mismatch",
+> 1 │         {
+> 1 │           "retryable": false
+> 1 │         }
+> 1 │       ]
+> 1 │     }
+> 1 │   }
+Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
+```
+
 ## Frame anatomy and immutable cues
 
 Every normal frame has three areas:
@@ -70,15 +92,17 @@ Plain gutter markers carry state without color:
 | `*` | another search match |
 | space | visible record without one of those states |
 
-For an object record, `Simple` is a valid JSON projection containing only the
-configured date/time, request-type, and content fields in that order. Its
-footer reports the hidden top-level field count. `Verbose` places those three
-fields first and then renders every other top-level field in source order.
-Non-object JSON records render as their original JSON value in either mode,
-subject to the mode's string-preview bound. Searching a hidden object field
-with at least one hit automatically selects the first hit and promotes to
-Verbose; Simple cannot be selected again while that hidden-field match remains
-active.
+For an object record, `Simple` contains only the configured date/time,
+request-type, and content fields in that order. Its footer reports the hidden
+top-level field count. `Verbose` places those three fields first and then
+renders every other top-level field in source order. Ordinarily this is a JSON
+projection, but a complete JSON object or array stored inside a string may be
+shown as a visibly marked derived structure. The source record and its string
+type remain unchanged. Non-object JSON records render their original value in
+either mode, with the same derived-expansion and string-leaf preview rules.
+Searching a hidden object field with at least one hit automatically selects the
+first hit and promotes to Verbose; Simple cannot be selected again while that
+hidden-field match remains active.
 
 ## Exact semantic roles
 
@@ -100,13 +124,22 @@ host.
 | non-current match | `*` marker | `4;33` underlined yellow | other-match marker and every non-whitespace token on its searched-field rows |
 | warning/status | explanatory text | `1;33` bold yellow | non-error transient messages, including mode/goto/search status and hidden-field promotion |
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, or search messages in the footer |
-| muted | `…` and explanatory wording | `2;90` dim bright-black | string truncation marker; a truncation/clipping footer; loading, empty, and unchanged-source safety text |
+| muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
 | footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, and persistent footer help |
 | plain structure | JSON punctuation or help text | `0` reset/default | braces, brackets, commas, colons, whitespace, and Help command descriptions |
 
 Every colored role has words, JSON punctuation, a gutter marker, or both. Color
 is never the only distinction. `NO_COLOR`, `--no-color`, or a host returning
 `False` from `color_enabled()` removes SGR only; semantic text remains exact.
+Expanded object keys use blue, genuine string leaves use green, numbers use
+magenta, booleans and `null` use yellow, and structural braces, brackets,
+commas, and colons remain the terminal default. Expansion and truncation cues
+use muted dim bright-black; a skipped-expansion cue is warning yellow. The
+normal footer is dim cyan, while a record footer containing JSON display,
+truncation, or clipping facts uses muted dim bright-black. An active search
+footer remains dim cyan, and an active search match overrides the nested
+field's token colors with the current/non-current match role. The literal cues
+and footer counts carry the same information in plain mode.
 
 ## Responsive geometry
 
@@ -176,19 +209,50 @@ execution, mouse link, or provider action. The host owns application focus and
 restores the surrounding view from `close_view()`; the standalone adapter owns
 and restores its alternate-screen, cursor visibility, and terminal mode.
 
-## Truncation and control neutralization
+## Nested JSON, truncation, and control neutralization
 
-Simple projected strings use a 4,096-byte complete UTF-8 prefix; Verbose
-strings use 65,536 bytes. A truncated token contains a visible
-`[truncated RETAINED/TOTAL UTF-8 bytes]` marker and the footer repeats content
-preview accounting. Terminal-width clipping has a separate `…`/`width clipped`
-signal. Neither means the source was changed.
+Every displayed string leaf is considered for derived expansion before its
+preview limit is applied. The renderer accepts only a complete strict JSON
+value, allowing surrounding JSON whitespace, and expands it only if it resolves
+to an object or array. It follows string-encoding layers recursively, so an
+encoded provider `content` object can expose an encoded `response_text` object
+inside it. Prose, JSON fragments, JSON scalars, malformed JSON, objects with
+duplicate fields, and non-finite numbers stay genuine strings.
+
+Expansion is bounded per source record:
+
+| Bound | Limit | Result when exceeded |
+| --- | ---: | --- |
+| string-encoding layers | 16 | original string plus `[JSON expansion skipped: encoding layer limit]` |
+| projected display depth | 64 | original string plus `[JSON expansion skipped: display depth limit]` |
+| derived value nodes | 200,000 | original string plus `[JSON expansion skipped: derived node limit]` |
+| cumulative decoded UTF-8 bytes | 16,777,216 | original string plus `[JSON expansion skipped: decoded byte limit]` |
+
+Each candidate expansion is transactional. Crossing a bound exposes no partial
+container: the original string is rendered under the ordinary mode preview
+limit, siblings already accepted remain expanded, and the footer increments
+the skipped count. The display cue `[expanded JSON string ×N]` gives the
+number of decoded string layers. These projections never mutate the source
+bytes or parsed value types.
+
+Simple displayed string leaves use a 4,096-byte complete UTF-8 prefix; Verbose
+leaves use 65,536 bytes. Preview truncation is independent per leaf and never
+removes a container, key, structural token, or child. A truncated leaf contains
+a visible `[truncated RETAINED/TOTAL UTF-8 bytes]` marker. The footer aggregates
+expanded, skipped, and truncated counts, plus retained/full UTF-8 bytes across
+truncated leaves. A direct truncated content string also retains its dedicated
+`content preview RETAINED/TOTAL UTF-8 bytes` fact. Terminal-width clipping and
+vertical paging are later presentation steps with a separate `…`/`width
+clipped` signal; they do not change expansion or preview accounting.
 
 C0, C1, DEL, Unicode format/surrogate controls, line/paragraph separators, and
 terminal escape bytes render as visible lower-case `\uXXXX` or `\uXXXXXXXX`
-text. Newlines and tabs inside JSON strings remain JSON escapes. Every header
-part—including the supplied scope label, ID, and subject—and every search query
-passes through the same neutralization boundary before rendering.
+text. Newlines and tabs inside genuine JSON strings remain JSON escapes, as do
+the quotes and backslashes required for valid JSON text. Derived expansion
+removes only the extra escaping layer around a complete encoded object or
+array; it does not unescape genuine text leaves. Every header part—including
+the supplied scope label, ID, and subject—and every search query passes through
+the same neutralization boundary before rendering.
 
 ## Privacy and data handling
 
@@ -204,6 +268,27 @@ state, or return viewed content. Its standalone adapter performs only the
 explicit bounded path or standard-input read. Valid JSON values are displayed
 after control neutralization; malformed input diagnostics expose a safe reason
 and source location without echoing the malformed record.
+
+## Nested diagnostic scenarios
+
+1. **Provider exchange:** a Story exchange stores a complete JSON object in
+   `content`, whose `response_text` string stores another complete object. Both
+   strings expand recursively, their keys and values receive the ordinary JSON
+   roles, and the two plain-text cues plus `2 expanded` footer fact identify the
+   derived display.
+2. **Long response leaf:** one expanded response contains a short summary and a
+   long text leaf. The short value and all container structure remain intact;
+   only the long leaf receives its retained/full marker, and the footer reports
+   one truncated leaf with aggregate bytes. Width clipping or paging may still
+   limit what fits in the current frame.
+3. **Safety-bound skip:** a candidate would cross the layer, depth, node, or
+   cumulative decoded-byte limit. The user sees the exact skip reason and the
+   bounded original string. No partial keys or children from that candidate are
+   displayed.
+4. **Source and search immutability:** after viewing an expanded response, the
+   source bytes and parsed string types are unchanged. A search on `content`
+   still evaluates that original enumerated top-level string; derived child
+   fields do not become new search targets.
 
 ## End-to-end standalone scenario
 
@@ -245,13 +330,23 @@ This is an integration scenario, not behavior or schema built into this repo:
    `ViewerHost` event strings and passes the immutable bytes to `view_jsonl`.
    Story remains sole owner of raw mode, signals, geometry, input, output,
    application focus, and cleanup.
-5. The user confirms session/scope/agent context in the header, searches only
+5. A provider exchange whose `content` string is a complete JSON object is
+   displayed as derived structure; a complete encoded `response_text` object
+   inside it expands recursively. The literal expansion cues and footer counts
+   distinguish that view from the unchanged source string.
+6. The user confirms session/scope/agent context in the header, searches only
    Story-enumerated fields, sees the transient `i/N` result in the footer, and
-   uses `n`/`N` to wrap through hits. The user can go to a physical JSONL source
-   line, switch Simple/Verbose, inspect help, and use Escape to dismiss help,
-   then search, then status; an Escape with nothing transient closes.
-6. On `q`, EOF, or the final Escape, `jsonl-viewer` calls `close_view`. Story
+   uses `n`/`N` to wrap through hits. Search continues to inspect the original
+   enumerated top-level values, not the derived children, so existing query
+   semantics and results do not change. The user can go to a physical JSONL
+   source line, switch Simple/Verbose, inspect help, and use Escape to dismiss
+   help, then search, then status; an Escape with nothing transient closes.
+7. Long nested string leaves receive independent retained/full byte markers;
+   their parent objects, keys, siblings, and closing structure remain present
+   and pageable. If a safety bound rejects an expansion, the user sees the
+   reason and the bounded original string rather than a partial object.
+8. On `q`, EOF, or the final Escape, `jsonl-viewer` calls `close_view`. Story
    restores its prior `/exchanges` scope/agent selection or shell frame.
-7. Story owns the pickers, labels, snapshot location, and retention policy. No
+9. Story owns the pickers, labels, snapshot location, and retention policy. No
    request, response, picker choice, or viewer state is modified or persisted
    by the viewer package.
