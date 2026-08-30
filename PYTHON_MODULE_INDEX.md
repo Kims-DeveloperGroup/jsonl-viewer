@@ -137,10 +137,18 @@ unit imports Story or any third-party runtime package.
 - **State, resources, and side effects:** A `main` call opens its selected source
   only for a bounded binary read. On a supported interactive POSIX terminal its
   private context owns cbreak mode, alternate screen, cursor visibility, key
-  decoding, repaint, and exact restoration. Other hosts use an ordinary-line
-  fallback. `NO_COLOR` and `--no-color` disable SGR. Import alone performs no
-  filesystem or terminal operation; optional `termios`/`tty` imports select a
-  platform fallback.
+  decoding, repaint, and exact restoration. The host retains only the last
+  successfully flushed complete frame while the view is active. Search field
+  and query drafts remain local raw-terminal state: bare or unsupported Escape
+  cancels the draft, restores the hidden cursor, redraws that retained frame,
+  and resumes key reading without emitting an engine event; supported
+  navigation sequences are consumed without changing the draft or view.
+  Submitted searches use the existing event, while EOF, interrupt, primary
+  failure, close, and restoration preserve their established precedence and
+  discard all retained frame/draft state. Main-view Escape and the ordinary-line
+  fallback remain unchanged. `NO_COLOR` and `--no-color` disable SGR. Import
+  alone performs no filesystem or terminal operation; optional `termios`/`tty`
+  imports select a platform fallback.
 - **Primary verification/documentation:**
   `tests/test_standalone_and_packaging.py`, `README.md`, and the standalone
   scenario in `docs/design-system.md`.
