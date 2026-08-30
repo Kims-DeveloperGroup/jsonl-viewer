@@ -105,6 +105,17 @@ Standalone keys are `↑`/`↓` or `j`/`k`, Page Up/Page Down or `b`/Space, `g`,
 `/`, `n`, `N`, `m`, `h`/`?`, Escape, and `q`. In ordinary-line mode, use
 `g LINE` and `/ FIELD QUERY`.
 
+On a supported interactive terminal, `/` opens a local `Search field:` prompt
+and then a `Search query:` prompt. Escape at either prompt cancels only that
+unfinished search: its draft is discarded, the cursor is hidden again, and
+the exact last complete viewer frame is redrawn. No viewer event is emitted,
+so an existing search and its current `i/N` position remain unchanged. Arrow
+and Page key sequences entered at a prompt are consumed there without moving
+the viewer or changing the draft; an unsupported, incomplete, or overlong
+Escape sequence cancels the prompt and cannot leak trailing bytes into viewer
+commands. The ordinary-line `/ FIELD QUERY` and textual `esc` commands, and
+Escape from the main view, retain their existing behavior.
+
 ## Embed without transferring terminal ownership
 
 ```python
@@ -198,8 +209,9 @@ show every field in a valid record, and an enumerated field is a search limit,
 not a visibility or authorization rule. The embedding application is
 responsible for authorizing, selecting, retaining, and redacting snapshot
 data. The library performs no filesystem or network I/O, telemetry, or
-persistence; the standalone adapter performs only its explicit bounded file or
-standard-input read.
+persistence; standalone prompt drafts and retained frames exist only while the
+view is open. The standalone adapter performs only its explicit bounded file
+or standard-input read.
 
 ## Design and verification
 

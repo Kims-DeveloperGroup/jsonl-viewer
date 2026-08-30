@@ -41,6 +41,7 @@ class _TerminalHost:
         self._saved_attributes: list[Any] | None = None
         self._interactive = False
         self._closed = False
+        self._last_presented_frame: str | None = None
 
     def __enter__(self) -> _TerminalHost:
         if (
@@ -71,6 +72,7 @@ class _TerminalHost:
         self._restore_terminal()
 
     def _restore_terminal(self) -> None:
+        self._last_presented_frame = None
         if self._interactive and self._descriptor is not None:
             assert termios is not None
             assert self._saved_attributes is not None
@@ -105,6 +107,7 @@ class _TerminalHost:
         else:
             self._output.write(frame + "\n")
         self._output.flush()
+        self._last_presented_frame = frame
 
     def _prompt(self, label: str) -> str | None:
         if not self._interactive:
@@ -127,47 +130,163 @@ class _TerminalHost:
             tty.setcbreak(self._descriptor)
         return None if value == "" else value.rstrip("\r\n")
 
+    def _escape_event(self) -> str:
+        """Decode one main-view escape key or bounded terminal sequence."""
+
+        assert self._descriptor is not None
+        deadline = os.times().elapsed + 0.02
+        suffix = bytearray()
+        exceeded_recognition_bound = False
+        while True:
+            remaining = deadline - os.times().elapsed
+            if (
+                remaining <= 0
+                or not select.select(
+                    [self._descriptor],
+                    [],
+                    [],
+                    remaining,
+                )[0]
+            ):
+                return "cancel"
+            current = os.read(self._descriptor, 1)
+            if not current:
+                return "cancel"
+            if len(suffix) < 32:
+                suffix.extend(current)
+            else:
+                exceeded_recognition_bound = True
+            if len(suffix) == 1 and current in {b"[", b"O"}:
+                continue
+            if suffix[0] == ord("["):
+                if 0x40 <= current[0] <= 0x7E:
+                    break
+                if not (0x20 <= current[0] <= 0x3F):
+                    return "cancel"
+                continue
+            if suffix[0] == ord("O"):
+                if 0x40 <= current[0] <= 0x7E:
+                    break
+                return "cancel"
+            return "cancel"
+        if exceeded_recognition_bound:
+            return "cancel"
+        return {
+            b"[A": "up",
+            b"[B": "down",
+            b"[5~": "page_up",
+            b"[6~": "page_down",
+        }.get(bytes(suffix), "cancel")
+
+    def _redraw_last_frame(self) -> None:
+        """Restore the last complete engine frame after a local prompt cancel."""
+
+        frame = self._last_presented_frame
+        if frame is not None:
+            self.present(frame)
+
+    def _raw_prompt(self, label: str) -> tuple[str | None, bool]:
+        """Collect one local raw-terminal line, distinguishing Escape from EOF."""
+
+        assert self._descriptor is not None
+        encoding = self._input.encoding or "utf-8"
+        errors = self._input.errors or "strict"
+        value = bytearray()
+        self._output.write("\x1b[?25h\n" + label)
+        self._output.flush()
+        try:
+            while True:
+                current = os.read(self._descriptor, 1)
+                if not current:
+                    result: tuple[str | None, bool] = (None, False)
+                    break
+                if current == b"\x1b":
+                    if self._escape_event() == "cancel":
+                        result = (None, True)
+                        break
+                    continue
+                if current in {b"\r", b"\n"}:
+                    result = (bytes(value).decode(encoding, errors), False)
+                    break
+                if current == b"\x04":
+                    result = (
+                        None if not value else bytes(value).decode(encoding, errors),
+                        False,
+                    )
+                    break
+                if current == b"\x03":
+                    raise KeyboardInterrupt
+                if current in {b"\x08", b"\x7f"}:
+                    while value:
+                        value.pop()
+                        try:
+                            rendered = bytes(value).decode(encoding, errors)
+                        except UnicodeDecodeError:
+                            continue
+                        self._output.write("\r\x1b[2K" + label + rendered)
+                        self._output.flush()
+                        break
+                    continue
+                if current < b"\x20":
+                    continue
+                value.extend(current)
+                try:
+                    rendered = bytes(value).decode(encoding, errors)
+                except UnicodeDecodeError as exc:
+                    if exc.end == len(value) and exc.reason == "unexpected end of data":
+                        continue
+                    raise
+                self._output.write("\r\x1b[2K" + label + rendered)
+                self._output.flush()
+        except BaseException:
+            try:
+                self._output.write("\x1b[?25l")
+                self._output.flush()
+            except BaseException:
+                pass
+            raise
+        self._output.write("\x1b[?25l")
+        self._output.flush()
+        return result
+
     def _raw_event(self) -> str | None:
         assert self._descriptor is not None
-        value = os.read(self._descriptor, 1)
-        if not value:
-            return None
-        if value == b"\x1b":
-            if select.select([self._descriptor], [], [], 0.02)[0]:
-                suffix = os.read(self._descriptor, 2)
-                if suffix == b"[A":
-                    return "up"
-                if suffix == b"[B":
-                    return "down"
-                if suffix in {b"[5", b"[6"}:
-                    if select.select([self._descriptor], [], [], 0.02)[0]:
-                        os.read(self._descriptor, 1)
-                    return "page_up" if suffix == b"[5" else "page_down"
-            return "cancel"
-        mapping = {
-            b"q": "close",
-            b"j": "down",
-            b"k": "up",
-            b" ": "page_down",
-            b"b": "page_up",
-            b"n": "next_match",
-            b"N": "previous_match",
-            b"m": "toggle_mode",
-            b"h": "help",
-            b"?": "help",
-        }
-        if value in mapping:
-            return mapping[value]
-        if value == b"g":
-            line = self._prompt("Go to source line: ")
-            return None if line is None else "goto\t" + line
-        if value == b"/":
-            field = self._prompt("Search field: ")
-            if field is None:
+        while True:
+            value = os.read(self._descriptor, 1)
+            if not value:
                 return None
-            query = self._prompt("Search query: ")
-            return None if query is None else f"search\t{field}\t{query}"
-        return "unknown"
+            if value == b"\x1b":
+                return self._escape_event()
+            mapping = {
+                b"q": "close",
+                b"j": "down",
+                b"k": "up",
+                b" ": "page_down",
+                b"b": "page_up",
+                b"n": "next_match",
+                b"N": "previous_match",
+                b"m": "toggle_mode",
+                b"h": "help",
+                b"?": "help",
+            }
+            if value in mapping:
+                return mapping[value]
+            if value == b"g":
+                line = self._prompt("Go to source line: ")
+                return None if line is None else "goto\t" + line
+            if value == b"/":
+                field, cancelled = self._raw_prompt("Search field: ")
+                if cancelled:
+                    self._redraw_last_frame()
+                    continue
+                if field is None:
+                    return None
+                query, cancelled = self._raw_prompt("Search query: ")
+                if cancelled:
+                    self._redraw_last_frame()
+                    continue
+                return None if query is None else f"search\t{field}\t{query}"
+            return "unknown"
 
     def _line_event(self) -> str | None:
         self._output.write("viewer> ")
@@ -209,6 +328,7 @@ class _TerminalHost:
         if self._closed:
             return
         self._closed = True
+        self._last_presented_frame = None
         if self._interactive:
             self._output.write("\x1b[H\x1b[2J")
             self._output.flush()

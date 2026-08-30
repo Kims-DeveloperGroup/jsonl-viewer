@@ -181,9 +181,29 @@ clipped`; clipping never changes the snapshot.
   is never echoed.
 - **Help:** replaces the body, keeps the header/footer, and states that commands
   never edit, replay, or retry.
+- **Standalone search prompt:** on a supported interactive terminal, `/`
+  temporarily appends `Search field:` and then `Search query:` below the last
+  complete frame and shows the cursor for local text entry. Escape at either
+  stage discards the unfinished draft, hides the cursor, redraws that exact
+  frame, and resumes normal viewer input. It emits no engine event, so any
+  active search result and current `i/N` position remain unchanged.
 - **Close:** once a valid `view_jsonl` call begins, it calls
   `host.close_view()` exactly once in `finally`, including after a host failure.
-  It retains no frame, cursor, search, help, or navigation state.
+  It retains no frame, prompt draft, cursor, search, help, or navigation state.
+
+The prompt cancellation transition is intentionally local to the standalone
+terminal owner:
+
+```text
+last successfully presented frame
+  → cursor shown + Search field: or Search query: + transient draft
+  → Escape
+  → cursor hidden + exact same frame + normal viewer input
+```
+
+The middle state never changes the body or source snapshot. The draft is
+discarded on cancel; all frame and search-result/index state remains call-local
+and is neither persisted nor returned.
 
 ## Keyboard and focus behavior
 
@@ -191,6 +211,16 @@ The package consumes host events, not terminal keys. The standalone adapter
 maps arrows or `j`/`k`, Page Up/Page Down or `b`/Space, `g`, `/`, `n`, `N`,
 `m`, `h`/`?`, Escape, and `q`. An embedding host may use different bindings
 while preserving the closed event vocabulary.
+
+In the standalone adapter's interactive search prompts, a bare Escape cancels
+the unfinished prompt locally and redraws the last complete frame without
+producing an event from that closed vocabulary. Recognized arrow and Page key
+sequences are consumed locally without changing either the prompt draft or the
+viewer. Unsupported, incomplete, and overlong Escape sequences cancel the
+prompt under a fixed bound; their suffix bytes cannot become viewer commands.
+This prompt-specific behavior does not change main-view Escape or the
+ordinary-line fallback: textual `esc` still produces `cancel`, and
+`/ FIELD QUERY` still submits a search directly.
 
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
@@ -204,10 +234,14 @@ while preserving the closed event vocabulary.
   to dismiss it closes.
 - `close` or EOF: close immediately.
 
-There is no editable focus, cursor inside JSON, selection clipboard, command
-execution, mouse link, or provider action. The host owns application focus and
-restores the surrounding view from `close_view()`; the standalone adapter owns
-and restores its alternate-screen, cursor visibility, and terminal mode.
+There is no editable body focus, cursor inside JSON, selection clipboard,
+command execution, mouse link, or provider action. The standalone search
+prompt accepts only a transient local draft; it never edits JSON or the source
+snapshot. The host owns application focus and restores the surrounding view
+from `close_view()`; the standalone adapter owns and restores its
+alternate-screen, cursor visibility, and terminal mode. Showing the cursor
+during prompt text entry and hiding it before the exact-frame redraw gives a
+non-color focus cue without weakening the viewer's read-only contract.
 
 ## Nested JSON, truncation, and control neutralization
 
@@ -300,12 +334,20 @@ and source location without echoing the malformed record.
 2. The standalone adapter requests at most one byte beyond the fixed snapshot
    bound so it can detect overflow before taking terminal ownership; the engine
    first shows Loading, then Simple.
-3. The user presses `/`, enters an enumerated field and query, and sees
-   `1/N`; `n` and `N` wrap through results.
-4. `g` moves to a source line, `m` switches mode, Page Up/Page Down inspect a
-   large record, Escape cancels transient help/search/status, and `q` closes.
-5. The adapter restores its terminal. The file bytes and viewer state are
-   unchanged.
+3. The user presses `/`; the adapter shows the cursor and asks for an
+   enumerated field, then a query. Submitting both produces the existing search
+   event and `1/N`; `n` and `N` wrap through results.
+4. During either prompt, Escape discards the draft, hides the cursor, and
+   redraws the exact prior frame without changing an existing result or
+   position. Arrow/Page sequences at a prompt are consumed locally rather than
+   navigating the viewer; malformed or incomplete Escape sequences cancel and
+   cannot leak into later commands.
+5. `g` moves to a source line, `m` switches mode, Page Up/Page Down inspect a
+   large record, main-view Escape cancels transient help/search/status, and `q`
+   closes. The ordinary-line fallback continues to accept `/ FIELD QUERY` and
+   textual `esc` without using the interactive prompts.
+6. The adapter restores its terminal. The file bytes remain unchanged; frame,
+   prompt-draft, and viewer state are discarded.
 
 ## End-to-end Story-hosted `/exchanges` scenario
 
