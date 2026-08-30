@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 import unicodedata
 import unittest
+from unittest import mock
 
+import jsonl_viewer._render as render_module
 from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer._input import (
     MAX_RECORD_BYTES,
@@ -14,8 +18,10 @@ from jsonl_viewer._input import (
     MAX_NESTING_DEPTH,
     MAX_SOURCE_BYTES,
     MAX_VALUE_NODES,
+    parse_jsonl,
 )
-from jsonl_viewer._render import strip_ansi
+from jsonl_viewer._model import ViewMode
+from jsonl_viewer._render import _format_record, record_line_count, strip_ansi
 
 from tests.support import FakeHost
 
@@ -101,6 +107,39 @@ class RenderTests(unittest.TestCase):
             + b"\n"
         )
 
+    def _content_source(self, content: str, **extra: object) -> bytes:
+        record = {
+            "timestamp": "2026-08-29T09:00:00Z",
+            "request_type": "response",
+            "content": content,
+            **extra,
+        }
+        return (
+            json.dumps(
+                record,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            + b"\n"
+        )
+
+    def _projection(
+        self,
+        content: str,
+        *,
+        mode: ViewMode = ViewMode.SIMPLE,
+    ) -> tuple[str, object]:
+        snapshot = parse_jsonl(self._content_source(content))
+        lines, facts = _format_record(
+            snapshot.records[0],
+            ViewerSpec("s", "c", "a", ("content",)),
+            mode,
+        )
+        logical = "\n".join(
+            "".join(segment.text for segment in line.segments) for line in lines
+        )
+        return logical, facts
+
     def test_control_characters_are_visible_text_not_terminal_controls(self) -> None:
         host = FakeHost(("toggle_mode", "close"), size=(120, 24))
         view_jsonl(self.source, self.spec, host)
@@ -184,6 +223,314 @@ class RenderTests(unittest.TestCase):
         self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[35m7"))
         self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[33mtrue"))
         self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[33mnull"))
+
+    def test_story_like_nested_json_is_structured_and_semantically_colored(
+        self,
+    ) -> None:
+        inner = {
+            "path": 'C:\\tmp\\"quoted"',
+            "message": "line1\nline2\x1b[2J\u202e",
+            "items": [7, True, None],
+        }
+        outer = {
+            "kind": "provider_response",
+            "response_text": json.dumps(
+                inner,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        source = self._content_source(
+            json.dumps(outer, ensure_ascii=False, separators=(",", ":"))
+        )
+        spec = ViewerSpec("s", "c", "a", ("content",))
+
+        plain = FakeHost(("close",), size=(240, 30), color=False)
+        ansi = FakeHost(("close",), size=(240, 30), color=True)
+        view_jsonl(source, spec, plain)
+        view_jsonl(source, spec, ansi)
+        frame = plain.frames[-1]
+        colored = ansi.frames[-1]
+
+        self.assertIn('"content": [expanded JSON string ×1] {', frame)
+        self.assertIn('"response_text": [expanded JSON string ×1] {', frame)
+        self.assertIn('"path": ' + json.dumps(inner["path"]), frame)
+        self.assertNotIn(r"\"response_text\"", frame)
+        self.assertNotIn("\x1b", frame)
+        self.assertIn(r"line1\nline2\u001b[2J\u202e", frame)
+        self.assertIn("JSON display 2 expanded, 0 skipped, 0 truncated", frame)
+        self.assertEqual(strip_ansi(colored), frame)
+        self.assertRegex(colored, re.compile(r"\x1b\[34m.*response_text"))
+        self.assertRegex(colored, re.compile(r"\x1b\[32m.*provider_response"))
+        self.assertRegex(colored, re.compile(r"\x1b\[35m7"))
+        self.assertRegex(colored, re.compile(r"\x1b\[33mtrue"))
+        self.assertRegex(colored, re.compile(r"\x1b\[33mnull"))
+        self.assertIn("\x1b[2;90m[expanded JSON string ×1] \x1b[0m", colored)
+
+    def test_only_complete_strict_object_or_array_strings_expand(self) -> None:
+        accepted = (
+            json.dumps({"value": 1}),
+            json.dumps([1, 2]),
+            "{}",
+            "[]",
+            ' \t\n {"value":1} \r ',
+        )
+        for content in accepted:
+            with self.subTest(accepted=content):
+                logical, facts = self._projection(content)
+                self.assertIn("[expanded JSON string ×1]", logical)
+                self.assertEqual(facts.expanded_strings, 1)
+                self.assertEqual(facts.skipped_expansions, 0)
+
+        rejected = (
+            'prefix {"value":1}',
+            '{"value":1} trailing',
+            json.dumps("text"),
+            "7",
+            "true",
+            "null",
+            '{"value":}',
+            '{"value":1,"value":2}',
+            '{"value":NaN}',
+            '{"value":Infinity}',
+            '{"value":-Infinity}',
+            '{"value":1e999}',
+        )
+        for content in rejected:
+            with self.subTest(rejected=content):
+                logical, facts = self._projection(content)
+                self.assertNotIn("[expanded JSON string", logical)
+                self.assertNotIn("[JSON expansion skipped", logical)
+                self.assertEqual(facts.expanded_strings, 0)
+                self.assertEqual(facts.skipped_expansions, 0)
+
+    def test_invalid_encoded_child_stays_text_while_valid_siblings_expand(
+        self,
+    ) -> None:
+        content = json.dumps(
+            {
+                "valid": json.dumps({"ok": [1]}),
+                "invalid": '{"value":NaN}',
+            },
+            separators=(",", ":"),
+        )
+        logical, facts = self._projection(content)
+        self.assertIn('"valid": [expanded JSON string ×1] {', logical)
+        self.assertIn('"invalid": "{\\"value\\":NaN}"', logical)
+        self.assertEqual(facts.expanded_strings, 2)
+        self.assertEqual(facts.skipped_expansions, 0)
+
+    def test_projection_preserves_source_bytes_and_original_value_types(self) -> None:
+        content = json.dumps(
+            {"response_text": json.dumps({"answer": [1, 2, 3]})},
+            separators=(",", ":"),
+        )
+        source = self._content_source(content)
+        before_hash = hashlib.sha256(source).digest()
+        snapshot = parse_jsonl(source)
+        before_value = copy.deepcopy(snapshot.records[0].value)
+        self.assertIsInstance(snapshot.records[0].value, dict)
+        assert isinstance(snapshot.records[0].value, dict)
+        self.assertIsInstance(snapshot.records[0].value["content"], str)
+
+        _format_record(
+            snapshot.records[0],
+            ViewerSpec("s", "c", "a", ("content",)),
+            ViewMode.SIMPLE,
+        )
+
+        self.assertEqual(snapshot.records[0].value, before_value)
+        self.assertIsInstance(snapshot.records[0].value["content"], str)
+        self.assertEqual(hashlib.sha256(source).digest(), before_hash)
+
+    def test_encoding_layer_and_projected_depth_boundaries_are_exact(self) -> None:
+        encoded = json.dumps({"leaf": "end"}, separators=(",", ":"))
+        for _ in range(render_module.MAX_EXPANSION_LAYERS - 1):
+            encoded = json.dumps(encoded, separators=(",", ":"))
+        logical, facts = self._projection(encoded)
+        self.assertIn("[expanded JSON string ×16]", logical)
+        self.assertIn('"leaf": "end"', logical)
+        self.assertEqual(facts.expanded_strings, 1)
+        self.assertEqual(facts.skipped_expansions, 0)
+
+        over_layer = json.dumps(encoded, separators=(",", ":"))
+        logical, facts = self._projection(over_layer)
+        self.assertIn("[JSON expansion skipped: encoding layer limit]", logical)
+        self.assertNotIn('\n    "leaf": "end"', logical)
+        self.assertEqual(facts.expanded_strings, 0)
+        self.assertEqual(facts.skipped_expansions, 1)
+
+        relative_depth_63: object = 0
+        for _ in range(62):
+            relative_depth_63 = [relative_depth_63]
+        logical, facts = self._projection(json.dumps(relative_depth_63))
+        self.assertIn("[expanded JSON string ×1]", logical)
+        self.assertEqual(facts.skipped_expansions, 0)
+
+        relative_depth_64: object = [relative_depth_63]
+        logical, facts = self._projection(json.dumps(relative_depth_64))
+        self.assertIn("[JSON expansion skipped: display depth limit]", logical)
+        self.assertEqual(facts.expanded_strings, 0)
+        self.assertEqual(facts.skipped_expansions, 1)
+
+    def test_transactional_node_and_decoded_byte_limits_use_record_budget(
+        self,
+    ) -> None:
+        self.assertEqual(render_module.MAX_EXPANSION_LAYERS, 16)
+        self.assertEqual(render_module.MAX_PROJECTED_DISPLAY_DEPTH, 64)
+        self.assertEqual(render_module.MAX_DERIVED_VALUE_NODES, 200_000)
+        self.assertEqual(
+            render_module.MAX_CUMULATIVE_DECODED_UTF8_BYTES,
+            16_777_216,
+        )
+
+        first = json.dumps({"ok": 1}, separators=(",", ":"))
+        second = json.dumps({"secret": 2}, separators=(",", ":"))
+        outer = json.dumps(
+            {"first": first, "second": second},
+            separators=(",", ":"),
+        )
+        with mock.patch.object(render_module, "MAX_DERIVED_VALUE_NODES", 5):
+            logical, facts = self._projection(outer)
+        self.assertIn('"first": [expanded JSON string ×1] {', logical)
+        self.assertIn('"ok": 1', logical)
+        self.assertIn(
+            '"second": [JSON expansion skipped: derived node limit]',
+            logical,
+        )
+        self.assertNotIn('\n      "secret": 2', logical)
+        self.assertEqual(facts.expanded_strings, 2)
+        self.assertEqual(facts.skipped_expansions, 1)
+
+        first_with_preview = json.dumps(
+            {"long": "x" * 4_097},
+            separators=(",", ":"),
+        )
+        aggregate_outer = json.dumps(
+            {"first": first_with_preview, "second": second},
+            separators=(",", ":"),
+        )
+        host = FakeHost(("close",), size=(240, 16))
+        with mock.patch.object(render_module, "MAX_DERIVED_VALUE_NODES", 5):
+            view_jsonl(
+                self._content_source(aggregate_outer),
+                ViewerSpec("s", "c", "a", ("content",)),
+                host,
+            )
+        self.assertIn(
+            "JSON display 2 expanded, 1 skipped, 1 truncated "
+            "(4096/4097 UTF-8 bytes retained)",
+            host.frames[-1],
+        )
+
+        exact_byte_budget = len(outer.encode("utf-8")) + len(first.encode("utf-8"))
+        with mock.patch.object(
+            render_module,
+            "MAX_CUMULATIVE_DECODED_UTF8_BYTES",
+            exact_byte_budget,
+        ):
+            logical, facts = self._projection(outer)
+        self.assertIn('"first": [expanded JSON string ×1] {', logical)
+        self.assertIn(
+            '"second": [JSON expansion skipped: decoded byte limit]',
+            logical,
+        )
+        self.assertNotIn('\n      "secret": 2', logical)
+        self.assertEqual(facts.expanded_strings, 2)
+        self.assertEqual(facts.skipped_expansions, 1)
+
+    def test_encoded_container_expands_before_preview_and_preserves_structure(
+        self,
+    ) -> None:
+        value = {f"field_{index:04}": "v" for index in range(600)}
+        value["k" * 5_000] = "tail"
+        encoded = json.dumps(value, separators=(",", ":"))
+        self.assertGreater(len(encoded.encode("utf-8")), 4_096)
+
+        logical, facts = self._projection(encoded)
+        snapshot = parse_jsonl(self._content_source(encoded))
+        line_count = record_line_count(
+            snapshot.records[0],
+            ViewerSpec("s", "c", "a", ("content",)),
+            ViewMode.SIMPLE,
+        )
+
+        self.assertIn("[expanded JSON string ×1] {", logical)
+        self.assertIn('"field_0599": "v"', logical)
+        self.assertIn(json.dumps("k" * 5_000) + ': "tail"', logical)
+        self.assertTrue(logical.endswith("}"))
+        self.assertNotIn("[truncated", logical)
+        self.assertEqual(line_count, len(logical.splitlines()))
+        self.assertEqual(facts.expanded_strings, 1)
+        self.assertEqual(facts.truncated_leaves, 0)
+
+    def test_nested_leaf_previews_are_independent_visible_and_utf8_complete(
+        self,
+    ) -> None:
+        encoded = json.dumps(
+            {
+                "ascii": "x" * 4_097,
+                "korean": "한" * 1_366,
+                "emoji": "🙂" * 1_025,
+                "number": 7,
+                "flag": True,
+                "nothing": None,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        logical, facts = self._projection(encoded)
+        self.assertIn("[truncated 4096/4097 UTF-8 bytes]", logical)
+        self.assertIn("[truncated 4095/4098 UTF-8 bytes]", logical)
+        self.assertIn("[truncated 4096/4100 UTF-8 bytes]", logical)
+        self.assertIn('"number": 7', logical)
+        self.assertIn('"flag": true', logical)
+        self.assertIn('"nothing": null', logical)
+        self.assertEqual(facts.expanded_strings, 1)
+        self.assertEqual(facts.truncated_leaves, 3)
+        self.assertEqual(facts.truncated_retained_utf8_bytes, 12_287)
+        self.assertEqual(facts.truncated_full_utf8_bytes, 12_295)
+
+        host = FakeHost(("close",), size=(240, 20))
+        view_jsonl(
+            self._content_source(encoded),
+            ViewerSpec("s", "c", "a", ("content",)),
+            host,
+        )
+        frame = host.frames[-1]
+        self.assertIn('[truncated 4096/4097 UTF-8 bytes] "x', frame)
+        self.assertIn(
+            "JSON display 1 expanded, 0 skipped, 3 truncated "
+            "(12287/12295 UTF-8 bytes retained)",
+            frame,
+        )
+
+    def test_verbose_leaf_preview_and_mode_footer_facts_use_distinct_limit(
+        self,
+    ) -> None:
+        encoded = json.dumps(
+            {"large": "x" * 65_537},
+            separators=(",", ":"),
+        )
+        logical, facts = self._projection(encoded, mode=ViewMode.VERBOSE)
+        self.assertIn("[truncated 65536/65537 UTF-8 bytes]", logical)
+        self.assertEqual(facts.truncated_leaves, 1)
+
+        mode_value = json.dumps(
+            {"large": "x" * 5_000},
+            separators=(",", ":"),
+        )
+        host = FakeHost(("toggle_mode", "close"), size=(240, 12))
+        view_jsonl(
+            self._content_source(mode_value),
+            ViewerSpec("s", "c", "a", ("content",)),
+            host,
+        )
+        self.assertIn("JSON display 1 expanded, 0 skipped, 1 truncated", host.frames[1])
+        self.assertIn("READ ONLY • VERBOSE", host.frames[-1])
+        self.assertIn(
+            "JSON display 1 expanded, 0 skipped, 0 truncated", host.frames[-1]
+        )
 
     def test_simple_content_preview_is_bounded_at_complete_utf8_boundary(self) -> None:
         content = "한" * 2_000

@@ -33,6 +33,48 @@ def _ordinary_source() -> bytes:
     )
 
 
+def _nested_json_source() -> bytes:
+    response = {
+        "status": "provider_error",
+        "details": ["correlation token mismatch", {"retryable": False}],
+    }
+    content = {
+        "action": "provider_response",
+        "response_text": json.dumps(response, separators=(",", ":")),
+    }
+    return (
+        json.dumps(
+            {
+                "timestamp": "2026-08-29T09:00:00Z",
+                "request_type": "response",
+                "content": json.dumps(content, separators=(",", ":")),
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
+def _truncated_nested_leaf_source() -> bytes:
+    content = json.dumps(
+        {"short": "visible", "long": "한" * 2_000},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return (
+        json.dumps(
+            {
+                "timestamp": "2026-08-29T09:00:00Z",
+                "request_type": "response",
+                "content": content,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+
+
 def _frame(
     source: bytes,
     events: tuple[str | None, ...],
@@ -69,7 +111,17 @@ class DocumentedSampleTests(unittest.TestCase):
                 ("search\trequest_type\tr", "close"),
                 (88, 20),
             ),
+            "nested-expanded-json.txt": (
+                _nested_json_source(),
+                ("close",),
+                (100, 24),
+            ),
             "truncated-content.txt": (long_source, ("close",), (72, 10)),
+            "truncated-nested-leaves.txt": (
+                _truncated_nested_leaf_source(),
+                ("close",),
+                (180, 12),
+            ),
             "malformed-input.txt": (
                 b'{"timestamp":"2026",}\n',
                 ("close",),
