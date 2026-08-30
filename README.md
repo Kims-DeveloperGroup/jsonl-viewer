@@ -9,7 +9,7 @@ The package is Python 3.11+, MIT licensed, and has no runtime dependencies. It
 has no knowledge of Story, agent runtimes, storage layouts, provider schemas,
 or terminal-driver implementations.
 
-## What 0.1.0 provides
+## What 0.1.1 provides
 
 - a three-name public API: `ViewerSpec`, `ViewerHost`, and `view_jsonl`;
 - Simple and Verbose views, with configurable date/time, request-type, and

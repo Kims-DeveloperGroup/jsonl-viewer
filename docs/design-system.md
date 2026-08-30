@@ -1,7 +1,7 @@
 # JSONL Viewer Terminal Design System
 
 This document is the repository-owned visual and interaction contract for
-`jsonl-viewer` 0.1.0. The viewer is an immutable diagnostic surface: source
+`jsonl-viewer` 0.1.1. The viewer is an immutable diagnostic surface: source
 bytes are never edited, commands never replay or retry work, and every bit of
 view state is discarded on close.
 
