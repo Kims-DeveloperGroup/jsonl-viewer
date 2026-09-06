@@ -51,6 +51,17 @@ class SearchState:
 
 
 @dataclass(frozen=True, slots=True)
+class PromptState:
+    """An uncommitted search-field, search-query, or goto edit."""
+
+    kind: str
+    buffer: str = ""
+    cursor: int = 0
+    field: str = ""
+    error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ViewState:
     selected_index: int = 0
     record_line_offset: int = 0
@@ -59,6 +70,7 @@ class ViewState:
     help_visible: bool = False
     message: str | None = None
     message_is_error: bool = False
+    prompt: PromptState | None = None
 
 
 @dataclass(frozen=True, slots=True)

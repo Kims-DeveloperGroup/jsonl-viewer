@@ -409,6 +409,249 @@ class EngineTests(unittest.TestCase):
             view_jsonl(bytearray(b"{}\n"), self.spec, host)  # type: ignore[arg-type]
         self.assertEqual(host.close_calls, 0)
 
+class KeyInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from jsonl_viewer._input import parse_jsonl
+
+        self.spec = ViewerSpec("s", "c", "a", ("content", "latency_ms"), input_protocol="keys")
+        self.source = _source()
+        self.snapshot = parse_jsonl(self.source)
+
+    def step(self, state, event):
+        from jsonl_viewer.engine import _transition
+
+        return _transition(state, event, self.snapshot, self.spec, page_size=5, selected_line_count=20)
+
+    def query_state(self):
+        from jsonl_viewer._model import ViewState
+
+        state = ViewState()
+        for event in ("text\t/", "text\tcontent", "key\tenter"):
+            state, closed = self.step(state, event)
+            self.assertFalse(closed)
+        return state
+
+    def test_input_protocol_defaults_and_exact_host_surface(self) -> None:
+        import inspect
+
+        legacy = ViewerSpec("s", "c", "a", (), "t", "r", "v", "title", "Scope", "Subject")
+        self.assertEqual(legacy.input_protocol, "semantic")
+        self.assertEqual(list(inspect.signature(ViewerSpec).parameters)[-1], "input_protocol")
+        self.assertEqual(inspect.signature(ViewerSpec).parameters["input_protocol"].default, "semantic")
+        for invalid in (None, True, 1, "", "KEYS", "other"):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "input_protocol"):
+                ViewerSpec("s", "c", "a", (), input_protocol=invalid)
+        methods = {name: member for name, member in vars(jsonl_viewer.ViewerHost).items() if not name.startswith("_")}
+        self.assertEqual(set(methods), {"terminal_size", "color_enabled", "present", "read_event", "close_view"})
+        for name, member in methods.items():
+            self.assertEqual(tuple(inspect.signature(member).parameters), ("self", "frame") if name == "present" else ("self",))
+
+    def test_prompt_editing_controls_never_enter_committed_query(self) -> None:
+        cases = (
+            ("wrong", ("ctrl_u",), "", 0),
+            ("abcdef", ("left", "left", "ctrl_u"), "ef", 0),
+            ("abcdef", ("home", "right", "ctrl_k"), "a", 1),
+            ("alpha beta  ", ("ctrl_w",), "alpha ", 6),
+            ("abc", ("left", "backspace"), "ac", 1),
+            ("abc", ("home", "delete"), "bc", 0),
+            ("abc", ("ctrl_a", "right", "ctrl_e", "left"), "abc", 2),
+            ("abc", ("home", "left", "backspace", "end", "right", "delete"), "abc", 3),
+            ("개요😀", ("left", "backspace"), "개😀", 1),
+        )
+        for text, keys, expected, cursor in cases:
+            with self.subTest(text=text, keys=keys):
+                state, _ = self.step(self.query_state(), "text\t" + text)
+                for key in keys:
+                    state, closed = self.step(state, "key\t" + key)
+                    self.assertFalse(closed)
+                self.assertEqual((state.prompt.buffer, state.prompt.cursor), (expected, cursor))
+                state, _ = self.step(state, "text\tZ")
+                state, _ = self.step(state, "key\tenter")
+                self.assertEqual(state.search.query, (expected[:cursor] + "Z" + expected[cursor:]).strip())
+                self.assertNotIn("\x15", state.search.query)
+                self.assertNotIn("U0015", state.search.query)
+
+    def test_ctrl_u_unicode_regression_finds_seven_records(self) -> None:
+        source = b"".join((json.dumps({"content": "개요 " + str(i)}, ensure_ascii=False) + "\n").encode() for i in range(7))
+        events = ("text\t/", "text\tcontent", "key\tenter", "text\twrong", "key\tctrl_u", "text\t개", "text\t요", "key\tenter", "close")
+        host = FakeHost(events)
+        view_jsonl(source, self.spec, host)
+        self.assertIn("Search content='개요' • 1/7", host.frames[-1])
+        self.assertNotIn("U0015", "\n".join(host.frames))
+        self.assertNotIn("\x15", "\n".join(host.frames))
+        self.assertEqual(host.close_calls, 1)
+
+    def test_unicode_paste_and_navigation_letters_are_literal_in_drafts(self) -> None:
+        text = "qjkb nNmh?cg/ 개요😀e\u0301"
+        for chunks in ((text,), tuple(text)):
+            with self.subTest(chunks=len(chunks)):
+                state = self.query_state()
+                for chunk in chunks:
+                    state, closed = self.step(state, "text\t" + chunk)
+                    self.assertFalse(closed)
+                self.assertEqual(state.prompt.buffer, text)
+                self.assertEqual(state.selected_index, 0)
+                state, _ = self.step(state, "key\tenter")
+                self.assertEqual(state.search.query, text)
+        from jsonl_viewer._model import ViewState
+        state, _ = self.step(ViewState(), "text\t/content")
+        self.assertEqual(state.prompt.buffer, "content")
+
+    def test_escape_each_draft_preserves_every_committed_state_field(self) -> None:
+        from jsonl_viewer._model import SearchState, ViewMode, ViewState
+
+        active = ViewState(selected_index=1, record_line_offset=7, mode=ViewMode.VERBOSE,
+                           search=SearchState("content", "alpha", (0, 1), 1),
+                           message="prior error", message_is_error=True)
+        for start in (("text\t/",), ("text\t/", "text\tcontent", "key\tenter"), ("text\tg",)):
+            for escape in ("key\tescape", "key\tunknown_escape", "cancel"):
+                with self.subTest(start=start, escape=escape):
+                    state = active
+                    for event in (*start, "text\twrong", "text\tdraft"):
+                        state, closed = self.step(state, event)
+                        self.assertFalse(closed)
+                    self.assertIsNotNone(state.prompt)
+                    restored, closed = self.step(state, escape)
+                    self.assertFalse(closed)
+                    self.assertEqual(restored, active)
+                    advanced, _ = self.step(restored, "text\tn")
+                    self.assertEqual(advanced.search.current_index, 0)
+        self.assertEqual(self.source, _source())
+
+    def test_legacy_semantic_and_line_commands_have_matching_actions(self) -> None:
+        commands = ((" j ", "down"), ("down", "down"), ("k", "up"), ("up", "up"),
+                    ("pgdn", "page_down"), ("pgup", "page_up"), ("g 2", "goto\t2"),
+                    ("/ content alpha", "search\tcontent\talpha"), ("n", "next_match"),
+                    ("N", "previous_match"), ("m", "toggle_mode"), ("h", "help"),
+                    ("?", "help"), ("esc", "cancel"), ("c", "clear_search"),
+                    ("clear", "clear_search"), ("q", "close"), ("quit", "close"),
+                    ("", "unknown"), ("/content alpha", "unknown"), ("g x", "goto\tx"),
+                    ("/ content alpha\tbeta", "unknown"))
+        from jsonl_viewer._model import ViewState
+        for command, semantic in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.step(ViewState(), "line\t" + command), self.step(ViewState(), semantic))
+        events = tuple(value for _, value in commands)
+        keyed, legacy = FakeHost(events), FakeHost(events)
+        view_jsonl(self.source, self.spec, keyed)
+        view_jsonl(self.source, dataclasses.replace(self.spec, input_protocol="semantic"), legacy)
+        self.assertEqual(keyed.frames, legacy.frames)
+        host = FakeHost(("line\tq", "text\tq", "key\teof", "close"))
+        view_jsonl(self.source, dataclasses.replace(self.spec, input_protocol="semantic"), host)
+        self.assertEqual(len(host.frames), 5)
+
+    def test_prompt_limits_malformed_transport_and_controls_are_transactional(self) -> None:
+        from jsonl_viewer._model import ViewState
+        for begin, limit in [(("text\t/",), 128), (("text\tg",), 128), (("text\t/", "text\tcontent", "key\tenter"), 1024)]:
+            state = ViewState()
+            for event in begin:
+                state, _ = self.step(state, event)
+            state, _ = self.step(state, "text\t" + "x" * limit)
+            self.assertEqual(len(state.prompt.buffer), limit)
+            failed, closed = self.step(state, "text\ty")
+            self.assertFalse(closed)
+            self.assertEqual(failed.prompt.buffer, state.prompt.buffer)
+            self.assertIsNotNone(failed.prompt.error)
+            repaired, _ = self.step(failed, "key\tctrl_u")
+            self.assertEqual(repaired.prompt.buffer, "")
+        initial = self.query_state()
+        for event in (17, b"q", "text\t" + "x" * 8193, "text\t\x15", "text\t\t", "text\t\n", "text\t\x1b", "text\t\u202e", "text\t\ud800", "line\tq\n"):
+            with self.subTest(event=repr(event)[:40]):
+                state, closed = self.step(initial, event)
+                self.assertFalse(closed)
+                self.assertEqual(state.prompt.buffer, "")
+                self.assertIsNotNone(state.prompt.error)
+        for event in ("key\tunknown", "key\tclose", "key\tup", "key\tbogus", "search\tcontent\talpha"):
+            state, closed = self.step(initial, event)
+            self.assertFalse(closed)
+            self.assertEqual(state, initial)
+        # Payload limits exclude the five-character line envelope.
+        accepted, closed = self.step(ViewState(), "line\t" + " " * 8191 + "q")
+        self.assertTrue(closed)
+        rejected, closed = self.step(ViewState(), "line\t" + " " * 8192 + "q")
+        self.assertFalse(closed)
+        self.assertTrue(rejected.message_is_error)
+
+    def test_prompt_eof_interrupt_and_failure_close_once_without_submitting(self) -> None:
+        for begin in (("text\t/",), ("text\t/", "text\tcontent", "key\tenter"), ("text\tg",)):
+            for ending in (None, "key\teof", "key\tinterrupt"):
+                with self.subTest(begin=begin, ending=ending):
+                    host = FakeHost((*begin, "text\tdraft", ending))
+                    view_jsonl(self.source, self.spec, host)
+                    self.assertEqual(host.close_calls, 1)
+                    self.assertNotIn("Search content=", host.frames[-1])
+        class FailingRead(FakeHost):
+            def read_event(self):
+                event = super().read_event()
+                if event == "fail":
+                    raise OSError("read failed")
+                return event
+        host = FailingRead(("text\t/", "fail"))
+        with self.assertRaisesRegex(OSError, "read failed"):
+            view_jsonl(self.source, self.spec, host)
+        self.assertEqual(host.close_calls, 1)
+        from jsonl_viewer._model import ViewState
+        state, _ = self.step(ViewState(), "search\tcontent\talpha")
+        cancelled, closed = self.step(state, "key\tinterrupt")
+        self.assertFalse(closed)
+        self.assertIsNone(cancelled.search)
+
+    def test_goto_and_search_validation_allow_correction_before_commit(self) -> None:
+        from jsonl_viewer._model import ViewState
+
+        state, _ = self.step(ViewState(), "text\tg")
+        for event in ("text\twrong", "key\tenter"):
+            state, closed = self.step(state, event)
+            self.assertFalse(closed)
+        self.assertEqual(state.selected_index, 0)
+        self.assertIsNotNone(state.prompt.error)
+        for event in ("key\tctrl_u", "text\t2", "key\tenter"):
+            state, closed = self.step(state, event)
+            self.assertFalse(closed)
+        self.assertIsNone(state.prompt)
+        self.assertEqual(state.selected_index, 1)
+        for event in ("text\t/", "text\tnot_allowed", "key\tenter"):
+            state, _ = self.step(state, event)
+        self.assertIsNone(state.search)
+        self.assertIn("Allowed fields", state.prompt.error)
+        for event in ("key\tctrl_u", "text\tcontent", "key\tenter", "key\tenter"):
+            state, _ = self.step(state, event)
+        self.assertIn("must not be empty", state.prompt.error)
+        self.assertEqual(state.selected_index, 1)
+        for event in ("text\talpha", "key\tenter"):
+            state, _ = self.step(state, event)
+        self.assertIsNone(state.prompt)
+        self.assertEqual(state.search.matches, (0, 1))
+        self.assertEqual(state.selected_index, 0)
+
+    def test_help_empty_and_malformed_sources_cannot_open_prompts(self) -> None:
+        for source, events in ((b"", ("text\t/", "text\tg", "close")),
+                               (b"{bad}\n", ("text\t/", "text\tg", "line\t/ content alpha", "close")),
+                               (self.source, ("text\th", "text\t/", "text\tg", "close"))):
+            host = FakeHost(events)
+            view_jsonl(source, self.spec, host)
+            self.assertEqual(host.close_calls, 1)
+            self.assertFalse(any("Search field: " in frame or "Go to source line: " in frame for frame in host.frames))
+
+    def test_prompt_rendering_is_bounded_plain_color_equivalent_and_transient(self) -> None:
+        from jsonl_viewer._render import strip_ansi, _text_cells
+
+        events = ("text\t/", "text\tcontent", "key\tenter", "text\t" + "개요😀e\u0301" * 60, "key\thome", "key\tright", "key\tend", "key\tescape", "close")
+        for size in ((12, 4), (32, 8), (80, 24)):
+            with self.subTest(size=size):
+                plain, color = FakeHost(events, size=size), FakeHost(events, size=size, color=True)
+                view_jsonl(self.source, self.spec, plain)
+                view_jsonl(self.source, self.spec, color)
+                self.assertEqual(plain.frames, [strip_ansi(frame) for frame in color.frames])
+                for frame in plain.frames:
+                    self.assertLessEqual(len(frame.splitlines()), size[1])
+                    self.assertTrue(all(_text_cells(line) <= size[0] for line in frame.splitlines()))
+                    self.assertNotIn("\x1b", frame)
+                self.assertEqual(plain.frames[1], plain.frames[-1])
+        reopened = FakeHost(("close",))
+        view_jsonl(self.source, self.spec, reopened)
+        self.assertNotIn("Search field: ", reopened.frames[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

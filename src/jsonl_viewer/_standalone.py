@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import os
 import select
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import TracebackType
 from typing import Any, BinaryIO, TextIO
@@ -41,7 +43,9 @@ class _TerminalHost:
         self._saved_attributes: list[Any] | None = None
         self._interactive = False
         self._closed = False
-        self._last_presented_frame: str | None = None
+        self._decoder = codecs.getincrementaldecoder(input_stream.encoding or "utf-8")(
+            errors=input_stream.errors or "strict"
+        )
 
     def __enter__(self) -> _TerminalHost:
         if (
@@ -72,7 +76,6 @@ class _TerminalHost:
         self._restore_terminal()
 
     def _restore_terminal(self) -> None:
-        self._last_presented_frame = None
         if self._interactive and self._descriptor is not None:
             assert termios is not None
             assert self._saved_attributes is not None
@@ -107,228 +110,113 @@ class _TerminalHost:
         else:
             self._output.write(frame + "\n")
         self._output.flush()
-        self._last_presented_frame = frame
-
-    def _prompt(self, label: str) -> str | None:
-        if not self._interactive:
-            self._output.write(label)
-            self._output.flush()
-            value = self._input.readline()
-            return None if value == "" else value.rstrip("\r\n")
-        assert termios is not None and tty is not None
-        assert self._descriptor is not None and self._saved_attributes is not None
-        termios.tcsetattr(
-            self._descriptor,
-            termios.TCSADRAIN,
-            self._saved_attributes,
-        )
-        self._output.write("\n" + label)
-        self._output.flush()
-        try:
-            value = self._input.readline()
-        finally:
-            tty.setcbreak(self._descriptor)
-        return None if value == "" else value.rstrip("\r\n")
 
     def _escape_event(self) -> str:
-        """Decode one main-view escape key or bounded terminal sequence."""
+        """Decode a bounded physical CSI/SS3 sequence without viewer bindings."""
 
         assert self._descriptor is not None
-        deadline = os.times().elapsed + 0.02
+        deadline = time.monotonic() + 0.02
         suffix = bytearray()
-        exceeded_recognition_bound = False
+        received = 0
         while True:
-            remaining = deadline - os.times().elapsed
-            if (
-                remaining <= 0
-                or not select.select(
-                    [self._descriptor],
-                    [],
-                    [],
-                    remaining,
-                )[0]
-            ):
-                return "cancel"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select(
+                [self._descriptor], [], [], remaining
+            )[0]:
+                return "key\tescape" if not received else "key\tunknown_escape"
             current = os.read(self._descriptor, 1)
             if not current:
-                return "cancel"
+                return "key\tescape" if not received else "key\tunknown_escape"
+            received += 1
+            if received > 4_096:
+                raise ValueError("terminal escape sequence exceeds its drain bound")
             if len(suffix) < 32:
                 suffix.extend(current)
-            else:
-                exceeded_recognition_bound = True
-            if len(suffix) == 1 and current in {b"[", b"O"}:
+            if received == 1 and current in {b"[", b"O"}:
                 continue
             if suffix[0] == ord("["):
                 if 0x40 <= current[0] <= 0x7E:
                     break
-                if not (0x20 <= current[0] <= 0x3F):
-                    return "cancel"
+                if not 0x20 <= current[0] <= 0x3F:
+                    return "key\tunknown_escape"
                 continue
-            if suffix[0] == ord("O"):
-                if 0x40 <= current[0] <= 0x7E:
-                    break
-                return "cancel"
-            return "cancel"
-        if exceeded_recognition_bound:
-            return "cancel"
-        return {
-            b"[A": "up",
-            b"[B": "down",
-            b"[5~": "page_up",
-            b"[6~": "page_down",
-        }.get(bytes(suffix), "cancel")
+            if suffix[0] == ord("O") and 0x40 <= current[0] <= 0x7E:
+                break
+            return "key\tunknown_escape"
+        if received > 32:
+            return "key\tunknown_escape"
+        key = {
+            b"[A": "up", b"OA": "up", b"[B": "down", b"OB": "down",
+            b"[C": "right", b"OC": "right", b"[D": "left", b"OD": "left",
+            b"[H": "home", b"OH": "home", b"[1~": "home", b"[7~": "home",
+            b"[F": "end", b"OF": "end", b"[4~": "end", b"[8~": "end",
+            b"[3~": "delete", b"[5~": "page_up", b"[6~": "page_down",
+        }.get(bytes(suffix), "unknown_escape")
+        return "key\t" + key
 
-    def _redraw_last_frame(self) -> None:
-        """Restore the last complete engine frame after a local prompt cancel."""
-
-        frame = self._last_presented_frame
-        if frame is not None:
-            self.present(frame)
-
-    def _raw_prompt(self, label: str) -> tuple[str | None, bool]:
-        """Collect one local raw-terminal line, distinguishing Escape from EOF."""
-
-        assert self._descriptor is not None
-        encoding = self._input.encoding or "utf-8"
-        errors = self._input.errors or "strict"
-        value = bytearray()
-        self._output.write("\x1b[?25h\n" + label)
-        self._output.flush()
-        try:
-            while True:
-                current = os.read(self._descriptor, 1)
-                if not current:
-                    result: tuple[str | None, bool] = (None, False)
-                    break
-                if current == b"\x1b":
-                    if self._escape_event() == "cancel":
-                        result = (None, True)
-                        break
-                    continue
-                if current in {b"\r", b"\n"}:
-                    result = (bytes(value).decode(encoding, errors), False)
-                    break
-                if current == b"\x04":
-                    result = (
-                        None if not value else bytes(value).decode(encoding, errors),
-                        False,
-                    )
-                    break
-                if current == b"\x03":
-                    raise KeyboardInterrupt
-                if current in {b"\x08", b"\x7f"}:
-                    while value:
-                        value.pop()
-                        try:
-                            rendered = bytes(value).decode(encoding, errors)
-                        except UnicodeDecodeError:
-                            continue
-                        self._output.write("\r\x1b[2K" + label + rendered)
-                        self._output.flush()
-                        break
-                    continue
-                if current < b"\x20":
-                    continue
-                value.extend(current)
-                try:
-                    rendered = bytes(value).decode(encoding, errors)
-                except UnicodeDecodeError as exc:
-                    if exc.end == len(value) and exc.reason == "unexpected end of data":
-                        continue
-                    raise
-                self._output.write("\r\x1b[2K" + label + rendered)
-                self._output.flush()
-        except BaseException:
-            try:
-                self._output.write("\x1b[?25l")
-                self._output.flush()
-            except BaseException:
-                pass
-            raise
-        self._output.write("\x1b[?25l")
-        self._output.flush()
-        return result
+    def _configured_control(self, raw_character: bytes) -> str | None:
+        if self._saved_attributes is None or termios is None:
+            return None
+        for index, key in ((termios.VINTR, "interrupt"), (termios.VEOF, "eof")):
+            value = self._saved_attributes[6][index]
+            raw = bytes((value,)) if isinstance(value, int) else value
+            if raw != b"\x00" and raw_character == raw:
+                return "key\t" + key
+        return None
 
     def _raw_event(self) -> str | None:
         assert self._descriptor is not None
         while True:
             value = os.read(self._descriptor, 1)
             if not value:
+                self._decoder.decode(b"", final=True)
                 return None
-            if value == b"\x1b":
+            configured = self._configured_control(value)
+            if configured is not None:
+                return configured
+            character = self._decoder.decode(value)
+            if not character:
+                continue
+            if character == "\x1b":
                 return self._escape_event()
-            mapping = {
-                b"q": "close",
-                b"j": "down",
-                b"k": "up",
-                b" ": "page_down",
-                b"b": "page_up",
-                b"n": "next_match",
-                b"N": "previous_match",
-                b"m": "toggle_mode",
-                b"h": "help",
-                b"?": "help",
+            controls = {
+                "\r": "enter", "\n": "enter", "\x08": "backspace",
+                "\x7f": "backspace", "\x01": "ctrl_a", "\x05": "ctrl_e",
+                "\x15": "ctrl_u", "\x0b": "ctrl_k", "\x17": "ctrl_w",
             }
-            if value in mapping:
-                return mapping[value]
-            if value == b"g":
-                line = self._prompt("Go to source line: ")
-                return None if line is None else "goto\t" + line
-            if value == b"/":
-                field, cancelled = self._raw_prompt("Search field: ")
-                if cancelled:
-                    self._redraw_last_frame()
-                    continue
-                if field is None:
-                    return None
-                query, cancelled = self._raw_prompt("Search query: ")
-                if cancelled:
-                    self._redraw_last_frame()
-                    continue
-                return None if query is None else f"search\t{field}\t{query}"
-            return "unknown"
+            if character in controls:
+                return "key\t" + controls[character]
+            if character < " " or character == "\x7f":
+                return "key\tunknown"
+            return "text\t" + character
 
     def _line_event(self) -> str | None:
-        self._output.write("viewer> ")
-        self._output.flush()
-        value = self._input.readline()
+        # The host frames bounded literal transport, never command grammar.
+        value = self._input.readline(8_195)
         if value == "":
             return None
-        command = value.strip()
-        mapping = {
-            "q": "close",
-            "quit": "close",
-            "j": "down",
-            "down": "down",
-            "k": "up",
-            "up": "up",
-            "pgdn": "page_down",
-            "pgup": "page_up",
-            "n": "next_match",
-            "N": "previous_match",
-            "m": "toggle_mode",
-            "h": "help",
-            "?": "help",
-            "esc": "cancel",
-        }
-        if command in mapping:
-            return mapping[command]
-        if command.startswith("g "):
-            return "goto\t" + command[2:].strip()
-        if command.startswith("/ "):
-            parts = command[2:].split(maxsplit=1)
-            if len(parts) == 2:
-                return f"search\t{parts[0]}\t{parts[1]}"
-        return "unknown"
+        line = value.removesuffix("\n").removesuffix("\r")
+        if len(line) > 8_192:
+            consumed = len(value)
+            while value and not value.endswith("\n"):
+                value = self._input.readline(min(8_195, 65_536 - consumed + 1))
+                consumed += len(value)
+                if consumed > 65_536:
+                    raise ValueError("terminal line exceeds its drain bound")
+            return "key\tunknown"
+        return "line\t" + line
 
     def read_event(self) -> str | None:
-        return self._raw_event() if self._interactive else self._line_event()
+        try:
+            return self._raw_event() if self._interactive else self._line_event()
+        except KeyboardInterrupt:
+            return "key\tinterrupt"
 
     def close_view(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self._last_presented_frame = None
+        self._decoder.reset()
         if self._interactive:
             self._output.write("\x1b[H\x1b[2J")
             self._output.flush()
@@ -402,6 +290,7 @@ def main(argv: list[str] | None = None) -> int:
             title=arguments.title,
             conversation_label=arguments.conversation_label,
             conversation_subject=arguments.conversation_subject,
+            input_protocol="keys",
         )
     except (OSError, TypeError, ValueError) as exc:
         if owned_input is not None:

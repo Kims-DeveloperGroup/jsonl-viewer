@@ -3,16 +3,134 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from dataclasses import replace
 
 from ._input import InputFailure, parse_jsonl
-from ._model import SearchState, Snapshot, ViewMode, ViewState
+from ._model import PromptState, SearchState, Snapshot, ViewMode, ViewState
 from ._render import render_frame, render_loading
 from .contracts import ViewerHost, ViewerSpec
 
 
 _MAX_EVENT_CHARACTERS = 8_192
 _MAX_QUERY_CHARACTERS = 1_024
+_MAX_FIELD_CHARACTERS = 128
+_MAX_GOTO_CHARACTERS = 128
+
+
+def _input_error(state: ViewState, message: str) -> ViewState:
+    if state.prompt is not None:
+        return replace(state, prompt=replace(state.prompt, error=message))
+    return _message(state, message, error=True)
+
+
+def _safe_input(value: str, *, allow_tab: bool = False) -> bool:
+    return all(
+        (allow_tab and character == "\t")
+        or (
+            unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+            and character not in {"\u2028", "\u2029"}
+        )
+        for character in value
+    )
+
+
+def _line_action(value: str) -> str:
+    """Interpret literal ordinary-line transport inside the viewer boundary."""
+
+    command = value.strip()
+    mapping = {
+        "q": "close", "quit": "close", "j": "down", "down": "down",
+        "k": "up", "up": "up", "pgdn": "page_down", "pgup": "page_up",
+        "n": "next_match", "N": "previous_match", "m": "toggle_mode",
+        "h": "help", "?": "help", "esc": "cancel",
+        "c": "clear_search", "clear": "clear_search",
+    }
+    if command in mapping:
+        return mapping[command]
+    if command.startswith("g "):
+        line = command[2:].strip()
+        if line and "\t" not in line:
+            return "goto\t" + line
+    if command.startswith("/ "):
+        parts = command[2:].split(maxsplit=1)
+        if len(parts) == 2 and "\t" not in parts[0] and "\t" not in parts[1]:
+            return f"search\t{parts[0]}\t{parts[1]}"
+    return "unknown"
+
+
+def _edit_prompt(prompt: PromptState, key: str) -> PromptState:
+    """Edit code points without sharing terminal or application line state."""
+
+    buffer, cursor = prompt.buffer, prompt.cursor
+    if key in {"home", "ctrl_a"}:
+        cursor = 0
+    elif key in {"end", "ctrl_e"}:
+        cursor = len(buffer)
+    elif key == "left":
+        cursor = max(0, cursor - 1)
+    elif key == "right":
+        cursor = min(len(buffer), cursor + 1)
+    elif key == "backspace" and cursor:
+        buffer = buffer[:cursor - 1] + buffer[cursor:]
+        cursor -= 1
+    elif key == "delete":
+        buffer = buffer[:cursor] + buffer[cursor + 1:]
+    elif key == "ctrl_u":
+        buffer, cursor = buffer[cursor:], 0
+    elif key == "ctrl_k":
+        buffer = buffer[:cursor]
+    elif key == "ctrl_w":
+        start = cursor
+        while start and buffer[start - 1].isspace():
+            start -= 1
+        while start and not buffer[start - 1].isspace():
+            start -= 1
+        buffer, cursor = buffer[:start] + buffer[cursor:], start
+    else:
+        return prompt
+    return replace(prompt, buffer=buffer, cursor=cursor, error=None)
+
+
+def _insert_prompt(state: ViewState, text: str) -> ViewState:
+    assert state.prompt is not None
+    prompt = state.prompt
+    limit = {
+        "search_field": _MAX_FIELD_CHARACTERS,
+        "search_query": _MAX_QUERY_CHARACTERS,
+        "goto": _MAX_GOTO_CHARACTERS,
+    }[prompt.kind]
+    if len(prompt.buffer) + len(text) > limit:
+        return _input_error(state, f"Input is limited to {limit} characters.")
+    buffer = prompt.buffer[:prompt.cursor] + text + prompt.buffer[prompt.cursor:]
+    return replace(
+        state,
+        prompt=replace(prompt, buffer=buffer, cursor=prompt.cursor + len(text), error=None),
+    )
+
+
+def _submit_prompt(state: ViewState, spec: ViewerSpec) -> tuple[ViewState, str | None]:
+    assert state.prompt is not None
+    prompt = state.prompt
+    value = prompt.buffer.strip()
+    if prompt.kind == "search_field":
+        if value not in spec.searchable_fields:
+            allowed = ", ".join(spec.searchable_fields) or "(none)"
+            return _input_error(state, f"Allowed fields: {allowed}."), None
+        return replace(
+            state, prompt=PromptState("search_query", field=value)
+        ), None
+    if prompt.kind == "search_query":
+        if not value:
+            return _input_error(state, "Search query must not be empty."), None
+        return replace(state, prompt=None), f"search\t{prompt.field}\t{value}"
+    try:
+        valid = int(value, 10) > 0
+    except ValueError:
+        valid = False
+    if not valid:
+        return _input_error(state, "Go-to line must be a positive integer."), None
+    return replace(state, prompt=None), "goto\t" + value
 
 
 def _search_text(value: object) -> str:
@@ -54,13 +172,96 @@ def _transition(
     *,
     page_size: int,
     selected_line_count: int,
+    malformed: bool = False,
+) -> tuple[ViewState, bool]:
+    """Validate transport before applying context-sensitive viewer behavior."""
+
+    def action(current: ViewState, value: str | None) -> tuple[ViewState, bool]:
+        return _semantic_transition(
+            current, value, snapshot, spec, page_size=page_size,
+            selected_line_count=selected_line_count, malformed=malformed,
+        )
+
+    if event is None:
+        return action(state, None)
+    if type(event) is not str:
+        return _input_error(state, "Unsupported host event; press h for help."), False
+    if len(event) > _MAX_EVENT_CHARACTERS + len("text\t"):
+        return _input_error(state, "Unsupported host event; press h for help."), False
+    kind, separator, payload = event.partition("\t")
+    if spec.input_protocol == "keys" and separator and kind in {"text", "key", "line"}:
+        if len(payload) > _MAX_EVENT_CHARACTERS:
+            return _input_error(state, "Host input is too long."), False
+        if kind == "line":
+            if not _safe_input(payload, allow_tab=True):
+                return _input_error(state, "Line input contains unsupported controls."), False
+            # Ordinary-line hosts submit complete commands and never own drafts.
+            return action(state, _line_action(payload))
+        if kind == "text":
+            if not _safe_input(payload):
+                return _input_error(state, "Text input contains unsupported controls."), False
+            if state.prompt is not None:
+                return _insert_prompt(state, payload), False
+            bindings = {
+                "q": "close", "j": "down", "k": "up", " ": "page_down",
+                "b": "page_up", "n": "next_match", "N": "previous_match",
+                "m": "toggle_mode", "h": "help", "?": "help",
+                "c": "clear_search", "/": "begin_search", "g": "begin_goto",
+            }
+            for index, character in enumerate(payload):
+                state, closed = action(state, bindings.get(character, "unknown"))
+                if closed:
+                    return state, True
+                if state.prompt is not None:
+                    return _insert_prompt(state, payload[index + 1:]), False
+            return state, False
+        if payload == "eof" or (payload == "interrupt" and state.prompt is not None):
+            return action(state, "close")
+        if payload == "interrupt":
+            return action(state, "cancel")
+        prompt = state.prompt
+        if prompt is not None:
+            if payload in {"escape", "unknown_escape"}:
+                return replace(state, prompt=None), False
+            if payload == "enter":
+                state, submitted = _submit_prompt(state, spec)
+                return (state, False) if submitted is None else action(state, submitted)
+            return replace(state, prompt=_edit_prompt(prompt, payload)), False
+        bindings = {
+            "up": "up", "down": "down", "page_up": "page_up",
+            "page_down": "page_down", "escape": "cancel",
+            "unknown_escape": "unknown",
+        }
+        if payload in bindings:
+            return action(state, bindings[payload])
+        return state, False
+    if len(event) > _MAX_EVENT_CHARACTERS:
+        return _input_error(state, "Unsupported host event; press h for help."), False
+    # Old hosts keep their closed semantic vocabulary in either protocol mode.
+    if event in {"begin_search", "begin_goto"}:
+        event = "unknown"
+    return action(state, event)
+
+
+def _semantic_transition(
+    state: ViewState,
+    event: str | None,
+    snapshot: Snapshot,
+    spec: ViewerSpec,
+    *,
+    page_size: int,
+    selected_line_count: int,
+    malformed: bool = False,
 ) -> tuple[ViewState, bool]:
     if event is None or event == "close":
         return state, True
-    if type(event) is not str or len(event) > _MAX_EVENT_CHARACTERS:
-        return _message(
-            state, "Unsupported host event; press h for help.", error=True
-        ), False
+    if malformed and event not in {"help", "cancel"}:
+        return _message(state, "Malformed input is read-only; press q to close."), False
+
+    if state.prompt is not None:
+        if event == "cancel":
+            return replace(state, prompt=None), False
+        return state, False
 
     if state.help_visible:
         if event in {"help", "cancel"}:
@@ -82,6 +283,10 @@ def _transition(
 
     if not snapshot.records:
         return _message(state, "The immutable snapshot has no records."), False
+
+    if event in {"begin_search", "begin_goto"}:
+        kind = "search_field" if event == "begin_search" else "goto"
+        return replace(state, prompt=PromptState(kind)), False
 
     if event in {"up", "down"}:
         direction = -1 if event == "up" else 1
@@ -279,16 +484,6 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
             )
             host.present(rendered.text)
             event = host.read_event()
-            if diagnostic is not None and event not in {
-                "help",
-                "cancel",
-                "close",
-                None,
-            }:
-                state = _message(
-                    state, "Malformed input is read-only; press q to close."
-                )
-                continue
             state, closed = _transition(
                 state,
                 event,
@@ -296,6 +491,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 spec,
                 page_size=rendered.body_rows,
                 selected_line_count=rendered.selected_line_count,
+                malformed=diagnostic is not None,
             )
     finally:
         host.close_view()

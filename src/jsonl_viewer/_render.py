@@ -12,6 +12,7 @@ from typing import Any, Iterable, NoReturn, cast
 from ._model import (
     InputDiagnostic,
     JSONValue,
+    PromptState,
     Record,
     RenderResult,
     Snapshot,
@@ -674,6 +675,8 @@ def _footer_lines(
     width_clipped: bool,
     projection_facts: _ProjectionFacts | None,
 ) -> list[tuple[str, str]]:
+    if state.prompt is not None:
+        return _prompt_lines(state.prompt, width=width)
     status = ""
     role = "footer"
     if state.search is not None:
@@ -734,6 +737,35 @@ def _footer_lines(
     return [
         (_clip_text(_neutralize_text(status), width), role),
         (_clip_text(help_text, width), "footer"),
+    ]
+
+
+def _prompt_lines(prompt: PromptState, *, width: int) -> list[tuple[str, str]]:
+    """Keep the logical cursor visible without emitting cursor controls."""
+
+    labels = {
+        "search_field": ("Search field: ", "Field: "),
+        "search_query": ("Search query: ", "Query: "),
+        "goto": ("Go to source line: ", "Line: "),
+    }
+    label = labels[prompt.kind][0 if width >= 32 else 1]
+    available = max(1, width - _text_cells(label))
+    before = _neutralize_text(prompt.buffer[:prompt.cursor])
+    after = _neutralize_text(prompt.buffer[prompt.cursor:])
+    after_budget = min(_text_cells(after), max(0, (available - 1) // 3))
+    before_budget = max(0, available - 1 - after_budget)
+    tail, _, clipped = _take_cells(before[::-1], before_budget)
+    before = tail[::-1]
+    if clipped and before_budget:
+        tail, _, _ = _take_cells(before[::-1], before_budget - 1)
+        before = "…" + tail[::-1]
+    after_budget = max(0, available - 1 - _text_cells(before))
+    after = _clip_text(after, after_budget)
+    editor = label + before + "│" + after
+    hint = prompt.error or "Enter submit • Esc cancel • Ctrl+U/K/W edit"
+    return [
+        (_clip_text(editor, width), "chrome"),
+        (_clip_text(_neutralize_text(hint), width), "error" if prompt.error else "footer"),
     ]
 
 

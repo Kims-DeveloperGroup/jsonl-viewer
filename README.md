@@ -9,7 +9,7 @@ The package is Python 3.11+, MIT licensed, and has no runtime dependencies. It
 has no knowledge of Story, agent runtimes, storage layouts, provider schemas,
 or terminal-driver implementations.
 
-## What 0.1.1 provides
+## What 0.2.0 provides
 
 - a three-name public API: `ViewerSpec`, `ViewerHost`, and `view_jsonl`;
 - Simple and Verbose views, with configurable date/time, request-type, and
@@ -25,6 +25,8 @@ or terminal-driver implementations.
   embedding application, with `n`/`N`, current/total results, and automatic
   Verbose promotion for a hidden-field hit;
 - deterministic semantic ANSI or exactly equivalent plain output;
+- viewer-owned key bindings, ordinary-line command grammar, and bounded search
+  and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
   controls, bidi controls, and other format controls; and
 - a standalone terminal owner plus an injected host boundary for applications
@@ -102,19 +104,26 @@ the path to snapshot standard input; because that consumes stdin, the view is
 then rendered once and closes on EOF.
 
 Standalone keys are `↑`/`↓` or `j`/`k`, Page Up/Page Down or `b`/Space, `g`,
-`/`, `n`, `N`, `m`, `h`/`?`, Escape, and `q`. In ordinary-line mode, use
-`g LINE` and `/ FIELD QUERY`.
+`/`, `n`, `N`, `m`, `h`/`?`, `c` to clear search, Escape, and `q`. In
+ordinary-line mode, use `g LINE` and `/ FIELD QUERY`.
 
-On a supported interactive terminal, `/` opens a local `Search field:` prompt
-and then a `Search query:` prompt. Escape at either prompt cancels only that
-unfinished search: its draft is discarded, the cursor is hidden again, and
-the exact last complete viewer frame is redrawn. No viewer event is emitted,
-so an existing search and its current `i/N` position remain unchanged. Arrow
-and Page key sequences entered at a prompt are consumed there without moving
-the viewer or changing the draft; an unsupported, incomplete, or overlong
-Escape sequence cancels the prompt and cannot leak trailing bytes into viewer
-commands. The ordinary-line `/ FIELD QUERY` and textual `esc` commands, and
-Escape from the main view, retain their existing behavior.
+On a supported interactive terminal, `/` opens `Search field:` and then
+`Search query:`; `g` opens `Go to source line:`. The viewer engine owns these
+drafts and shows a printable `│` insertion cursor in the frame footer. Enter
+submits the current stage. Left/Right, Home/End or Ctrl-A/E, Backspace, and
+Delete edit the draft. Ctrl-U deletes before the cursor, Ctrl-K deletes after
+it, and Ctrl-W deletes the preceding word and intervening whitespace. Letters
+such as `j`, `k`, `n`, `q`, and `g` are literal text while a draft is open;
+Up/Down and Page keys leave the draft and viewer position unchanged.
+
+Escape discards only the unfinished search or goto draft and renders the prior
+committed viewer state, preserving any active search and its current `i/N`
+position. Unsupported or incomplete Escape sequences are bounded by the host
+decoder and reported as `unknown_escape`, which also cancels a draft. Ctrl-C
+closes the view during a prompt; in the main view it applies Escape's existing
+cancel behavior. EOF always closes. In the main view, Escape dismisses help,
+then search, then transient status, and otherwise closes. Ordinary-line
+`/ FIELD QUERY`, `g LINE`, and textual `esc` retain their existing grammar.
 
 ## Embed without transferring terminal ownership
 
@@ -128,6 +137,7 @@ spec = ViewerSpec(
     searchable_fields=("timestamp", "request_type", "content"),
     conversation_label="Debate",
     conversation_subject="Provider response diagnostics",
+    input_protocol="keys",
 )
 
 # `host` implements ViewerHost using the application's existing terminal
@@ -151,7 +161,32 @@ embedding application owns the scope vocabulary and any picker used to select
 it. Responsive clipping can shorten the combined header line but never mutates
 those `ViewerSpec` values.
 
-The closed event vocabulary is:
+`input_protocol="keys"` lets the viewer own all key bindings, command grammar,
+prompt editing, and cancellation. The host decodes physical input into these
+envelopes; `<TAB>` denotes one literal tab:
+
+```text
+text<TAB>TEXT
+key<TAB>PHYSICAL_KEY_NAME
+line<TAB>LITERAL_COMMAND
+```
+
+Each payload is limited to 8,192 characters, excluding its envelope. Text
+contains printable Unicode; literal line input may also contain tab separators.
+The host preserves command text and leaves its interpretation to the viewer.
+Physical key names are `enter`, `escape`, `unknown_escape`, `backspace`,
+`delete`, `left`, `right`, `home`, `end`, `up`, `down`, `page_up`, `page_down`,
+`ctrl_a`, `ctrl_e`, `ctrl_u`, `ctrl_k`, `ctrl_w`, `interrupt`, `eof`, and
+`unknown`. Search-field and goto drafts are bounded to 128 characters; search
+query drafts are bounded to 1,024. Drafts and their logical cursors arrive in
+ordinary complete frames, so the host needs no prompt buffer or second input
+lifecycle. The standalone adapter uses this protocol for both terminal keys
+and ordinary lines.
+
+For existing integrations, `ViewerSpec.input_protocol` is appended with the
+default `"semantic"`. Upgrading from 0.1.1 preserves the three public exports,
+existing constructor arguments, all five host methods, and this closed
+semantic event vocabulary:
 
 ```text
 up | down | page_up | page_down | next_match | previous_match
@@ -160,9 +195,13 @@ goto<TAB>POSITIVE_SOURCE_LINE
 search<TAB>ENUMERATED_TOP_LEVEL_FIELD<TAB>NONEMPTY_QUERY
 ```
 
-`None` means EOF/close. Unknown events produce a transient help hint. The host
-decides how keys, commands, resize events, focus, and terminal restoration map
-onto this protocol.
+`None` means EOF/close in either protocol. Existing semantic events are also
+accepted in `"keys"` mode. Unknown semantic events produce a transient help
+hint. A legacy semantic host retains its input-to-event mapping; a host opting
+into `"keys"` supplies physical inputs and lets the viewer handle actions.
+Hosts that validate exact constructor signatures must accept the appended
+`input_protocol` field before opening a view. Terminal modes, signals,
+geometry, presentation, application focus, and restoration remain host-owned.
 
 ## Input and safety contract
 
@@ -209,7 +248,7 @@ show every field in a valid record, and an enumerated field is a search limit,
 not a visibility or authorization rule. The embedding application is
 responsible for authorizing, selecting, retaining, and redacting snapshot
 data. The library performs no filesystem or network I/O, telemetry, or
-persistence; standalone prompt drafts and retained frames exist only while the
+persistence; viewer prompt drafts and frames exist only while the
 view is open. The standalone adapter performs only its explicit bounded file
 or standard-input read.
 
