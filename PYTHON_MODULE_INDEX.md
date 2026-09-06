@@ -88,8 +88,9 @@ unit imports Story or any third-party runtime package.
 - **Responsibility:** Define immutable private snapshot and transient view-state
   values.
 - **Supported surface:** No supported consumer API. The parser, engine, and
-  renderer share frozen record, snapshot, diagnostic, mode, search, view, and
-  render-result values.
+  renderer share frozen record, snapshot, diagnostic, mode, search, prompt,
+  view, and render-result values. Prompt values hold an uncommitted stage,
+  buffer, code-point cursor, selected search field, and local validation error.
 - **Direct internal dependencies:** None.
 - **State, resources, and side effects:** Defines values only; it owns no module
   state, lifecycle, or I/O.
@@ -120,7 +121,10 @@ unit imports Story or any third-party runtime package.
   containers, delimiters, or child presence. The same renderer formats
   multiline JSON, projects the supplied scope label, exact ID, and optional
   subject into the header, neutralizes controls, computes Unicode cell
-  clipping, and emits optional SGR without cursor/lifecycle controls.
+  clipping, and emits optional SGR without cursor/lifecycle controls. Active
+  search-field, search-query, and goto editors occupy the two footer rows;
+  bounded horizontal windows keep a printable logical cursor visible and
+  display prompt-local validation errors without altering committed state.
 - **Primary verification/documentation:** `tests/test_input_and_render.py`,
   `tests/test_documented_samples.py`, and `docs/design-system.md`.
 
@@ -137,18 +141,18 @@ unit imports Story or any third-party runtime package.
 - **State, resources, and side effects:** A `main` call opens its selected source
   only for a bounded binary read. On a supported interactive POSIX terminal its
   private context owns cbreak mode, alternate screen, cursor visibility, key
-  decoding, repaint, and exact restoration. The host retains only the last
-  successfully flushed complete frame while the view is active. Search field
-  and query drafts remain local raw-terminal state: bare or unsupported Escape
-  cancels the draft, restores the hidden cursor, redraws that retained frame,
-  and resumes key reading without emitting an engine event; supported
-  navigation sequences are consumed without changing the draft or view.
-  Submitted searches use the existing event, while EOF, interrupt, primary
-  failure, close, and restoration preserve their established precedence and
-  discard all retained frame/draft state. Main-view Escape and the ordinary-line
-  fallback remain unchanged. `NO_COLOR` and `--no-color` disable SGR. Import
-  alone performs no filesystem or terminal operation; optional `termios`/`tty`
-  imports select a platform fallback.
+  decoding, repaint, and exact restoration. It selects the public `keys`
+  input protocol and emits normalized physical keys, incrementally decoded
+  text, or bounded literal line transport. Escape recognition is limited to
+  32 bytes with a 20 ms deadline and 4,096-byte drain ceiling; overlong lines
+  drain through their terminator up to 65,536 characters. A drain-bound failure
+  raises fixed text instead of interpreting the remaining suffix. Configured
+  terminal interrupt/EOF bytes are decoded before ordinary text. The host owns
+  no viewer bindings, command grammar, prompt draft, search/goto action, or
+  cancellation-specific retained frame. EOF and interrupt are delivered to
+  the engine; terminal cleanup remains visible and host-owned. `NO_COLOR` and
+  `--no-color` disable SGR. Import alone performs no filesystem or terminal
+  operation; optional `termios`/`tty` imports select a platform fallback.
 - **Primary verification/documentation:**
   `tests/test_standalone_and_packaging.py`, `README.md`, and the standalone
   scenario in `docs/design-system.md`.
@@ -161,7 +165,10 @@ unit imports Story or any third-party runtime package.
   `ViewerHost` protocol through the root facade. `ViewerSpec` supplies exact
   header values—including a separate scope label, exact scope ID, and optional
   subject—a closed ordered searchable-field enumeration, and configurable
-  Simple-mode field identities. `ViewerHost` owns size/color decisions,
+  Simple-mode field identities. Its appended `input_protocol` field defaults
+  to `semantic` for existing hosts; `keys` additionally enables bounded
+  text/key/literal-line envelopes without changing the three-name facade or
+  host method signatures. `ViewerHost` owns size/color decisions,
   complete-frame presentation, closed event delivery, and close restoration.
 - **Direct internal dependencies:** None.
 - **State, resources, and side effects:** Defines and validates bounded immutable
@@ -181,9 +188,20 @@ unit imports Story or any third-party runtime package.
   `contracts`.
 - **State, resources, and side effects:** Owns navigation, within-record paging,
   Simple/Verbose, closed-field search, current result, help, and transient
-  message state only for one call. It presents Loading before parsing, renders
-  bounded snapshot/error states, accepts only the documented closed host-event
-  strings, and calls `host.close_view()` in `finally`. It performs no file,
+  message state only for one call. In `keys` mode it additionally owns all
+  navigation bindings, ordinary-line command grammar, and search/goto prompt
+  stages, text editing, validation, and cancellation. Event payloads are bounded
+  independently of envelope prefixes at 8,192 characters; field/goto drafts
+  are limited to 128 and query drafts to 1,024 code points. Raw controls cannot
+  enter a draft. Logical cursor edits include arrows, Home/End, Backspace,
+  Delete, Ctrl+A/E, prefix deletion with Ctrl+U, suffix deletion with Ctrl+K,
+  and previous-word deletion with Ctrl+W. Prompt Escape discards only the draft
+  and preserves committed view state, including prior messages and search
+  position. EOF closes; interrupt closes an active prompt's view and otherwise
+  follows main-view cancel precedence. Help and malformed/empty snapshots
+  cannot begin prompts. Legacy semantic events remain accepted in both input
+  modes. It presents Loading before parsing, renders bounded snapshot/error
+  states, and calls `host.close_view()` in `finally`. It performs no file,
   terminal-driver, network, persistence, replay, retry, or live-tail operation.
 - **Primary verification/documentation:** `tests/test_public_api_and_engine.py`,
   `tests/test_input_and_render.py`, `tests/test_documented_samples.py`,

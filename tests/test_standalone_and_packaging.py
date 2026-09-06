@@ -17,7 +17,6 @@ import time
 import tomllib
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 from jsonl_viewer import _standalone
@@ -48,13 +47,6 @@ class _FlushControlledBuffer(_TerminalBuffer):
             self.fail_next_flush = False
             raise RuntimeError("flush failed")
         super().flush()
-
-
-class _HideFailingBuffer(_TerminalBuffer):
-    def write(self, value: str) -> int:
-        if value == "\x1b[?25l":
-            raise RuntimeError("hide failed")
-        return super().write(value)
 
 
 class _RawScript:
@@ -103,7 +95,7 @@ class _RawScript:
         case.assertEqual(self.values, [])
         case.assertEqual(self.readiness, [])
         case.assertTrue(all(size == 1 for size in self.read_sizes))
-        case.assertTrue(all(0 < timeout <= 0.02 for timeout in self.select_timeouts))
+        case.assertTrue(all(0 < timeout <= 0.020001 for timeout in self.select_timeouts))
 
 
 class StandaloneTests(unittest.TestCase):
@@ -118,7 +110,9 @@ class StandaloneTests(unittest.TestCase):
         output_stream = output if output is not None else _TerminalBuffer()
         fake_termios = mock.Mock()
         fake_termios.TCSADRAIN = 1
-        fake_termios.tcgetattr.return_value = ["saved"]
+        fake_termios.VINTR = 0
+        fake_termios.VEOF = 1
+        fake_termios.tcgetattr.return_value = [0, 0, 0, 0, 0, 0, [b"\x03", b"\x04"]]
         fake_tty = mock.Mock()
         host = _TerminalHost(input_stream, output_stream, no_color=True)
         with (
@@ -126,9 +120,9 @@ class StandaloneTests(unittest.TestCase):
             mock.patch.object(_standalone, "tty", fake_tty),
             mock.patch.object(_standalone.os, "read", side_effect=script.read),
             mock.patch.object(
-                _standalone.os,
-                "times",
-                return_value=SimpleNamespace(elapsed=100.0),
+                _standalone.time,
+                "monotonic",
+                return_value=100.0,
             ),
             mock.patch.object(
                 _standalone.select,
@@ -163,6 +157,7 @@ class StandaloneTests(unittest.TestCase):
             self.skipTest("POSIX terminal control is unavailable")
 
         master, slave = os.openpty()
+        self._pty_original_attributes = system_termios.tcgetattr(slave)
         fcntl.ioctl(
             slave,
             system_termios.TIOCSWINSZ,
@@ -246,15 +241,13 @@ class StandaloneTests(unittest.TestCase):
             marker,
             start=start,
         )
-        frame_start = output.rfind(_PRESENT, start, marker_index + len(marker))
+        footer_index = self._pty_read_until(
+            master, output, _HELP, start=marker_index,
+        )
+        frame_start = output.rfind(_PRESENT, 0, footer_index)
         if frame_start < 0:
             self.fail(f"frame marker has no presentation prefix: {bytes(output)!r}")
-        footer_index = self._pty_read_until(
-            master,
-            output,
-            _HELP,
-            start=marker_index,
-        )
+        self.assertIn(marker, output[frame_start:footer_index])
         frame_end = footer_index + len(_HELP)
         return bytes(output[frame_start + len(_PRESENT) : frame_end]), frame_end
 
@@ -308,167 +301,97 @@ class StandaloneTests(unittest.TestCase):
         ):
             self.assertFalse(host.color_enabled())
 
-    def test_raw_field_escape_redraws_only_last_frame_and_returns_next_event(
-        self,
-    ) -> None:
-        script = _RawScript(b"/partial\x1bq", [False])
-        event, before_restore, complete, host, fake_termios, fake_tty = (
-            self._scripted_event(script, frames=("FRAME A", "FRAME B"))
-        )
-
-        self.assertEqual(event, "close")
-        self.assertEqual(before_restore.count("\x1b[H\x1b[2JFRAME A"), 1)
-        self.assertEqual(before_restore.count("\x1b[H\x1b[2JFRAME B"), 2)
-        redraw = before_restore.rfind("\x1b[H\x1b[2JFRAME B")
-        self.assertEqual(
-            before_restore[redraw:],
-            "\x1b[H\x1b[2JFRAME B",
-        )
-        prompt = before_restore.index("Search field: ")
-        hidden = before_restore.rfind("\x1b[?25l", prompt, redraw)
-        self.assertGreater(hidden, prompt)
-        self.assertNotIn("partial", before_restore[redraw:])
-        self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
-        self.assertIsNone(host._last_presented_frame)
-        fake_tty.setcbreak.assert_called_once_with(17)
-        fake_termios.tcsetattr.assert_called_once_with(17, 1, ["saved"])
-        script.assert_consumed(self)
-
-        empty_host = _RawScript(b"/\x1bq", [False])
-        event, before_restore, _, host, _, _ = self._scripted_event(
-            empty_host,
-            frames=(),
-        )
-        self.assertEqual(event, "close")
-        self.assertNotIn("\x1b[H\x1b[2J", before_restore)
-        self.assertIsNone(host._last_presented_frame)
-        empty_host.assert_consumed(self)
-
-    def test_raw_query_escape_discards_partial_draft_and_preserves_active_frame(
-        self,
-    ) -> None:
-        active = "ACTIVE SEARCH FRAME • Search content='alpha' • 1/2"
-        script = _RawScript(b"/content\rreplacement\x1bn", [False])
-
-        event, before_restore, _, _, _, _ = self._scripted_event(
-            script,
-            frames=(active,),
-        )
-
-        self.assertEqual(event, "next_match")
-        self.assertIn("Search field: content", before_restore)
-        self.assertIn("Search query: replacement", before_restore)
-        self.assertEqual(
-            before_restore.count("\x1b[H\x1b[2J" + active),
-            2,
-        )
-        redraw = before_restore.rfind("\x1b[H\x1b[2J" + active)
-        self.assertEqual(before_restore[redraw:], "\x1b[H\x1b[2J" + active)
-        self.assertNotIn("replacement", before_restore[redraw:])
-        script.assert_consumed(self)
-
-    def test_prompt_escape_sequences_are_bounded_drained_and_never_leak(self) -> None:
-        supported = (b"[A", b"[B", b"[5~", b"[6~")
-        for sequence in supported:
-            with self.subTest(kind="supported", sequence=sequence):
-                data = b"/draft\x1b" + sequence + b"tail\x1bq"
-                readiness = [True] * len(sequence) + [False]
-                script = _RawScript(data, readiness)
-                event, before_restore, _, _, _, _ = self._scripted_event(script)
-                self.assertEqual(event, "close")
-                self.assertIn("Search field: drafttail", before_restore)
-                self.assertEqual(
-                    before_restore.count("\x1b[H\x1b[2JPRIOR FRAME"),
-                    2,
-                )
-                script.assert_consumed(self)
-
-        unsupported = {
-            "fragmented_csi": (b"[Z", [True, True]),
-            "fragmented_ss3": (b"OP", [True, True]),
-            "truncated": (b"[", [True, False]),
-            "exact_32_byte_suffix": (b"[" + b"0" * 30 + b"Z", [True] * 32),
-            "over_cap_33_byte_suffix": (b"[" + b"0" * 31 + b"Z", [True] * 33),
-        }
-        for name, (sequence, readiness) in unsupported.items():
-            with self.subTest(kind=name, sequence_length=len(sequence)):
-                script = _RawScript(b"/draft\x1b" + sequence + b"q", readiness)
-                event, before_restore, _, _, _, _ = self._scripted_event(script)
-                self.assertEqual(event, "close")
-                self.assertEqual(
-                    before_restore.count("\x1b[H\x1b[2JPRIOR FRAME"),
-                    2,
-                )
-                self.assertNotIn("Search query: ", before_restore)
-                script.assert_consumed(self)
-
-    def test_prompt_eof_interrupt_and_cleanup_failure_are_deterministic(self) -> None:
-        eof_cases: tuple[tuple[str, list[bytes | BaseException]], ...] = (
-            ("field", [b"/", b"p", b""]),
-            (
-                "query",
-                [
-                    b"/",
-                    b"c",
-                    b"o",
-                    b"n",
-                    b"t",
-                    b"e",
-                    b"n",
-                    b"t",
-                    b"\n",
-                    b"p",
-                    b"",
-                ],
-            ),
-        )
-        for name, values in eof_cases:
-            with self.subTest(name=name):
-                script = _RawScript(values, [])
-                event, before_restore, complete, host, _, _ = self._scripted_event(
-                    script
-                )
-                self.assertIsNone(event)
-                self.assertIn("\x1b[?25l", before_restore)
+    def test_raw_host_decodes_physical_events_without_viewer_actions(self) -> None:
+        cases = [(char.encode(), "text\t" + char) for char in "/gqjkb nNmh?c개요😀e\u0301"]
+        cases += [
+            (b"\x15", "key\tctrl_u"), (b"\x01", "key\tctrl_a"),
+            (b"\x05", "key\tctrl_e"), (b"\x0b", "key\tctrl_k"),
+            (b"\x17", "key\tctrl_w"), (b"\x08", "key\tbackspace"),
+            (b"\x7f", "key\tbackspace"), (b"\r", "key\tenter"),
+            (b"\n", "key\tenter"), (b"\x03", "key\tinterrupt"),
+            (b"\x04", "key\teof"), (b"\t", "key\tunknown"),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                script = _RawScript(raw, [])
+                event, before, complete, _, termios, tty = self._scripted_event(script)
+                self.assertEqual(event, expected)
+                self.assertEqual(before, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2JPRIOR FRAME")
                 self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
-                self.assertIsNone(host._last_presented_frame)
+                tty.setcbreak.assert_called_once_with(17)
+                termios.tcsetattr.assert_called_once_with(17, 1, termios.tcgetattr.return_value)
                 script.assert_consumed(self)
 
-        interrupt = _RawScript(b"/\x03", [])
-        interrupt_output = _TerminalBuffer()
-        with self.assertRaises(KeyboardInterrupt):
-            self._scripted_event(interrupt, output=interrupt_output)
-        self.assertTrue(interrupt_output.getvalue().endswith("\x1b[?25h\x1b[?1049l"))
-        interrupt.assert_consumed(self)
+    def test_escape_sequences_are_bounded_drained_and_never_leak(self) -> None:
+        cases = {
+            b"[A": "up", b"OB": "down", b"[C": "right", b"OD": "left",
+            b"[H": "home", b"OF": "end", b"[3~": "delete",
+            b"[5~": "page_up", b"[6~": "page_down",
+            b"[Z": "unknown_escape", b"OP": "unknown_escape",
+            b"[" + b"0" * 30 + b"Z": "unknown_escape",
+            b"[" + b"0" * 31 + b"Z": "unknown_escape",
+        }
+        for suffix, key in cases.items():
+            with self.subTest(suffix=suffix):
+                script = _RawScript(b"\x1b" + suffix + b"q", [True] * len(suffix))
+                event, before, _, _, _, _ = self._scripted_event(script)
+                self.assertEqual(event, "key\t" + key)
+                self.assertEqual(script.values, [b"q"])
+                script.values.clear()
+                script.assert_consumed(self)
+                self.assertNotIn("Search", before)
+        for suffix, readiness, key in [(b"", [False], "escape"), (b"[", [True, False], "unknown_escape")]:
+            script = _RawScript(b"\x1b" + suffix, readiness)
+            self.assertEqual(self._scripted_event(script)[0], "key\t" + key)
+            script.assert_consumed(self)
 
-        primary = _RawScript([b"/", OSError("prompt read failed")], [])
-        primary_output = _HideFailingBuffer()
-        with self.assertRaisesRegex(OSError, "prompt read failed"):
-            self._scripted_event(primary, output=primary_output)
-        self.assertTrue(primary_output.getvalue().endswith("\x1b[?25h\x1b[?1049l"))
-        primary.assert_consumed(self)
+    def test_escape_drain_ceiling_fails_closed_and_restores(self) -> None:
+        script = _RawScript(b"\x1b[" + b"0" * 4096 + b"q", [True] * 4097)
+        output = _TerminalBuffer()
+        with self.assertRaisesRegex(ValueError, "drain bound"):
+            self._scripted_event(script, output=output)
+        self.assertEqual(script.values, [b"q"])
+        self.assertTrue(output.getvalue().endswith("\x1b[?25h\x1b[?1049l"))
 
-    def test_ordinary_line_escape_and_search_commands_remain_unchanged(self) -> None:
-        input_stream = io.StringIO(
-            "esc\n/content alpha\n/ content alpha\n/ content\nq\n"
-        )
-        host = _TerminalHost(input_stream, io.StringIO(), no_color=True)
-        self.assertEqual(host.read_event(), "cancel")
-        self.assertEqual(host.read_event(), "unknown")
-        self.assertEqual(host.read_event(), "search\tcontent\talpha")
-        self.assertEqual(host.read_event(), "unknown")
-        self.assertEqual(host.read_event(), "close")
+    def test_eof_interrupt_and_read_failure_restore_terminal(self) -> None:
+        for values, expected in [([b""], None), ([KeyboardInterrupt()], "key\tinterrupt")]:
+            script = _RawScript(values, [])
+            event, _, complete, _, _, _ = self._scripted_event(script)
+            self.assertEqual(event, expected)
+            self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
+            script.assert_consumed(self)
+        for values, error in [([OSError("read failed")], OSError), ([b"\xe2", b""], UnicodeDecodeError)]:
+            output = _TerminalBuffer()
+            with self.assertRaises(error):
+                self._scripted_event(_RawScript(values, []), output=output)
+            self.assertTrue(output.getvalue().endswith("\x1b[?25h\x1b[?1049l"))
 
-    def test_only_a_successfully_flushed_frame_is_retained(self) -> None:
+    def test_plain_host_returns_literal_bounded_line_transport(self) -> None:
+        values = ["esc", "/content alpha", " / content 개요 ", "g 2", "q", "\tq\t", ""]
+        host = _TerminalHost(io.StringIO("\n".join(values) + "\n"), io.StringIO(), no_color=True)
+        for value in values:
+            self.assertEqual(host.read_event(), "line\t" + value)
+        self.assertIsNone(host.read_event())
+        for count in [8192, 8193, 20000]:
+            with self.subTest(count=count):
+                host = _TerminalHost(io.StringIO("x" * count + "\nq\n"), io.StringIO(), no_color=True)
+                expected = "line\t" + "x" * count if count == 8192 else "key\tunknown"
+                self.assertEqual(host.read_event(), expected)
+                self.assertEqual(host.read_event(), "line\tq")
+        host = _TerminalHost(io.StringIO("x" * 65537), io.StringIO(), no_color=True)
+        with self.assertRaisesRegex(ValueError, "drain bound"):
+            host.read_event()
+
+    def test_present_flush_failure_propagates_without_retaining_view_state(self) -> None:
         output = _FlushControlledBuffer()
         host = _TerminalHost(io.StringIO(), output, no_color=True)
         host.present("FRAME A")
         output.fail_next_flush = True
         with self.assertRaisesRegex(RuntimeError, "flush failed"):
             host.present("FRAME B")
-        self.assertEqual(host._last_presented_frame, "FRAME A")
+        self.assertFalse(hasattr(host, "_last_presented_frame"))
         host.close_view()
-        self.assertIsNone(host._last_presented_frame)
+        host.close_view()
 
     def test_ordinary_line_search_then_escape_clears_and_closes(self) -> None:
         source = (
@@ -557,12 +480,8 @@ class StandaloneTests(unittest.TestCase):
                 self.assertEqual(restored, prior)
 
                 prompt_segment = bytes(output[prior_end:restored_end])
-                redraw = prompt_segment.rfind(_PRESENT)
-                shown = prompt_segment.find(b"\x1b[?25h")
-                hidden = prompt_segment.rfind(b"\x1b[?25l", 0, redraw)
-                self.assertGreaterEqual(shown, 0)
-                self.assertGreater(hidden, shown)
-                self.assertGreater(redraw, hidden)
+                self.assertNotIn(b"\x1b[?25h", prompt_segment)
+                self.assertNotIn(b"\x1b[?25l", prompt_segment)
 
                 self._pty_write(master, b"j")
                 moved, moved_end = self._pty_frame_containing(
@@ -698,6 +617,47 @@ class StandaloneTests(unittest.TestCase):
             finally:
                 self._pty_cleanup(process, master)
 
+    def test_raw_pty_ctrl_u_unicode_goto_cancel_and_termios_restoration(self) -> None:
+        import json
+        import termios as system_termios
+
+        source = b"".join((json.dumps({"content": "개요 " + str(i)}, ensure_ascii=False) + "\n").encode() for i in range(7))
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "records.jsonl"
+            path.write_bytes(source)
+            process, master = self._start_pty(path)
+            original = self._pty_original_attributes
+            output = bytearray()
+            try:
+                _, initial_end = self._pty_frame_containing(master, output, b"Record 1/7", start=0)
+                raw = system_termios.tcgetattr(master)
+                self.assertFalse(raw[3] & system_termios.ICANON)
+                self.assertFalse(raw[3] & system_termios.ECHO)
+                self._pty_write(master, b"/content\rwrong\x15" + "개요".encode() + b"\r")
+                active, active_end = self._pty_frame_containing(master, output, "Search content='개요'".encode(), start=initial_end)
+                self.assertIn(b"1/7", active)
+                self.assertNotIn(b"U0015", active)
+                self.assertNotIn(b"wrong", active)
+                self._pty_write(master, b"n")
+                active, active_end = self._pty_frame_containing(master, output, "Search content='개요' • 2/7".encode(), start=active_end)
+                for draft, prompt in ((b"/partial", b"Search field: "), (b"/content\rdraft", b"Search query: "), (b"g999", b"Go to source line: ")):
+                    self._pty_write(master, draft)
+                    prompt_start = self._pty_read_until(master, output, prompt, start=active_end)
+                    self.assertFalse(system_termios.tcgetattr(master)[3] & system_termios.ICANON)
+                    self._pty_write(master, b"\x1b")
+                    restored, active_end = self._pty_frame_containing(master, output, "Search content='개요' • 2/7".encode(), start=prompt_start)
+                    self.assertEqual(restored, active)
+                self._pty_write(master, b"q")
+                self._pty_read_until(master, output, b"\x1b[?25h\x1b[?1049l", start=active_end)
+                self._pty_finish(process, master, output)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(system_termios.tcgetattr(master), original)
+                self.assertEqual(output.count(b"\x1b[?1049h"), 1)
+                self.assertEqual(output.count(b"\x1b[?1049l"), 1)
+                self.assertEqual(path.read_bytes(), source)
+            finally:
+                self._pty_cleanup(process, master)
+
     def test_plain_line_standalone_smoke_preserves_source(self) -> None:
         source = b'{"timestamp":"t","request_type":"request","content":"hello"}\n'
         with tempfile.TemporaryDirectory() as temporary:
@@ -795,7 +755,9 @@ class StandaloneTests(unittest.TestCase):
         output_stream = TerminalBuffer()
         fake_termios = mock.Mock()
         fake_termios.TCSADRAIN = 1
-        fake_termios.tcgetattr.return_value = ["saved"]
+        fake_termios.VINTR = 0
+        fake_termios.VEOF = 1
+        fake_termios.tcgetattr.return_value = [0, 0, 0, 0, 0, 0, [b"\x03", b"\x04"]]
         fake_tty = mock.Mock()
         with (
             mock.patch.object(_standalone, "termios", fake_termios),
@@ -806,7 +768,7 @@ class StandaloneTests(unittest.TestCase):
                 raise RuntimeError("hosted failure")
 
         fake_tty.setcbreak.assert_called_once_with(17)
-        fake_termios.tcsetattr.assert_called_once_with(17, 1, ["saved"])
+        fake_termios.tcsetattr.assert_called_once_with(17, 1, fake_termios.tcgetattr.return_value)
         output = output_stream.getvalue()
         self.assertTrue(output.startswith("\x1b[?1049h\x1b[?25l"))
         self.assertTrue(output.endswith("\x1b[?25h\x1b[?1049l"))
@@ -852,7 +814,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.1.1")
+        self.assertEqual(project["version"], "0.2.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")

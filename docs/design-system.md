@@ -1,7 +1,7 @@
 # JSONL Viewer Terminal Design System
 
 This document is the repository-owned visual and interaction contract for
-`jsonl-viewer` 0.1.1. The viewer is an immutable diagnostic surface: source
+`jsonl-viewer` 0.2.0. The viewer is an immutable diagnostic surface: source
 bytes are never edited, commands never replay or retry work, and every bit of
 view state is discarded on close.
 
@@ -81,7 +81,9 @@ Every normal frame has three areas:
    same source line number repeats on continuation rows so paging cannot detach
    content from its source identity.
 3. **Footer:** transient status/search position followed by persistent command
-   help. The footer always retains at least `h help • q close` in the tiny tier.
+   help. The normal footer retains at least `h help • q close` in the tiny
+   tier. An active input draft replaces these two rows with its editor and
+   submit/cancel/edit hint or validation error.
 
 Plain gutter markers carry state without color:
 
@@ -113,7 +115,7 @@ host.
 
 | Semantic role | Plain signal | ANSI SGR | Exact usage |
 | --- | --- | --- | --- |
-| chrome | labels and separators | `1;36` bold cyan | the complete header line(s) and the Help body heading |
+| chrome | labels and separators | `1;36` bold cyan | the complete header line(s), Help body heading, and draft editor row |
 | line-number gutter | repeated number and `│` | `2;90` dim bright-black | source line digits and gutter separator; the marker has its own role |
 | JSON keys | quoted key | `34` blue | object field-name token; `:` and structural punctuation remain plain |
 | strings | quoted JSON token | `32` green | content-safe string value, excluding a muted truncation marker |
@@ -123,9 +125,9 @@ host.
 | current match | `@` plus footer `i/N` | `1;30;43` bold black on yellow | current-match marker and every non-whitespace token on the searched top-level field's rendered rows |
 | non-current match | `*` marker | `4;33` underlined yellow | other-match marker and every non-whitespace token on its searched-field rows |
 | warning/status | explanatory text | `1;33` bold yellow | non-error transient messages, including mode/goto/search status and hidden-field promotion |
-| error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, or search messages in the footer |
+| error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
-| footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, and persistent footer help |
+| footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, persistent footer help, and draft editing hint |
 | plain structure | JSON punctuation or help text | `0` reset/default | braces, brackets, commas, colons, whitespace, and Help command descriptions |
 
 Every colored role has words, JSON punctuation, a gutter marker, or both. Color
@@ -160,9 +162,10 @@ Height uses these exact allocations:
 | 5–99 | requested value | header, `rows - header rows - 2` body rows, then both footer rows |
 | 100+ | 100 | the same allocation at the renderer's maximum height |
 
-The footer is protected; body rows shrink to zero before help/close cues
-disappear. Loading uses the same header followed by its loading line and
-`h help • q close`, clipped only by the effective height. Page Down advances
+The two footer rows are protected; body rows shrink to zero before the normal
+help/close cues or active draft rows disappear. Loading uses the same header
+followed by its loading line and `h help • q close`, clipped only by the
+effective height. Page Down advances
 through the selected record's pretty rows and then crosses to the next source
 record; Page Up reverses that behavior. JSON and chrome use Unicode cell width:
 combining marks consume zero cells and East Asian wide/fullwidth characters
@@ -181,46 +184,71 @@ clipped`; clipping never changes the snapshot.
   is never echoed.
 - **Help:** replaces the body, keeps the header/footer, and states that commands
   never edit, replay, or retry.
-- **Standalone search prompt:** on a supported interactive terminal, `/`
-  temporarily appends `Search field:` and then `Search query:` below the last
-  complete frame and shows the cursor for local text entry. Escape at either
-  stage discards the unfinished draft, hides the cursor, redraws that exact
-  frame, and resumes normal viewer input. It emits no engine event, so any
-  active search result and current `i/N` position remain unchanged.
+- **Input draft:** with `input_protocol="keys"`, `/` opens `Search field:`
+  and then `Search query:`; `g` opens `Go to source line:`. The engine owns
+  draft text, insertion position, validation, submission, and cancellation.
+  The renderer places a printable `│` logical cursor in the first footer row
+  and `Enter submit • Esc cancel • Ctrl+U/K/W edit` in the second. A validation
+  error replaces that hint. Below 32 columns, labels shorten to `Field:`,
+  `Query:`, or `Line:`; long drafts clip around the logical cursor. These are
+  complete bounded frames, with the same plain/ANSI semantics as other states.
 - **Close:** once a valid `view_jsonl` call begins, it calls
   `host.close_view()` exactly once in `finally`, including after a host failure.
   It retains no frame, prompt draft, cursor, search, help, or navigation state.
 
-The prompt cancellation transition is intentionally local to the standalone
-terminal owner:
+Prompt cancellation is a viewer-engine transition shared by standalone and
+embedded hosts using the physical-input protocol:
 
 ```text
-last successfully presented frame
-  → cursor shown + Search field: or Search query: + transient draft
-  → Escape
-  → cursor hidden + exact same frame + normal viewer input
+committed viewer state
+  → complete frame with transient search/goto draft and printable cursor
+  → key<TAB>escape or key<TAB>unknown_escape
+  → draft discarded + committed viewer state rendered at current geometry
 ```
 
-The middle state never changes the body or source snapshot. The draft is
-discarded on cancel; all frame and search-result/index state remains call-local
-and is neither persisted nor returned.
+The draft does not change the committed selection, mode, search, match index,
+help, or status. Cancellation preserves those values, including the prior
+`i/N`, without a host-maintained frame cache or editor. All prompt and viewer
+state remains call-local and is neither persisted nor returned. No terminal
+cursor control is embedded in a prompt frame.
 
 ## Keyboard and focus behavior
 
-The package consumes host events, not terminal keys. The standalone adapter
-maps arrows or `j`/`k`, Page Up/Page Down or `b`/Space, `g`, `/`, `n`, `N`,
-`m`, `h`/`?`, Escape, and `q`. An embedding host may use different bindings
-while preserving the closed event vocabulary.
+The package consumes host input without reading a terminal. The appended
+`ViewerSpec.input_protocol` defaults to `"semantic"`, preserving 0.1.1
+integrations, the three public exports, existing constructor arguments, and
+all five host methods. Hosts selecting `"keys"` send `text<TAB>TEXT`,
+`key<TAB>NAME`, or `line<TAB>LITERAL_COMMAND`; each payload is bounded to
+8,192 characters independently of its envelope. Text accepts printable
+Unicode, and line input may also contain tab separators. The host decodes
+physical controls and bounded Escape sequences and preserves literal command
+text. The engine owns bindings, actions, and line grammar. The exact key-name
+vocabulary is listed in the [embedding contract](../README.md#embed-without-transferring-terminal-ownership).
 
-In the standalone adapter's interactive search prompts, a bare Escape cancels
-the unfinished prompt locally and redraws the last complete frame without
-producing an event from that closed vocabulary. Recognized arrow and Page key
-sequences are consumed locally without changing either the prompt draft or the
-viewer. Unsupported, incomplete, and overlong Escape sequences cancel the
-prompt under a fixed bound; their suffix bytes cannot become viewer commands.
-This prompt-specific behavior does not change main-view Escape or the
-ordinary-line fallback: textual `esc` still produces `cancel`, and
-`/ FIELD QUERY` still submits a search directly.
+The engine binds arrows or `j`/`k`, Page Up/Page Down or `b`/Space, `g`, `/`,
+`n`, `N`, `m`, `h`/`?`, `c`, Escape, and `q`. In a draft, all printable
+characters, including navigation and close letters, insert literal text.
+Left/Right move by code point; Home/End or Ctrl-A/E move to the buffer ends;
+Backspace/Delete remove the preceding/following code point. Ctrl-U deletes
+before the cursor, Ctrl-K deletes after it, and Ctrl-W deletes preceding
+whitespace and the preceding whitespace-delimited word. Up/Down and Page keys
+leave the draft and committed viewer position unchanged. Field and goto drafts
+are bounded to 128 characters; query drafts to 1,024. Enter validates and
+submits the stage; an invalid field, empty query, or nonpositive/noninteger
+goto remains in its draft with a visible error.
+
+Bare Escape and decoded `unknown_escape` cancel only an active draft. Ctrl-C
+(`interrupt`) closes the view during a draft and otherwise applies semantic
+`cancel`; physical EOF, `key<TAB>eof`, or `None` closes immediately. Hosts
+perform bounded decoding and transport, without applying these actions or
+opening another editor lifecycle. The standalone adapter uses `"keys"` for
+both physical key input and ordinary lines.
+
+The ordinary-line grammar remains `g LINE`, `/ FIELD QUERY`, `j`/`down`,
+`k`/`up`, `pgdn`, `pgup`, `n`, `N`, `m`, `h`/`?`, `c`/`clear`,
+`q`/`quit`, and `esc`. Textual `esc` applies semantic `cancel` and a complete
+`/ FIELD QUERY` submits a search directly. Existing semantic events remain
+accepted in either protocol:
 
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
@@ -235,13 +263,12 @@ ordinary-line fallback: textual `esc` still produces `cancel`, and
 - `close` or EOF: close immediately.
 
 There is no editable body focus, cursor inside JSON, selection clipboard,
-command execution, mouse link, or provider action. The standalone search
-prompt accepts only a transient local draft; it never edits JSON or the source
-snapshot. The host owns application focus and restores the surrounding view
-from `close_view()`; the standalone adapter owns and restores its
-alternate-screen, cursor visibility, and terminal mode. Showing the cursor
-during prompt text entry and hiding it before the exact-frame redraw gives a
-non-color focus cue without weakening the viewer's read-only contract.
+command execution, mouse link, or provider action. Search and goto accept only
+transient viewer drafts; they never edit JSON or the source snapshot. The host
+owns application focus and restores the surrounding view from `close_view()`;
+the standalone adapter owns and restores its alternate-screen, hardware cursor
+visibility, and terminal mode. The printable draft cursor provides a non-color
+focus cue without transferring terminal ownership to the engine.
 
 ## Nested JSON, truncation, and control neutralization
 
@@ -334,14 +361,16 @@ and source location without echoing the malformed record.
 2. The standalone adapter requests at most one byte beyond the fixed snapshot
    bound so it can detect overflow before taking terminal ownership; the engine
    first shows Loading, then Simple.
-3. The user presses `/`; the adapter shows the cursor and asks for an
-   enumerated field, then a query. Submitting both produces the existing search
-   event and `1/N`; `n` and `N` wrap through results.
-4. During either prompt, Escape discards the draft, hides the cursor, and
-   redraws the exact prior frame without changing an existing result or
-   position. Arrow/Page sequences at a prompt are consumed locally rather than
-   navigating the viewer; malformed or incomplete Escape sequences cancel and
-   cannot leak into later commands.
+3. The user presses `/`; the adapter sends physical text and the engine opens
+   a field draft, then a query draft, in complete frames with a printable
+   logical cursor. Submitting both applies search and `1/N`; `n` and `N` wrap
+   through results after the draft closes.
+4. During either search stage or a goto draft, Escape discards the draft and
+   renders the prior committed state without changing an existing result or
+   position. Left/Right and Ctrl-U/K/W edit the draft; command letters insert
+   literal text. Up/Down and Page keys are inert there. Bounded unsupported or
+   incomplete Escape input is reported by the adapter and cancels the draft
+   inside the engine.
 5. `g` moves to a source line, `m` switches mode, Page Up/Page Down inspect a
    large record, main-view Escape cancels transient help/search/status, and `q`
    closes. The ordinary-line fallback continues to accept `/ FIELD QUERY` and
@@ -368,10 +397,15 @@ This is an integration scenario, not behavior or schema built into this repo:
    ID. The package does not interpret those generic values and shortens them
    only through content-safe responsive width clipping. Each supplied header
    string is limited to 512 characters.
-4. Story's adapter maps its existing raw terminal driver events to the closed
-   `ViewerHost` event strings and passes the immutable bytes to `view_jsonl`.
+4. An integration using 0.2.0 selects `input_protocol="keys"` and validates
+   that capability before opening the terminal. Story's adapter passes the
+   immutable bytes to `view_jsonl` and transports decoded physical text/keys
+   or literal ordinary lines through `ViewerHost`. The engine owns all viewer
+   bindings, command grammar, search/goto drafts, editing, and cancellation.
    Story remains sole owner of raw mode, signals, geometry, input, output,
-   application focus, and cleanup.
+   application focus, and cleanup. An exact-signature integration pinned to
+   0.1.1 must update its dependency and signature check before using this
+   protocol; the existing semantic protocol remains available to other hosts.
 5. A provider exchange whose `content` string is a complete JSON object is
    displayed as derived structure; a complete encoded `response_text` object
    inside it expands recursively. The literal expansion cues and footer counts

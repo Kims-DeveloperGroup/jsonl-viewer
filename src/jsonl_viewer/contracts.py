@@ -48,8 +48,13 @@ class ViewerSpec:
     title: str = "JSONL Viewer"
     conversation_label: str = "Conversation"
     conversation_subject: str | None = None
+    input_protocol: str = "semantic"
 
     def __post_init__(self) -> None:
+        if type(self.input_protocol) is not str or self.input_protocol not in {
+            "semantic", "keys"
+        }:
+            raise ValueError("input_protocol must be 'semantic' or 'keys'")
         for attribute, label in (
             ("session_id", "session_id"),
             ("conversation_id", "conversation_id"),
@@ -119,10 +124,27 @@ class ViewerHost(Protocol):
     cursor, alternate-screen, or raw-mode controls. The host owns geometry,
     event decoding, presentation, signals, terminal modes, and restoration.
 
-    ``read_event`` returns ``None`` for EOF or one closed event string:
+    With the default ``ViewerSpec.input_protocol='semantic'``, ``read_event``
+    returns ``None`` for EOF or one closed event string:
     ``up``, ``down``, ``page_up``, ``page_down``, ``next_match``,
     ``previous_match``, ``toggle_mode``, ``help``, ``cancel``, ``clear_search``,
     ``close``, ``goto<TAB>LINE``, or ``search<TAB>FIELD<TAB>QUERY``.
+
+    ``input_protocol='keys'`` additionally accepts ``text<TAB>TEXT``,
+    ``line<TAB>COMMAND``, and ``key<TAB>NAME``. Each payload is bounded to
+    8,192 characters, independently of its envelope. Text contains printable
+    Unicode code points; line input may also contain tab separators. Hosts
+    preserve literal line input: the viewer owns command grammar and bindings.
+    Key names are ``enter``, ``escape``, ``unknown_escape``, ``backspace``,
+    ``delete``, ``left``, ``right``, ``home``, ``end``, ``up``, ``down``,
+    ``page_up``, ``page_down``, ``ctrl_a``, ``ctrl_e``, ``ctrl_u``, ``ctrl_k``,
+    ``ctrl_w``, ``interrupt``, ``eof``, and ``unknown``. Hosts decode physical
+    controls and bounded escape sequences without applying viewer actions.
+    EOF closes the view. Interrupt closes an active prompt's view and otherwise
+    applies semantic cancel. Bare or unsupported Escape cancels only
+    an active prompt draft; main-view Escape retains semantic cancel behavior.
+    Prompts and their logical cursors are rendered in ordinary complete frames;
+    hosts never acquire a second input lifecycle or edit a prompt buffer.
     """
 
     def terminal_size(self) -> tuple[int, int]:
