@@ -9,6 +9,8 @@ from typing import TypeAlias
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+JSONPath: TypeAlias = tuple[str | int, ...]
+MatchPaths: TypeAlias = tuple[JSONPath, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +44,24 @@ class SearchState:
     query: str
     matches: tuple[int, ...]
     current_index: int | None
+    match_paths: tuple[MatchPaths, ...] = ()
 
     @property
     def current_record_index(self) -> int | None:
         if self.current_index is None:
             return None
         return self.matches[self.current_index]
+
+    def paths_for_record(self, record_index: int) -> MatchPaths:
+        """Return paths aligned with the deduplicated source-record matches."""
+
+        try:
+            position = self.matches.index(record_index)
+        except ValueError:
+            return ()
+        if self.match_paths:
+            return self.match_paths[position]
+        return ((self.field,),) if self.field else ((),)
 
 
 @dataclass(frozen=True, slots=True)

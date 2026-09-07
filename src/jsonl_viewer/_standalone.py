@@ -250,7 +250,7 @@ def _parser() -> argparse.ArgumentParser:
         dest="searchable_fields",
         default=[],
         metavar="FIELD",
-        help="allow exact top-level field search; repeatable",
+        help="compatibility field preset; all fields remain searchable; repeatable",
     )
     parser.add_argument("--date-time-field", default="timestamp")
     parser.add_argument("--request-type-field", default="request_type")

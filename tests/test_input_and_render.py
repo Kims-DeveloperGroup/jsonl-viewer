@@ -10,7 +10,7 @@ import unicodedata
 import unittest
 from unittest import mock
 
-import jsonl_viewer._render as render_module
+import jsonl_viewer._json as json_module
 from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer._input import (
     MAX_RECORD_BYTES,
@@ -345,7 +345,7 @@ class RenderTests(unittest.TestCase):
 
     def test_encoding_layer_and_projected_depth_boundaries_are_exact(self) -> None:
         encoded = json.dumps({"leaf": "end"}, separators=(",", ":"))
-        for _ in range(render_module.MAX_EXPANSION_LAYERS - 1):
+        for _ in range(json_module.MAX_EXPANSION_LAYERS - 1):
             encoded = json.dumps(encoded, separators=(",", ":"))
         logical, facts = self._projection(encoded)
         self.assertIn("[expanded JSON string ×16]", logical)
@@ -376,11 +376,11 @@ class RenderTests(unittest.TestCase):
     def test_transactional_node_and_decoded_byte_limits_use_record_budget(
         self,
     ) -> None:
-        self.assertEqual(render_module.MAX_EXPANSION_LAYERS, 16)
-        self.assertEqual(render_module.MAX_PROJECTED_DISPLAY_DEPTH, 64)
-        self.assertEqual(render_module.MAX_DERIVED_VALUE_NODES, 200_000)
+        self.assertEqual(json_module.MAX_EXPANSION_LAYERS, 16)
+        self.assertEqual(json_module.MAX_PROJECTED_DISPLAY_DEPTH, 64)
+        self.assertEqual(json_module.MAX_DERIVED_VALUE_NODES, 200_000)
         self.assertEqual(
-            render_module.MAX_CUMULATIVE_DECODED_UTF8_BYTES,
+            json_module.MAX_CUMULATIVE_DECODED_UTF8_BYTES,
             16_777_216,
         )
 
@@ -390,7 +390,7 @@ class RenderTests(unittest.TestCase):
             {"first": first, "second": second},
             separators=(",", ":"),
         )
-        with mock.patch.object(render_module, "MAX_DERIVED_VALUE_NODES", 5):
+        with mock.patch.object(json_module, "MAX_DERIVED_VALUE_NODES", 5):
             logical, facts = self._projection(outer)
         self.assertIn('"first": [expanded JSON string ×1] {', logical)
         self.assertIn('"ok": 1', logical)
@@ -411,7 +411,7 @@ class RenderTests(unittest.TestCase):
             separators=(",", ":"),
         )
         host = FakeHost(("close",), size=(240, 16))
-        with mock.patch.object(render_module, "MAX_DERIVED_VALUE_NODES", 5):
+        with mock.patch.object(json_module, "MAX_DERIVED_VALUE_NODES", 5):
             view_jsonl(
                 self._content_source(aggregate_outer),
                 ViewerSpec("s", "c", "a", ("content",)),
@@ -425,7 +425,7 @@ class RenderTests(unittest.TestCase):
 
         exact_byte_budget = len(outer.encode("utf-8")) + len(first.encode("utf-8"))
         with mock.patch.object(
-            render_module,
+            json_module,
             "MAX_CUMULATIVE_DECODED_UTF8_BYTES",
             exact_byte_budget,
         ):
@@ -531,6 +531,34 @@ class RenderTests(unittest.TestCase):
         self.assertIn(
             "JSON display 1 expanded, 0 skipped, 0 truncated", host.frames[-1]
         )
+
+    def test_isolated_surrogates_have_visible_complete_bounded_previews(self) -> None:
+        logical, facts = self._projection(json.dumps({"leaf": "before\ud800after"}))
+        self.assertIn(r'"before\ud800after"', logical)
+        logical.encode("utf-8", errors="strict")
+        self.assertEqual(facts.truncated_leaves, 0)
+
+        for value, mode, retained, complete in (
+            ("x" * 4090 + "\ud800", ViewMode.SIMPLE, 4096, 4096),
+            ("x" * 4095 + "\ud800", ViewMode.SIMPLE, 4095, 4101),
+            ("한" * 1364 + "\udfff", ViewMode.SIMPLE, 4092, 4098),
+            ("🙂" * 1023 + "\ud800tail", ViewMode.SIMPLE, 4092, 4102),
+            ("x" * 65535 + "\ud800", ViewMode.VERBOSE, 65535, 65541),
+        ):
+            with self.subTest(mode=mode, complete=complete):
+                logical, facts = self._projection(json.dumps({"leaf": value}), mode=mode)
+                logical.encode("utf-8", errors="strict")
+                self.assertNotRegex(logical, r"[\ud800-\udfff]")
+                if retained == complete:
+                    self.assertIn(r"\ud800", logical)
+                    self.assertEqual(facts.truncated_leaves, 0)
+                else:
+                    self.assertIn(f"[truncated {retained}/{complete} UTF-8 bytes]", logical)
+                    self.assertEqual(facts.truncated_leaves, 1)
+                    self.assertEqual(facts.truncated_retained_utf8_bytes, retained)
+                    self.assertEqual(facts.truncated_full_utf8_bytes, complete)
+                    self.assertNotIn(r"\ud800", logical)
+                    self.assertNotIn(r"\udfff", logical)
 
     def test_simple_content_preview_is_bounded_at_complete_utf8_boundary(self) -> None:
         content = "한" * 2_000

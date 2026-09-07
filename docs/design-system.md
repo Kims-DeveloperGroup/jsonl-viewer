@@ -1,7 +1,7 @@
 # JSONL Viewer Terminal Design System
 
 This document is the repository-owned visual and interaction contract for
-`jsonl-viewer` 0.2.0. The viewer is an immutable diagnostic surface: source
+`jsonl-viewer`. The viewer is an immutable diagnostic surface: source
 bytes are never edited, commands never replay or retry work, and every bit of
 view state is discarded on close.
 
@@ -102,9 +102,10 @@ projection, but a complete JSON object or array stored inside a string may be
 shown as a visibly marked derived structure. The source record and its string
 type remain unchanged. Non-object JSON records render their original value in
 either mode, with the same derived-expansion and string-leaf preview rules.
-Searching a hidden object field with at least one hit automatically selects the
-first hit and promotes to Verbose; Simple cannot be selected again while that
-hidden-field match remains active.
+Search initially selects the first matching record. Selecting a hit that
+requires hidden object fields promotes to Verbose, including when `n`/`N`
+reaches a later hit. Simple cannot be selected while the current hit requires
+those hidden fields.
 
 ## Exact semantic roles
 
@@ -122,8 +123,8 @@ host.
 | numbers | decimal token | `35` magenta | integers and finite floats |
 | booleans / null | `true`, `false`, `null` | `33` yellow | JSON literal tokens |
 | current record | `>` gutter marker | `1;36` bold cyan | selected record when it is not a search match |
-| current match | `@` plus footer `i/N` | `1;30;43` bold black on yellow | current-match marker and every non-whitespace token on the searched top-level field's rendered rows |
-| non-current match | `*` marker | `4;33` underlined yellow | other-match marker and every non-whitespace token on its searched-field rows |
+| current match | `@` plus footer `i/N` | `1;30;43` bold black on yellow | current-match marker and every non-whitespace token on matched JSON paths' rendered rows, including descendants of a matched container |
+| non-current match | `*` marker | `4;33` underlined yellow | other-match marker and every non-whitespace token on its matched paths' rendered rows, including descendants of a matched container |
 | warning/status | explanatory text | `1;33` bold yellow | non-error transient messages, including mode/goto/search status and hidden-field promotion |
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
@@ -139,9 +140,10 @@ commas, and colons remain the terminal default. Expansion and truncation cues
 use muted dim bright-black; a skipped-expansion cue is warning yellow. The
 normal footer is dim cyan, while a record footer containing JSON display,
 truncation, or clipping facts uses muted dim bright-black. An active search
-footer remains dim cyan, and an active search match overrides the nested
-field's token colors with the current/non-current match role. The literal cues
-and footer counts carry the same information in plain mode.
+footer remains dim cyan, and an active search match overrides the matched
+path's token colors with the current/non-current match role. Unmatched sibling
+paths retain their ordinary roles. The literal cues and footer counts carry
+the same information in plain mode.
 
 ## Responsive geometry
 
@@ -185,11 +187,14 @@ clipped`; clipping never changes the snapshot.
 - **Help:** replaces the body, keeps the header/footer, and states that commands
   never edit, replay, or retry.
 - **Input draft:** with `input_protocol="keys"`, `/` opens `Search field:`
-  and then `Search query:`; `g` opens `Go to source line:`. The engine owns
+  and then `Search query:`; a blank field selects full-text search, while a
+  field or path narrows it. `g` opens `Go to source line:`. The engine owns
   draft text, insertion position, validation, submission, and cancellation.
   The renderer places a printable `│` logical cursor in the first footer row
-  and `Enter submit • Esc cancel • Ctrl+U/K/W edit` in the second. A validation
-  error replaces that hint. Below 32 columns, labels shorten to `Field:`,
+  and `Enter blank for all text • field/path • Esc cancel` in the second for
+  the field stage. Query and goto use
+  `Enter submit • Esc cancel • Ctrl+U/K/W edit`. A validation error replaces
+  that hint. Below 32 columns, labels shorten to `Field:`,
   `Query:`, or `Line:`; long drafts clip around the logical cursor. These are
   complete bounded frames, with the same plain/ANSI semantics as other states.
 - **Close:** once a valid `view_jsonl` call begins, it calls
@@ -234,7 +239,7 @@ before the cursor, Ctrl-K deletes after it, and Ctrl-W deletes preceding
 whitespace and the preceding whitespace-delimited word. Up/Down and Page keys
 leave the draft and committed viewer position unchanged. Field and goto drafts
 are bounded to 128 characters; query drafts to 1,024. Enter validates and
-submits the stage; an invalid field, empty query, or nonpositive/noninteger
+submits the stage; a malformed selector, empty query, or nonpositive/noninteger
 goto remains in its draft with a visible error.
 
 Bare Escape and decoded `unknown_escape` cancel only an active draft. Ctrl-C
@@ -244,7 +249,8 @@ perform bounded decoding and transport, without applying these actions or
 opening another editor lifecycle. The standalone adapter uses `"keys"` for
 both physical key input and ordinary lines.
 
-The ordinary-line grammar remains `g LINE`, `/ FIELD QUERY`, `j`/`down`,
+The ordinary-line grammar accepts `g LINE`, `/ FIELD QUERY`, `// QUERY`,
+`/ QUERY` for a single-token full-text query, `j`/`down`,
 `k`/`up`, `pgdn`, `pgup`, `n`, `N`, `m`, `h`/`?`, `c`/`clear`,
 `q`/`quit`, and `esc`. Textual `esc` applies semantic `cancel` and a complete
 `/ FIELD QUERY` submits a search directly. Existing semantic events remain
@@ -253,7 +259,8 @@ accepted in either protocol:
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
 - `goto<TAB>LINE`: select an exact positive source-record line.
-- `search<TAB>FIELD<TAB>QUERY`: search one exact enumerated top-level field.
+- `search<TAB>FIELD_OR_PATH<TAB>QUERY`: search any exact field or nested path.
+- `search<TAB><TAB>QUERY`: search all text with an empty field.
 - `next_match` / `previous_match`: wrap through hits and update `i/N`.
 - `toggle_mode`: switch mode unless a selected hidden-field hit requires
   Verbose.
@@ -270,6 +277,57 @@ the standalone adapter owns and restores its alternate-screen, hardware cursor
 visibility, and terminal mode. The printable draft cursor provides a non-color
 focus cue without transferring terminal ownership to the engine.
 
+## Search semantics and result projection
+
+At `Search field:`, press Enter without text, then enter a nonempty query at
+`Search query:` to search all text. Full-text search includes all JSON root
+types, object keys, scalar values, and complete values before previews. Query
+matching uses Unicode `casefold` and literal substrings. Structural matching
+uses compact normalized JSON with sorted object keys, rather than source
+whitespace or member order. Expressions, evaluation, regular expressions, and
+wildcards are unsupported.
+
+The same searches can be submitted without a draft; `<TAB>` is one literal tab:
+
+| Search | Ordinary line | Semantic event |
+| --- | --- | --- |
+| full phrase | `// correlation token mismatch` | `search<TAB><TAB>correlation token mismatch` |
+| single token | `/ provider_error` | `search<TAB><TAB>provider_error` |
+| arbitrary nested field | `/ payload.items[0].status provider_error` | `search<TAB>payload.items[0].status<TAB>provider_error` |
+| JSON Pointer | `/ /payload/items/0/status provider_error` | `search<TAB>/payload/items/0/status<TAB>provider_error` |
+| existing field/query form | `/ content correlation token mismatch` | `search<TAB>content<TAB>correlation token mismatch` |
+
+`/ two words` retains the field/query grammar: field `two`, query `words`.
+Use `// two words` for a full-text phrase. Fields/paths are bounded to 128
+characters and queries to 1,024 in every protocol. A missing field or path
+produces zero matches; invalid selectors preserve the committed search.
+
+Field/key lookup is exact and case-sensitive. Dotted paths accept zero-based
+array indexes, including root paths such as `[0].status`; JSON Pointer also
+accepts `/0/status`. Array indexes have no leading zeros except `0`. Pointer
+decodes `~0` to `~` and `~1` to `/` and preserves empty segments:
+`/a~1b/~0key/` selects an empty key inside `~key` inside `a/b`, and `/` selects
+an empty top-level key. For each object record, an exact nonempty top-level
+key always wins before interpreting a path, including slash-prefixed or
+otherwise path-like keys. A literal `/` key therefore shadows Pointer `/`
+for the empty key. Only records without the exact key use path traversal.
+A blank field always selects full text.
+
+`ViewerSpec.searchable_fields` remains a required constructor parameter; `()`
+means no presets. Existing presets and the optional repeatable CLI
+`--searchable-field` are compatibility metadata and never filter search.
+Selecting a string itself searches its original contents, preserving literal
+matching. Deeper paths and full-text search can inspect children decoded from
+complete strict object/array strings under the bounds below.
+
+Each matching source record contributes one result even if several paths
+match. `n`/`N` wrap in source order, update `i/N`, and promote a newly selected
+hidden-field hit to Verbose. Matched nested paths receive the current/other
+roles without coloring unrelated siblings. A matched container includes its
+descendants. Plain mode retains `@`/`*` record markers and the result count;
+`c` clears the search, and cancellation follows the draft/main-view rules
+above. Search, selection, and match position are discarded on close.
+
 ## Nested JSON, truncation, and control neutralization
 
 Every displayed string leaf is considered for derived expansion before its
@@ -280,7 +338,8 @@ encoded provider `content` object can expose an encoded `response_text` object
 inside it. Prose, JSON fragments, JSON scalars, malformed JSON, objects with
 duplicate fields, and non-finite numbers stay genuine strings.
 
-Expansion is bounded per source record:
+Search and display share these decoding bounds, applied independently per
+source record. The last column describes the display fallback:
 
 | Bound | Limit | Result when exceeded |
 | --- | ---: | --- |
@@ -295,6 +354,12 @@ limit, siblings already accepted remain expanded, and the footer increments
 the skipped count. The display cue `[expanded JSON string ×N]` gives the
 number of decoded string layers. These projections never mutate the source
 bytes or parsed value types.
+
+Search and rendering traverse independently with separate budgets. A decoded
+hit may therefore be behind a display expansion skip or a clipped preview;
+width clipping and paging can also hide its text. The record marker and result
+count still identify the match. A rejected decoding candidate exposes no
+partial children to search, while its original string remains searchable.
 
 Simple displayed string leaves use a 4,096-byte complete UTF-8 prefix; Verbose
 leaves use 65,536 bytes. Preview truncation is independent per leaf and never
@@ -319,7 +384,7 @@ the same neutralization boundary before rendering.
 
 Simple mode is not redaction or access control. Verbose mode can display every
 field of a valid object record, subject to the documented preview and geometry
-bounds, and searchable-field enumeration limits search rather than visibility.
+bounds. Search presets limit neither search nor visibility.
 The embedding application must authorize the user, select the correct bounded
 snapshot, and apply any retention or redaction policy before calling the
 viewer.
@@ -332,7 +397,7 @@ and source location without echoing the malformed record.
 
 ## Nested diagnostic scenarios
 
-1. **Provider exchange:** a Story exchange stores a complete JSON object in
+1. **Provider exchange:** a JSONL exchange stores a complete JSON object in
    `content`, whose `response_text` string stores another complete object. Both
    strings expand recursively, their keys and values receive the ordinary JSON
    roles, and the two plain-text cues plus `2 expanded` footer fact identify the
@@ -348,13 +413,15 @@ and source location without echoing the malformed record.
    displayed.
 4. **Source and search immutability:** after viewing an expanded response, the
    source bytes and parsed string types are unchanged. A search on `content`
-   still evaluates that original enumerated top-level string; derived child
-   fields do not become new search targets.
+   still evaluates the original string. A search on
+   `content.response_text.status`, or a blank-field full-text query, can
+   inspect its decoded children under the same bounded strict decoding rules.
 
 ## End-to-end standalone scenario
 
 1. The user snapshots a JSONL file and launches `jsonl-viewer` with explicit
-   session, conversation/scope ID, agent, and allowed search fields. Optional
+   session, conversation/scope ID, and agent. Search needs no preset fields;
+   optional `--searchable-field` values remain compatibility metadata. Optional
    `--conversation-label` and `--conversation-subject` values project the scope
    as, for example, `Debate: FULL_ID — subject`; the label defaults to
    `Conversation`.
@@ -363,8 +430,9 @@ and source location without echoing the malformed record.
    first shows Loading, then Simple.
 3. The user presses `/`; the adapter sends physical text and the engine opens
    a field draft, then a query draft, in complete frames with a printable
-   logical cursor. Submitting both applies search and `1/N`; `n` and `N` wrap
-   through results after the draft closes.
+   logical cursor. The user leaves the field blank for full text or enters any
+   field/path, then submits a query. A match applies search and `1/N`;
+   `n` and `N` wrap through results after the draft closes.
 4. During either search stage or a goto draft, Escape discards the draft and
    renders the prior committed state without changing an existing result or
    position. Left/Right and Ctrl-U/K/W edit the draft; command letters insert
@@ -373,14 +441,15 @@ and source location without echoing the malformed record.
    inside the engine.
 5. `g` moves to a source line, `m` switches mode, Page Up/Page Down inspect a
    large record, main-view Escape cancels transient help/search/status, and `q`
-   closes. The ordinary-line fallback continues to accept `/ FIELD QUERY` and
-   textual `esc` without using the interactive prompts.
+   closes. The ordinary-line fallback accepts `// QUERY`, single-token
+   `/ QUERY`, existing `/ FIELD QUERY`, and textual `esc` directly.
 6. The adapter restores its terminal. The file bytes remain unchanged; frame,
    prompt-draft, and viewer state are discarded.
 
 ## End-to-end Story-hosted `/exchanges` scenario
 
-This is an integration scenario, not behavior or schema built into this repo:
+This is a hosting use case. Story owns the surrounding application flow and
+supplies generic inputs through the viewer's public contract:
 
 1. In a Story session, the user enters `/exchanges` with no identifier
    arguments. Story opens a scope picker whose rows use the full label
@@ -391,9 +460,11 @@ This is an integration scenario, not behavior or schema built into this repo:
 3. Story acquires the selected agent's bounded immutable JSONL bytes and builds
    a generic `ViewerSpec`. It supplies the Story session ID, exact agent ID,
    full selected scope ID as `conversation_id`, exact kind as
-   `conversation_label`, and subject as `conversation_subject`. The viewer
-   header therefore reads `Conversation: FULL_ID — subject` or `Debate:
-   FULL_ID — subject`; Story does not concatenate the kind or subject into the
+   `conversation_label`, and subject as `conversation_subject`. Story retains
+   its existing `searchable_fields` presets as compatibility metadata; they no
+   longer restrict viewer search. The viewer header therefore reads
+   `Conversation: FULL_ID — subject` or `Debate: FULL_ID — subject`;
+   Story does not concatenate the kind or subject into the
    ID. The package does not interpret those generic values and shortens them
    only through content-safe responsive width clipping. Each supplied header
    string is limited to 512 characters.
@@ -410,13 +481,15 @@ This is an integration scenario, not behavior or schema built into this repo:
    displayed as derived structure; a complete encoded `response_text` object
    inside it expands recursively. The literal expansion cues and footer counts
    distinguish that view from the unchanged source string.
-6. The user confirms session/scope/agent context in the header, searches only
-   Story-enumerated fields, sees the transient `i/N` result in the footer, and
-   uses `n`/`N` to wrap through hits. Search continues to inspect the original
-   enumerated top-level values, not the derived children, so existing query
-   semantics and results do not change. The user can go to a physical JSONL
-   source line, switch Simple/Verbose, inspect help, and use Escape to dismiss
-   help, then search, then status; an Escape with nothing transient closes.
+6. The user confirms session/scope/agent context in the header, leaves the
+   search field blank for full text or enters a path such as
+   `content.response_text.status`, and submits the query. The viewer finds
+   bounded decoded children, shows the transient `i/N` result, and owns `n`/`N`
+   navigation and hidden-hit Verbose promotion. Selecting an encoded string
+   itself preserves its original literal substring matching. The user can go
+   to a physical JSONL source line, switch Simple/Verbose, inspect help, and use
+   Escape to dismiss help, then search, then status; an Escape with nothing
+   transient closes.
 7. Long nested string leaves receive independent retained/full byte markers;
    their parent objects, keys, siblings, and closing structure remain present
    and pageable. If a safety bound rejects an expansion, the user sees the

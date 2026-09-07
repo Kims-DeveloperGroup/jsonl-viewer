@@ -31,11 +31,11 @@ def _validate_field(value: object, *, label: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ViewerSpec:
-    """Describe one generic immutable view and its closed search surface.
+    """Describe one generic immutable view with unrestricted literal search.
 
-    Field names identify exact top-level JSON object keys. They are data
-    conventions supplied by the embedding application, not storage-schema
-    assumptions made by this package.
+    ``searchable_fields`` retains bounded compatibility presets; an empty
+    tuple is valid and presets never restrict search. Primary display fields
+    identify exact top-level keys supplied by the embedding application.
     """
 
     session_id: str
