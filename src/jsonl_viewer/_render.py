@@ -465,11 +465,11 @@ def _status_body(
     return []
 
 
-def _record_marker(index: int, state: ViewState) -> tuple[str, str]:
+def _record_marker(index: int, state: ViewState, *, matched: bool) -> tuple[str, str]:
     search = state.search
     if search is not None and search.current_record_index == index:
         return "@", "match_current"
-    if search is not None and index in search.matches:
+    if matched:
         return "*", "match_other"
     if index == state.selected_index:
         return ">", "current"
@@ -503,10 +503,10 @@ def _record_lines(
     color: bool,
 ) -> tuple[list[str], bool, int, _ProjectionFacts]:
     logical, facts = _format_record(record, spec, state.mode)
-    marker, marker_role = _record_marker(index, state)
     match_paths = frozenset(
         state.search.paths_for_record(index) if state.search is not None else ()
     )
+    marker, marker_role = _record_marker(index, state, matched=bool(match_paths))
     result: list[str] = []
     any_width_clip = False
     for line in logical:

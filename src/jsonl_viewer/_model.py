@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -53,11 +54,10 @@ class SearchState:
         return self.matches[self.current_index]
 
     def paths_for_record(self, record_index: int) -> MatchPaths:
-        """Return paths aligned with the deduplicated source-record matches."""
+        """Return paths aligned with sorted, deduplicated source-record matches."""
 
-        try:
-            position = self.matches.index(record_index)
-        except ValueError:
+        position = bisect_left(self.matches, record_index)
+        if position == len(self.matches) or self.matches[position] != record_index:
             return ()
         if self.match_paths:
             return self.match_paths[position]

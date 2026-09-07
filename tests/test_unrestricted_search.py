@@ -12,7 +12,8 @@ from unittest import mock
 
 import jsonl_viewer._json as json_module
 from jsonl_viewer import ViewerSpec, view_jsonl
-from jsonl_viewer._render import strip_ansi
+from jsonl_viewer._model import Record, SearchState, Snapshot, ViewState
+from jsonl_viewer._render import render_frame, strip_ansi
 
 from tests.support import FakeHost
 
@@ -21,6 +22,31 @@ def _source(*records: object) -> bytes:
     # ASCII JSON escapes also let fixtures distinguish decoded Unicode hits
     # from text that is literally present in a string-encoded container.
     return "".join(json.dumps(record) + "\n" for record in records).encode("utf-8")
+
+
+class _CountedIndex(int):
+    """Observe lookup work while retaining ordinary integer value semantics."""
+
+    def __new__(cls, value, operations):
+        result = super().__new__(cls, value)
+        result.operations = operations
+        return result
+
+    def __eq__(self, other):
+        self.operations[0] += 1
+        return super().__eq__(other)
+
+    def __ne__(self, other):
+        self.operations[0] += 1
+        return super().__ne__(other)
+
+    def __lt__(self, other):
+        self.operations[0] += 1
+        return super().__lt__(other)
+
+    def __hash__(self):
+        self.operations[0] += 1
+        return super().__hash__()
 
 
 class UnrestrictedSearchTests(unittest.TestCase):
@@ -48,6 +74,85 @@ class UnrestrictedSearchTests(unittest.TestCase):
 
     def _result(self, frame: str, field: str, query: str, count: str) -> None:
         self.assertIn(f"Search {field or 'all text'}={query!r} • {count}", frame)
+
+    def test_sparse_search_paths_preserve_alignment_and_legacy_fallback(self) -> None:
+        paths = (
+            ((),),
+            (("payload", "items", 0, "status"),),
+            (("payload", "name"), ("content",)),
+        )
+        search = SearchState("payload", "needle", (2, 11, 29), 1, paths)
+        for record_index, expected in (
+            (0, ()), (2, paths[0]), (3, ()), (10, ()),
+            (11, paths[1]), (12, ()), (28, ()), (29, paths[2]), (30, ()),
+        ):
+            with self.subTest(record_index=record_index):
+                self.assertEqual(search.paths_for_record(record_index), expected)
+        self.assertEqual(search.current_record_index, 11)
+
+        for field, fallback in (("payload", (("payload",),)), ("", ((),))):
+            legacy = SearchState(field, "needle", (2, 11, 29), 1)
+            for record_index in (2, 11, 29):
+                self.assertEqual(legacy.paths_for_record(record_index), fallback)
+            for record_index in (0, 3, 12, 30):
+                self.assertEqual(legacy.paths_for_record(record_index), ())
+            empty = SearchState(field, "needle", (), None)
+            for record_index in (0, 2, 30):
+                self.assertEqual(empty.paths_for_record(record_index), ())
+            self.assertIsNone(empty.current_record_index)
+
+    def test_search_path_lookup_work_stays_sublinear_for_large_sparse_results(self) -> None:
+        for count in (32, 4096):
+            operations = [0]
+            matches = tuple(_CountedIndex(2 * index + 1, operations) for index in range(count))
+            paths = tuple((("payload", index, "value"),) for index in range(count))
+            cases = (
+                (0, ()), (1, paths[0]), (2, ()),
+                (2 * (count // 2) + 1, paths[count // 2]),
+                (2 * count - 1, paths[-1]), (2 * count, ()),
+            )
+            for explicit_paths in (True, False):
+                search = SearchState("payload", "needle", matches, 0, paths if explicit_paths else ())
+                for record_index, expected in cases:
+                    with self.subTest(count=count, explicit_paths=explicit_paths, record_index=record_index):
+                        operations[0] = 0
+                        actual = search.paths_for_record(record_index)
+                        self.assertEqual(actual, expected if explicit_paths or not expected else (("payload",),))
+                        self.assertLessEqual(
+                            operations[0], 8 * count.bit_length(),
+                            "One lookup must not scan the match set or rebuild a full lookup table.",
+                        )
+
+    def test_frame_markers_use_bounded_lookup_for_large_search_results(self) -> None:
+        operations = [0]
+        matches = tuple(_CountedIndex(index, operations) for index in range(1, 8192, 2))
+        snapshot = Snapshot(
+            tuple(Record(index + 1, 1, index) for index in range(8193)),
+            source_utf8_bytes=8193,
+        )
+        for paths in (tuple(((),) for _ in matches), ()):
+            search = SearchState("", "needle", matches, len(matches) - 1, paths)
+            state = ViewState(selected_index=8188, search=search)
+            frames = []
+            for color in (False, True):
+                operations[0] = 0
+                frame = render_frame(
+                    self.spec, state, snapshot=snapshot, diagnostic=None,
+                    columns=120, rows=24, color=color,
+                ).text
+                self.assertLessEqual(
+                    operations[0], 256,
+                    "Rendering five records must not scan thousands of matches for their markers.",
+                )
+                frames.append(frame)
+            self.assertEqual(frames[0], strip_ansi(frames[1]))
+            self.assertIn("> 8189 │ 8188", frames[0])
+            self.assertIn("* 8190 │ 8189", frames[0])
+            self.assertIn("  8191 │ 8190", frames[0])
+            self.assertIn("@ 8192 │ 8191", frames[0])
+            self.assertIn("  8193 │ 8192", frames[0])
+            self.assertIn("\x1b[1;30;43m@\x1b[0m", frames[1])
+            self.assertIn("\x1b[4;33m*\x1b[0m", frames[1])
 
     def test_empty_presets_find_hidden_multiply_encoded_unicode(self) -> None:
         response = json.dumps({"items": [{"status": "Straße 개요"}]})
