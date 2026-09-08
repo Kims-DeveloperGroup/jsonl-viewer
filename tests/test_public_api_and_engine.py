@@ -196,7 +196,7 @@ class EngineTests(unittest.TestCase):
         self.assertLess(verbose.index('"request_type"'), verbose.index('"content"'))
         self.assertLess(verbose.index('"content"'), verbose.index('"latency_ms"'))
 
-    def test_search_is_closed_wraps_and_promotes_hidden_field(self) -> None:
+    def test_search_wraps_and_promotes_hidden_field(self) -> None:
         host = FakeHost(
             (
                 "search\tlatency_ms\t2",
@@ -269,13 +269,14 @@ class EngineTests(unittest.TestCase):
         self.assertIn("Search content=", host.frames[4])
         self.assertIn("• 0/0 • @ current", host.frames[4])
 
-    def test_non_enumerated_search_does_not_inspect_values(self) -> None:
+    def test_non_enumerated_search_finds_values_and_promotes_hidden_field(self) -> None:
         host = FakeHost(("search\tsecret\tneedle", "close"))
         source = b'{"content":"safe","secret":"needle"}\n'
         view_jsonl(source, self.spec, host)
         frame = host.frames[2]
-        self.assertIn("Field is not searchable", frame)
-        self.assertNotIn("needle", frame)
+        self.assertIn("Search secret='needle' • 1/1", frame)
+        self.assertIn("READ ONLY • VERBOSE", frame)
+        self.assertIn('"secret": "needle"', frame)
 
     def test_no_match_position_paging_and_invalid_goto_are_bounded(self) -> None:
         source = (
@@ -610,10 +611,10 @@ class KeyInputTests(unittest.TestCase):
             self.assertFalse(closed)
         self.assertIsNone(state.prompt)
         self.assertEqual(state.selected_index, 1)
-        for event in ("text\t/", "text\tnot_allowed", "key\tenter"):
+        for event in ("text\t/", "text\tpayload[", "key\tenter"):
             state, _ = self.step(state, event)
         self.assertIsNone(state.search)
-        self.assertIn("Allowed fields", state.prompt.error)
+        self.assertIn("Malformed field path", state.prompt.error)
         for event in ("key\tctrl_u", "text\tcontent", "key\tenter", "key\tenter"):
             state, _ = self.step(state, event)
         self.assertIn("must not be empty", state.prompt.error)

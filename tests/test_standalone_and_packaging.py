@@ -6,6 +6,7 @@ import ast
 import errno
 import io
 import importlib.util
+import json
 import os
 import re
 import select as select_module
@@ -147,6 +148,8 @@ class StandaloneTests(unittest.TestCase):
     def _start_pty(
         self,
         path: Path,
+        *,
+        searchable_fields: tuple[str, ...] = ("content",),
     ) -> tuple[subprocess.Popen[bytes], int]:
         if not hasattr(os, "openpty") or _standalone.termios is None:
             self.skipTest("POSIX PTY support is unavailable")
@@ -179,10 +182,10 @@ class StandaloneTests(unittest.TestCase):
             "pty-conversation",
             "--agent",
             "pty-agent",
-            "--searchable-field",
-            "content",
             "--no-color",
         ]
+        for field in searchable_fields:
+            command.extend(("--searchable-field", field))
         try:
             process = subprocess.Popen(
                 command,
@@ -658,6 +661,94 @@ class StandaloneTests(unittest.TestCase):
             finally:
                 self._pty_cleanup(process, master)
 
+    def test_raw_pty_blank_field_and_unrestricted_path_preserve_cleanup(self) -> None:
+        source = b"".join(
+            (json.dumps({
+                "content": "orientation",
+                "payload": json.dumps({"items": [{"status": "Straße 개요"}]}),
+            }) + "\n").encode()
+            for _ in range(2)
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "records.jsonl"
+            path.write_bytes(source)
+            process, master = self._start_pty(path, searchable_fields=())
+            import termios as system_termios
+
+            original = self._pty_original_attributes
+            output = bytearray()
+            try:
+                _, end = self._pty_frame_containing(master, output, b"Record 1/2", start=0)
+                self._pty_write(master, b"/\r")
+                prompt = self._pty_read_until(master, output, b"Search query: ", start=end)
+                self._pty_write(master, "STRASSE 개요\r".encode())
+                active, end = self._pty_frame_containing(
+                    master, output, "Search all text='STRASSE 개요' • 1/2".encode(), start=prompt,
+                )
+                self.assertIn("READ ONLY • VERBOSE".encode(), active)
+                self.assertIn('"status": "Straße 개요"'.encode(), active)
+                self._pty_write(master, b"n")
+                active, end = self._pty_frame_containing(
+                    master, output, "Search all text='STRASSE 개요' • 2/2".encode(), start=end,
+                )
+                self._pty_write(master, b"/\rdraft")
+                prompt = self._pty_read_until(master, output, b"Search query: ", start=end)
+                self._pty_write(master, b"\x1b")
+                restored, end = self._pty_frame_containing(
+                    master, output, "Search all text='STRASSE 개요' • 2/2".encode(), start=prompt,
+                )
+                self.assertEqual(restored, active)
+
+                self._pty_write(master, b"/payload.items[0].status\rSTRASSE\r")
+                selected, end = self._pty_frame_containing(
+                    master, output, b"Search payload.items[0].status='STRASSE'", start=end,
+                )
+                self.assertIn(b"1/2", selected)
+                self._pty_write(master, b"N")
+                selected, end = self._pty_frame_containing(
+                    master, output, "Search payload.items[0].status='STRASSE' • 2/2".encode(), start=end,
+                )
+                self.assertIn(b"@ 2", selected)
+                self._pty_write(master, b"q")
+                self._pty_read_until(master, output, b"\x1b[?25h\x1b[?1049l", start=end)
+                self._pty_finish(process, master, output)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(system_termios.tcgetattr(master), original)
+                self.assertEqual(output.count(b"\x1b[?1049h"), 1)
+                self.assertEqual(output.count(b"\x1b[?1049l"), 1)
+                self.assertEqual(path.read_bytes(), source)
+            finally:
+                self._pty_cleanup(process, master)
+
+    def test_line_cli_searches_all_text_and_paths_without_presets(self) -> None:
+        source = (json.dumps({
+            "content": "single", "payload": json.dumps({"items": [{"status": "two words"}]}),
+        }) + "\n").encode()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "records.jsonl"
+            path.write_bytes(source)
+            environment = os.environ.copy()
+            environment.update({
+                "PYTHONPATH": str(ROOT / "src"), "PYTHONDONTWRITEBYTECODE": "1",
+                "NO_COLOR": "1", "COLUMNS": "200",
+            })
+            completed = subprocess.run(
+                [sys.executable, "-m", "jsonl_viewer", str(path),
+                 "--session", "s", "--conversation", "c", "--agent", "a"],
+                input="// two words\n/ single\n/ payload.items[0].status two words\n/ content single\nq\n",
+                capture_output=True, text=True, env=environment, check=False, timeout=5,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            for result in (
+                "Search all text='two words' • 1/1", "Search all text='single' • 1/1",
+                "Search payload.items[0].status='two words' • 1/1", "Search content='single' • 1/1",
+            ):
+                self.assertIn(result, completed.stdout)
+            self.assertNotIn("\x1b", completed.stdout)
+            self.assertNotIn("Unknown event", completed.stdout)
+            self.assertEqual(path.read_bytes(), source)
+
     def test_plain_line_standalone_smoke_preserves_source(self) -> None:
         source = b'{"timestamp":"t","request_type":"request","content":"hello"}\n'
         with tempfile.TemporaryDirectory() as temporary:
@@ -867,8 +958,8 @@ class PackagingBoundaryTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
-        self.assertEqual(len(modules), 8)
-        self.assertEqual(sum(len(value) for value in graph.values()), 13)
+        self.assertEqual(len(modules), 10)
+        self.assertEqual(sum(len(value) for value in graph.values()), 18)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -876,8 +967,8 @@ class PackagingBoundaryTests(unittest.TestCase):
         index = (ROOT / "PYTHON_MODULE_INDEX.md").read_text(encoding="utf-8")
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
-        self.assertIn("Importable production units indexed: 8.", index)
-        self.assertIn("Direct internal dependency edges indexed: 13.", index)
+        self.assertIn("Importable production units indexed: 10.", index)
+        self.assertIn("Direct internal dependency edges indexed: 18.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
@@ -900,8 +991,10 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "__init__.py",
                 "__main__.py",
                 "_input.py",
+                "_json.py",
                 "_model.py",
                 "_render.py",
+                "_search.py",
                 "_standalone.py",
                 "contracts.py",
                 "engine.py",

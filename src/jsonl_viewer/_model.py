@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -9,6 +10,8 @@ from typing import TypeAlias
 
 JSONScalar: TypeAlias = str | int | float | bool | None
 JSONValue: TypeAlias = JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
+JSONPath: TypeAlias = tuple[str | int, ...]
+MatchPaths: TypeAlias = tuple[JSONPath, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,12 +45,23 @@ class SearchState:
     query: str
     matches: tuple[int, ...]
     current_index: int | None
+    match_paths: tuple[MatchPaths, ...] = ()
 
     @property
     def current_record_index(self) -> int | None:
         if self.current_index is None:
             return None
         return self.matches[self.current_index]
+
+    def paths_for_record(self, record_index: int) -> MatchPaths:
+        """Return paths aligned with sorted, deduplicated source-record matches."""
+
+        position = bisect_left(self.matches, record_index)
+        if position == len(self.matches) or self.matches[position] != record_index:
+            return ()
+        if self.match_paths:
+            return self.match_paths[position]
+        return ((self.field,),) if self.field else ((),)
 
 
 @dataclass(frozen=True, slots=True)

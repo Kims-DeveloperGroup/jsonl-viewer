@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import json
 import unicodedata
 from dataclasses import replace
 
 from ._input import InputFailure, parse_jsonl
 from ._model import PromptState, SearchState, Snapshot, ViewMode, ViewState
 from ._render import render_frame, render_loading
+from ._search import MAX_FIELD_CHARACTERS, SelectorError, find_matches, parse_selector
 from .contracts import ViewerHost, ViewerSpec
 
 
 _MAX_EVENT_CHARACTERS = 8_192
 _MAX_QUERY_CHARACTERS = 1_024
-_MAX_FIELD_CHARACTERS = 128
 _MAX_GOTO_CHARACTERS = 128
 
 
@@ -52,8 +51,12 @@ def _line_action(value: str) -> str:
         line = command[2:].strip()
         if line and "\t" not in line:
             return "goto\t" + line
+    if command == "//" or command.startswith("// "):
+        return "search\t\t" + command[2:].strip()
     if command.startswith("/ "):
         parts = command[2:].split(maxsplit=1)
+        if len(parts) == 1:
+            return "search\t\t" + parts[0]
         if len(parts) == 2 and "\t" not in parts[0] and "\t" not in parts[1]:
             return f"search\t{parts[0]}\t{parts[1]}"
     return "unknown"
@@ -96,7 +99,7 @@ def _insert_prompt(state: ViewState, text: str) -> ViewState:
     assert state.prompt is not None
     prompt = state.prompt
     limit = {
-        "search_field": _MAX_FIELD_CHARACTERS,
+        "search_field": MAX_FIELD_CHARACTERS,
         "search_query": _MAX_QUERY_CHARACTERS,
         "goto": _MAX_GOTO_CHARACTERS,
     }[prompt.kind]
@@ -109,14 +112,15 @@ def _insert_prompt(state: ViewState, text: str) -> ViewState:
     )
 
 
-def _submit_prompt(state: ViewState, spec: ViewerSpec) -> tuple[ViewState, str | None]:
+def _submit_prompt(state: ViewState, snapshot: Snapshot) -> tuple[ViewState, str | None]:
     assert state.prompt is not None
     prompt = state.prompt
     value = prompt.buffer.strip()
     if prompt.kind == "search_field":
-        if value not in spec.searchable_fields:
-            allowed = ", ".join(spec.searchable_fields) or "(none)"
-            return _input_error(state, f"Allowed fields: {allowed}."), None
+        try:
+            parse_selector(value, snapshot)
+        except SelectorError as exc:
+            return _input_error(state, str(exc)), None
         return replace(
             state, prompt=PromptState("search_query", field=value)
         ), None
@@ -133,27 +137,19 @@ def _submit_prompt(state: ViewState, spec: ViewerSpec) -> tuple[ViewState, str |
     return replace(state, prompt=None), "goto\t" + value
 
 
-def _search_text(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+def _has_hidden_match(
+    search: SearchState,
+    record_index: int,
+    snapshot: Snapshot,
+    spec: ViewerSpec,
+) -> bool:
+    value = snapshot.records[record_index].value
+    if not isinstance(value, dict):
+        return False
+    hidden = set(value).difference(spec.primary_fields)
+    return bool(hidden) and any(
+        not path or path[0] in hidden for path in search.paths_for_record(record_index)
     )
-
-
-def _find_matches(snapshot: Snapshot, field: str, query: str) -> tuple[int, ...]:
-    folded = query.casefold()
-    matches: list[int] = []
-    for index, record in enumerate(snapshot.records):
-        if not isinstance(record.value, dict) or field not in record.value:
-            continue
-        if folded in _search_text(record.value[field]).casefold():
-            matches.append(index)
-    return tuple(matches)
 
 
 def _message(state: ViewState, text: str, *, error: bool = False) -> ViewState:
@@ -224,7 +220,7 @@ def _transition(
             if payload in {"escape", "unknown_escape"}:
                 return replace(state, prompt=None), False
             if payload == "enter":
-                state, submitted = _submit_prompt(state, spec)
+                state, submitted = _submit_prompt(state, snapshot)
                 return (state, False) if submitted is None else action(state, submitted)
             return replace(state, prompt=_edit_prompt(prompt, payload)), False
         bindings = {
@@ -334,8 +330,10 @@ def _semantic_transition(
         if (
             state.mode is ViewMode.VERBOSE
             and state.search is not None
-            and state.search.matches
-            and state.search.field not in spec.primary_fields
+            and state.search.current_record_index is not None
+            and _has_hidden_match(
+                state.search, state.search.current_record_index, snapshot, spec
+            )
         ):
             return _message(
                 state,
@@ -357,12 +355,19 @@ def _semantic_transition(
         delta = 1 if event == "next_match" else -1
         current = (search.current_index + delta) % len(search.matches)
         selected = search.matches[current]
+        promote = state.mode is ViewMode.SIMPLE and _has_hidden_match(
+            search, selected, snapshot, spec
+        )
         return replace(
             state,
             selected_index=selected,
             record_line_offset=0,
+            mode=ViewMode.VERBOSE if promote else state.mode,
             search=replace(search, current_index=current),
-            message=None,
+            message=(
+                "Hidden-field match selected; switched to Verbose mode." if promote else None
+            ),
+            message_is_error=False,
         ), False
 
     if event.startswith("goto\t"):
@@ -396,34 +401,32 @@ def _semantic_transition(
                 state, "Search requires a field and query.", error=True
             ), False
         _, field, query = parts
-        if field not in spec.searchable_fields:
-            allowed = ", ".join(spec.searchable_fields) or "(none)"
-            return _message(
-                state,
-                f"Field is not searchable. Allowed fields: {allowed}.",
-                error=True,
-            ), False
+        try:
+            selector = parse_selector(field, snapshot)
+        except SelectorError as exc:
+            return _message(state, str(exc), error=True), False
         if not query:
             return _message(state, "Search query must not be empty.", error=True), False
         if len(query) > _MAX_QUERY_CHARACTERS:
             return _message(state, "Search query is too long.", error=True), False
-        matches = _find_matches(snapshot, field, query)
+        matches, match_paths = find_matches(snapshot, selector, query)
         search = SearchState(
             field=field,
             query=query,
             matches=matches,
             current_index=0 if matches else None,
+            match_paths=match_paths,
         )
         if not matches:
             return replace(
                 state,
                 search=search,
-                message=f"No matches in {field}.",
+                message=f"No matches in {field or 'all text'}.",
                 message_is_error=False,
             ), False
         mode = state.mode
         message = None
-        if field not in spec.primary_fields and mode is ViewMode.SIMPLE:
+        if mode is ViewMode.SIMPLE and _has_hidden_match(search, matches[0], snapshot, spec):
             mode = ViewMode.VERBOSE
             message = "Hidden-field match selected; switched to Verbose mode."
         return replace(
