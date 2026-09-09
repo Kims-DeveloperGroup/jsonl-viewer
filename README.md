@@ -21,9 +21,9 @@ or terminal-driver implementations.
 - strict UTF-8 JSONL parsing with bounded, content-safe malformed-input views;
 - stable source-record line gutters, record navigation, paging, and exact
   go-to-line;
-- literal, case-insensitive full-text or arbitrary field/path search, including
-  decoded nested JSON, with `n`/`N`, current/total results, and automatic
-  Verbose promotion for a selected hidden-field hit;
+- literal, case-insensitive full-text search, including decoded nested JSON,
+  with `n`/`N` moving between individual keyword occurrences, visible keyword
+  focus, current/total counts, and hidden-hit Verbose promotion;
 - deterministic semantic ANSI or exactly equivalent plain output;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
@@ -45,7 +45,7 @@ JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnostics • Agent: agent-01
 @ 1 │ {
 @ 1 │   "timestamp": "2026-08-29T09:00:00Z",
-@ 1 │   "request_type": "request",
+@ 1 │   "⟦r⟧equest_type": "request",
 @ 1 │   "content": "Find the mismatch."
 @ 1 │ }
 
@@ -54,7 +54,7 @@ Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnosti
 * 2 │   "request_type": "response",
 * 2 │   "content": "The field is missing."
 * 2 │ }
-Search request_type='r' • 1/2 • @ current, * other
+1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
 ↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
 ```
 
@@ -95,10 +95,6 @@ jsonl-viewer exchanges.jsonl \
   --agent agent-01
 ```
 
-`--searchable-field FIELD` remains an optional, repeatable compatibility preset.
-Presets do not filter search; omitting them enables the same full-text and
-arbitrary-field search.
-
 `NO_COLOR` or `--no-color` disables ANSI color without changing any semantic
 text or marker. A non-TTY uses an ordinary-line command fallback. Use `-` as
 the path to snapshot standard input; because that consumes stdin, the view is
@@ -109,8 +105,8 @@ Standalone keys are `↑`/`↓` or `j`/`k`, Page Up/Page Down or `b`/Space, `g`,
 ordinary-line mode, use `g LINE` to navigate and the
 [search commands below](#search-in-ordinary-line-mode) to search.
 
-On a supported interactive terminal, `/` opens `Search field:` and then
-`Search query:`; follow the [search walkthrough](#search-text-and-nested-values)
+On a supported interactive terminal, `/` opens one `Search query:` draft;
+follow the [search walkthrough](#search-text-and-nested-values)
 below. `g` opens `Go to source line:`. The viewer engine owns these drafts
 and shows a printable `│` insertion cursor in
 the frame footer. Enter submits the current stage. Left/Right, Home/End or
@@ -131,132 +127,60 @@ then search, then transient status, and otherwise closes. Ordinary-line
 
 ## Search text and nested values
 
-You do not need to enumerate fields: all top-level fields and nested paths
-are searchable, including fields hidden in Simple mode. Search works without
-any `--searchable-field` presets.
+Press `/`, type a phrase at `Search query:`, and press Enter. For example,
+`correlation token mismatch` finds that text anywhere in a record, including
+nested JSON stored inside strings. Search includes keys, scalar values, every
+JSON root type, hidden fields, and complete values beyond display previews.
+Queries are literal, case-insensitive substrings; there are no regular
+expressions, wildcards, or field selectors.
 
-The examples use this record, formatted across lines for illustration. In a
-JSONL file, each complete record must occupy a single line.
+### Move through keyword occurrences
 
-```json
-{
-  "content": "Request failed",
-  "payload": {
-    "items": [
-      {"status": "provider_error", "details": "Correlation token mismatch"},
-      {"status": "ok", "details": "Ready"}
-    ]
-  }
-}
-```
+The first occurrence is focused as `⟦keyword⟧`. Press `n` for the next
+occurrence or `N` for the previous one, wrapping at either end. Multiple
+matches within one value or record are separate stops. The footer reports
+`i/N occurrences`; `@` marks the active occurrence's record and `*` marks
+other matching records. Only the active keyword receives the search highlight.
 
-### Find text anywhere
-
-1. Press `/` to open `Search field:`.
-2. Leave the field blank and press Enter.
-3. At `Search query:`, type `correlation token mismatch` and press Enter.
-
-This finds the example record through its nested `details` value. Full-text
-search covers **keys and values**, including nested fields and complete values
-hidden by display previews. It works with any JSON root type. Queries match
-literal substrings and ignore case, so `PROVIDER_ERROR` and `error` both find
-`provider_error`; `status` also finds the key named `status`.
-
-### Search a particular nested value
-
-1. Press `/`.
-2. At `Search field:`, type `payload.items[0].status` and press Enter.
-3. At `Search query:`, type `provider_error` and press Enter.
-
-The dots follow object keys, and `[0]` selects the first array item; `[1]`
-selects the second. This path searches only the first item's `status` value.
-To search everything inside the array, enter `payload.items` instead. A path
-to an object or array searches its subtree, including its keys and values.
-
-Field and key names are case-sensitive: `payload` and `Payload` are different
-keys. Query text remains case-insensitive. Try these searches on the same
-record:
-
-| Search field | Search query | Expected result |
-| --- | --- | --- |
-| Leave blank | `correlation token mismatch` | Matches the first item's `details`. |
-| Leave blank | `status` | Matches the nested key name. |
-| `payload.items[0].status` | `ERROR` | Matches the substring in `provider_error`. |
-| `payload.items` | `ready` | Matches `details` in the second item. |
-| `payload.items[0].status` | `ready` | No match: the selected value is `provider_error`. |
-| `payload.items[1].status` | `ok` | Matches the second item's `status`. |
-
-### Move through results and clear a search
-
-Each matching source record counts once, even if several keys or values
-match. The footer shows your current result and the total. Press `n` for the
-next matching record or `N` for the previous one; both wrap through records
-in source order. Press `c` to clear the search.
-
-Selecting a hit that needs hidden fields automatically switches to Verbose,
-including when you use `n` or `N`. Simple mode remains unavailable while the
-selected hit needs those fields. A match can still be outside a string preview,
-the current page, or the terminal width; record markers and result counts
-identify the matching record. Escape follows the cancellation rules above.
+The viewer brings the selected occurrence into view vertically and shows a
+bounded text window around it, even beyond a long value's normal preview.
+Hidden-field hits promote the view to Verbose. Manual paging remains available;
+`n` or `N` brings the next selected occurrence back into view. Resizing
+recomputes the window at the current geometry. At very narrow widths, the
+active keyword takes priority over context and its repeated gutter. Long
+keywords can still be clipped to the available cells. Press `c` to clear
+search; Escape follows the cancellation rules above.
 
 ### Search in ordinary-line mode
 
-If your terminal uses the ordinary-line fallback, type a complete command and
-press Enter:
+Type `/ correlation token mismatch` and press Enter. A separating space after
+`/` is required in ordinary-line mode; the entire phrase is the query.
+`// correlation token mismatch` is also accepted as a full-text alias, with
+the same separator requirement. Leading and trailing command whitespace is
+trimmed.
 
-| Command form | What it searches |
-| --- | --- |
-| `// QUERY` | All text; the query can contain multiple words. |
-| `/ TOKEN` | All text for a single-token query. |
-| `/ FIELD QUERY` | The specified field or path; the query can contain multiple words. |
+### Matching and bounds
 
-These commands use the same example record:
+Occurrences follow source-record order, object insertion order and array
+order, then left-to-right offsets within each key or value. Unicode
+`casefold` matching maps back to original characters: searching `s` in
+`ß` produces one focused occurrence, not two overlapping highlights.
+Overlapping original-character spans are suppressed.
 
-```text
-// correlation token mismatch
-/ provider_error
-/ payload.items[0].status provider_error
-/ /payload/items/0/status provider_error
-/ payload.items[0].details correlation token mismatch
-```
+Complete strict JSON objects/arrays encoded inside strings are decoded under
+the [shared bounds](#input-and-safety-contract). Decoded children take
+precedence over their raw representation. When a subtree has no direct hits,
+search can fall back to its original encoded string or compact normalized JSON
+with sorted keys, allowing structural phrases without duplicate representation
+hits. If a match cannot be shown in the normal projection, a labeled
+`[raw search excerpt]`, `[normalized search excerpt]`, or
+`[decoded search excerpt]` provides its focused text.
 
-Each command finds the record. The two `status` commands select the same value:
-`/payload/items/0/status` is the JSON Pointer form of `payload.items[0].status`.
-The command's first `/` is separate from the pointer's leading `/`.
-
-Use `//` for a full-text phrase: `/ two words` searches field `two` for `words`,
-while `// two words` searches all text for the complete phrase.
-
-### Advanced path and matching rules
-
-- **Literal top-level keys take precedence.** For each object record, an exact
-  nonempty top-level key wins over path interpretation, even if it contains
-  dots, brackets, or leading slashes. If `"payload.items[0].status"` is itself
-  a top-level key, that key is searched first. Without that exact key, the
-  selector follows the nested path. A blank field always means full text.
-- **JSON Pointer supports unusual keys.** `~0` means `~`, `~1` means `/`, and
-  empty segments are preserved. `/a~1b/~0key/` selects the empty key inside
-  `~key` inside `a/b`. `/` selects an empty top-level key unless a literal `/`
-  top-level key exists, which takes precedence.
-- **Root arrays work too.** Use `[0].status` or `/0/status` to reach the first
-  item's `status` in a root array. Array indexes are zero-based, nonnegative
-  integers with no leading zeros except `0` itself.
-- **Matching is literal.** Queries use Unicode `casefold` and substring
-  matching. There are no regular expressions, wildcards, or expression
-  evaluation. Queries spanning object/array structure use compact normalized
-  JSON with sorted object keys, independent of source whitespace or key order.
-- **JSON stored inside strings can be searched.** Full-text search and deeper
-  paths can decode complete strict JSON objects or arrays inside strings,
-  including repeated encoding, under the
-  [shared bounds](#input-and-safety-contract). Selecting a string itself keeps
-  literal substring matching against its original contents. For example, if
-  `payload` contains encoded JSON, `payload.items[0].status` can traverse into
-  it, while selecting `payload` searches the original string.
-- **Limits and corrections.** Across input protocols, fields/paths allow up to
-  128 characters and nonempty queries up to 1,024. A valid search with a missing
-  field/path or an absent substring returns no matches. Empty queries are
-  rejected. Malformed paths produce a correctable error, unless they match an
-  exact top-level key under the precedence rule above.
+Queries must be nonempty, contain supported printable text, and have at most
+1,024 characters. An absent substring produces no matches. More than 100,000
+occurrences rejects the new search with a request to refine the query; the
+previous committed search and position remain intact. Invalid input also
+preserves the committed search.
 
 ## Embed without transferring terminal ownership
 
@@ -267,7 +191,6 @@ spec = ViewerSpec(
     session_id="session-01",
     conversation_id="debate-full-id",
     agent_id="agent-01",
-    searchable_fields=(),
     conversation_label="Debate",
     conversation_subject="Provider response diagnostics",
     input_protocol="keys",
@@ -279,12 +202,23 @@ spec = ViewerSpec(
 view_jsonl(snapshot_bytes, spec, host)
 ```
 
-`searchable_fields` remains a required constructor parameter with the same
-signature. Pass `()` for no presets, or retain existing bounded preset values
-as compatibility metadata; they never restrict searchable fields or text.
 The `primary_fields` property, derived from `date_time_field`,
-`request_type_field`, and `content_field`, controls Simple-mode display priority
-and does not constrain search.
+`request_type_field`, and `content_field`, controls Simple-mode display
+priority and does not constrain search.
+
+### Migrating to 0.3.0
+
+Version 0.3.0 deliberately removes field-scoped search. Remove
+`searchable_fields` from `ViewerSpec` calls and `--searchable-field` from
+CLI commands. When migrating positional constructor calls, remove the former
+fourth argument; prefer keywords for optional display fields. Send
+`search<TAB>QUERY` instead of the former three-part field/query event,
+including the former blank-field form. Three-part events are rejected.
+Ordinary `/ content text` now searches the complete phrase `content text`;
+it does not select `content`. Remove the field portion to search for `text`
+anywhere. Hosts validating the exact constructor signature must update that
+check. The three public exports, five host methods, and terminal ownership
+remain unchanged.
 
 `ViewerHost` supplies `terminal_size()`, `color_enabled()`, `present(frame)`,
 `read_event()`, and `close_view()`. Frames contain printable text, newlines,
@@ -317,34 +251,27 @@ The host preserves command text and leaves its interpretation to the viewer.
 Physical key names are `enter`, `escape`, `unknown_escape`, `backspace`,
 `delete`, `left`, `right`, `home`, `end`, `up`, `down`, `page_up`, `page_down`,
 `ctrl_a`, `ctrl_e`, `ctrl_u`, `ctrl_k`, `ctrl_w`, `interrupt`, `eof`, and
-`unknown`. Search-field and goto drafts are bounded to 128 characters; search
-query drafts are bounded to 1,024. Drafts and their logical cursors arrive in
+`unknown`. Goto drafts are bounded to 128 characters; search query drafts to
+1,024. Drafts and their logical cursors arrive in
 ordinary complete frames, so the host needs no prompt buffer or second input
 lifecycle. The standalone adapter uses this protocol for both terminal keys
 and ordinary lines.
 
-For existing integrations, `ViewerSpec.input_protocol` is appended with the
-default `"semantic"`. Upgrading from 0.1.1 preserves the three public exports,
-existing constructor arguments, all five host methods, and this closed
-semantic event vocabulary:
+`ViewerSpec.input_protocol` defaults to `"semantic"`. Its closed event
+vocabulary is:
 
 ```text
 up | down | page_up | page_down | next_match | previous_match
 toggle_mode | help | cancel | clear_search | close
 goto<TAB>POSITIVE_SOURCE_LINE
-search<TAB>FIELD_OR_PATH<TAB>NONEMPTY_QUERY
-search<TAB><TAB>NONEMPTY_QUERY
+search<TAB>NONEMPTY_QUERY
 ```
 
-The second search form leaves the field empty for full-text search. Existing
-field/query events retain literal matching when the selected value is a string.
-
-`None` means EOF/close in either protocol. Existing semantic events are also
+`None` means EOF/close in either protocol. These semantic events are also
 accepted in `"keys"` mode. Unknown semantic events produce a transient help
-hint. A legacy semantic host retains its input-to-event mapping; a host opting
+hint. A semantic host owns its input-to-event mapping; a host opting
 into `"keys"` supplies physical inputs and lets the viewer handle actions.
-Hosts that validate exact constructor signatures must accept the appended
-`input_protocol` field before opening a view. Terminal modes, signals,
+Terminal modes, signals,
 geometry, presentation, application focus, and restoration remain host-owned.
 
 ## Input and safety contract
@@ -378,9 +305,10 @@ Expansion is a derived presentation, so a displayed object is not always a
 type-preserving JSON projection of the source record. The immutable source
 value remains a string. Search and rendering traverse independently under the
 same strict decoding rules and bounds, with separate per-record budgets. A
-decoded hit can remain behind a display expansion skip, a string preview,
-width clipping, or paging; record markers and result counts still identify
-the hit. A displayed leaf that is still a genuine string uses normal JSON
+selected occurrence receives a bounded focused window or labeled excerpt,
+including when display expansion skips or previews would hide it. Geometry
+still limits the visible window; manual paging can move away from the focus.
+A displayed leaf that is still a genuine string uses normal JSON
 escaping: embedded quotes and backslashes remain escaped, while unsafe control
 and format characters remain visible as `\uXXXX` text.
 
@@ -390,8 +318,8 @@ values are untrusted: control and format characters are rendered as visible
 `\uXXXX` text. Color is never the only signal.
 
 Simple mode is an orientation view, not a privacy boundary. Verbose mode can
-show every field in a valid record; preset fields do not restrict search or
-visibility. The embedding application is responsible for authorizing,
+show every field in a valid record; search covers all text. The embedding
+application is responsible for authorizing,
 selecting, retaining, and redacting snapshot data. The library performs no
 filesystem or network I/O, telemetry, or persistence; viewer prompt drafts and
 frames exist only while the view is open. The standalone adapter performs

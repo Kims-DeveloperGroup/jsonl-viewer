@@ -148,8 +148,6 @@ class StandaloneTests(unittest.TestCase):
     def _start_pty(
         self,
         path: Path,
-        *,
-        searchable_fields: tuple[str, ...] = ("content",),
     ) -> tuple[subprocess.Popen[bytes], int]:
         if not hasattr(os, "openpty") or _standalone.termios is None:
             self.skipTest("POSIX PTY support is unavailable")
@@ -184,8 +182,6 @@ class StandaloneTests(unittest.TestCase):
             "pty-agent",
             "--no-color",
         ]
-        for field in searchable_fields:
-            command.extend(("--searchable-field", field))
         try:
             process = subprocess.Popen(
                 command,
@@ -423,22 +419,20 @@ class StandaloneTests(unittest.TestCase):
                     "line-conversation",
                     "--agent",
                     "line-agent",
-                    "--searchable-field",
-                    "content",
                 ],
-                input="/ content alpha\nesc\nesc\nesc\n",
+                input="/ alpha\nesc\nesc\nesc\n",
                 capture_output=True,
                 text=True,
                 env=environment,
                 check=False,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            self.assertIn("Search content='alpha' • 1/2", completed.stdout)
+            self.assertIn("1/2 occurrences • Search all text='alpha'", completed.stdout)
             self.assertIn("Search cleared.", completed.stdout)
             self.assertNotIn("Unknown event", completed.stdout)
             self.assertEqual(path.read_bytes(), source)
 
-    def test_raw_pty_field_escape_restores_exact_frame_and_next_command(self) -> None:
+    def test_raw_pty_draft_escape_restores_exact_frame_and_next_command(self) -> None:
         source = (
             b'{"timestamp":"1","request_type":"response",'
             b'"content":"alpha one"}\n'
@@ -469,7 +463,7 @@ class StandaloneTests(unittest.TestCase):
                 prompt = self._pty_read_until(
                     master,
                     output,
-                    b"Search field: ",
+                    b"Search query: ",
                     start=prior_end,
                 )
                 self._pty_write(master, b"partial")
@@ -536,21 +530,15 @@ class StandaloneTests(unittest.TestCase):
                 field_prompt = self._pty_read_until(
                     master,
                     output,
-                    b"Search field: ",
+                    b"Search query: ",
                     start=initial_end,
                 )
-                self._pty_write(master, b"content\r")
-                query_prompt = self._pty_read_until(
-                    master,
-                    output,
-                    b"Search query: ",
-                    start=field_prompt,
-                )
+                query_prompt = field_prompt
                 self._pty_write(master, b"alpha\r")
                 active, active_end = self._pty_frame_containing(
                     master,
                     output,
-                    b"Search content='alpha'",
+                    b"Search all text='alpha'",
                     start=query_prompt,
                 )
                 self.assertIn(b"1/2", active)
@@ -559,22 +547,16 @@ class StandaloneTests(unittest.TestCase):
                 second_field = self._pty_read_until(
                     master,
                     output,
-                    b"Search field: ",
+                    b"Search query: ",
                     start=active_end,
                 )
-                self._pty_write(master, b"content\r")
-                second_query = self._pty_read_until(
-                    master,
-                    output,
-                    b"Search query: ",
-                    start=second_field,
-                )
+                second_query = second_field
                 self._pty_write(master, b"replacement")
                 self._pty_write(master, b"\x1b")
                 restored, restored_end = self._pty_frame_containing(
                     master,
                     output,
-                    b"Search content='alpha'",
+                    b"Search all text='alpha'",
                     start=second_query,
                 )
                 self.assertEqual(restored, active)
@@ -583,7 +565,7 @@ class StandaloneTests(unittest.TestCase):
                 next_match, next_end = self._pty_frame_containing(
                     master,
                     output,
-                    b"Search content='alpha'",
+                    b"Search all text='alpha'",
                     start=restored_end,
                 )
                 self.assertIn(b"2/2", next_match)
@@ -602,7 +584,7 @@ class StandaloneTests(unittest.TestCase):
                     b"Record 2/2",
                     start=cleared_end,
                 )
-                self.assertNotIn(b"Search content=", ordinary)
+                self.assertNotIn(b"Search all text=", ordinary)
                 self.assertNotIn(b"Search cleared.", ordinary)
                 self._pty_write(master, b"\x1b")
                 self._pty_read_until(
@@ -636,19 +618,19 @@ class StandaloneTests(unittest.TestCase):
                 raw = system_termios.tcgetattr(master)
                 self.assertFalse(raw[3] & system_termios.ICANON)
                 self.assertFalse(raw[3] & system_termios.ECHO)
-                self._pty_write(master, b"/content\rwrong\x15" + "개요".encode() + b"\r")
-                active, active_end = self._pty_frame_containing(master, output, "Search content='개요'".encode(), start=initial_end)
+                self._pty_write(master, b"/wrong\x15" + "개요".encode() + b"\r")
+                active, active_end = self._pty_frame_containing(master, output, "Search all text='개요'".encode(), start=initial_end)
                 self.assertIn(b"1/7", active)
                 self.assertNotIn(b"U0015", active)
                 self.assertNotIn(b"wrong", active)
                 self._pty_write(master, b"n")
-                active, active_end = self._pty_frame_containing(master, output, "Search content='개요' • 2/7".encode(), start=active_end)
-                for draft, prompt in ((b"/partial", b"Search field: "), (b"/content\rdraft", b"Search query: "), (b"g999", b"Go to source line: ")):
+                active, active_end = self._pty_frame_containing(master, output, "2/7 occurrences • Search all text='개요'".encode(), start=active_end)
+                for draft, prompt in ((b"/partial", b"Search query: "), (b"g999", b"Go to source line: ")):
                     self._pty_write(master, draft)
                     prompt_start = self._pty_read_until(master, output, prompt, start=active_end)
                     self.assertFalse(system_termios.tcgetattr(master)[3] & system_termios.ICANON)
                     self._pty_write(master, b"\x1b")
-                    restored, active_end = self._pty_frame_containing(master, output, "Search content='개요' • 2/7".encode(), start=prompt_start)
+                    restored, active_end = self._pty_frame_containing(master, output, "2/7 occurrences • Search all text='개요'".encode(), start=prompt_start)
                     self.assertEqual(restored, active)
                 self._pty_write(master, b"q")
                 self._pty_read_until(master, output, b"\x1b[?25h\x1b[?1049l", start=active_end)
@@ -661,7 +643,7 @@ class StandaloneTests(unittest.TestCase):
             finally:
                 self._pty_cleanup(process, master)
 
-    def test_raw_pty_blank_field_and_unrestricted_path_preserve_cleanup(self) -> None:
+    def test_raw_pty_full_text_unicode_preserves_cleanup(self) -> None:
         source = b"".join(
             (json.dumps({
                 "content": "orientation",
@@ -672,41 +654,41 @@ class StandaloneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "records.jsonl"
             path.write_bytes(source)
-            process, master = self._start_pty(path, searchable_fields=())
+            process, master = self._start_pty(path)
             import termios as system_termios
 
             original = self._pty_original_attributes
             output = bytearray()
             try:
                 _, end = self._pty_frame_containing(master, output, b"Record 1/2", start=0)
-                self._pty_write(master, b"/\r")
+                self._pty_write(master, b"/")
                 prompt = self._pty_read_until(master, output, b"Search query: ", start=end)
                 self._pty_write(master, "STRASSE 개요\r".encode())
                 active, end = self._pty_frame_containing(
-                    master, output, "Search all text='STRASSE 개요' • 1/2".encode(), start=prompt,
+                    master, output, "1/2 occurrences • Search all text='STRASSE 개요'".encode(), start=prompt,
                 )
                 self.assertIn("READ ONLY • VERBOSE".encode(), active)
-                self.assertIn('"status": "Straße 개요"'.encode(), active)
+                self.assertIn('"status": "⟦Straße 개요⟧"'.encode(), active)
                 self._pty_write(master, b"n")
                 active, end = self._pty_frame_containing(
-                    master, output, "Search all text='STRASSE 개요' • 2/2".encode(), start=end,
+                    master, output, "2/2 occurrences • Search all text='STRASSE 개요'".encode(), start=end,
                 )
-                self._pty_write(master, b"/\rdraft")
+                self._pty_write(master, b"/draft")
                 prompt = self._pty_read_until(master, output, b"Search query: ", start=end)
                 self._pty_write(master, b"\x1b")
                 restored, end = self._pty_frame_containing(
-                    master, output, "Search all text='STRASSE 개요' • 2/2".encode(), start=prompt,
+                    master, output, "2/2 occurrences • Search all text='STRASSE 개요'".encode(), start=prompt,
                 )
                 self.assertEqual(restored, active)
 
-                self._pty_write(master, b"/payload.items[0].status\rSTRASSE\r")
+                self._pty_write(master, b"/STRASSE\r")
                 selected, end = self._pty_frame_containing(
-                    master, output, b"Search payload.items[0].status='STRASSE'", start=end,
+                    master, output, b"Search all text='STRASSE'", start=end,
                 )
                 self.assertIn(b"1/2", selected)
                 self._pty_write(master, b"N")
                 selected, end = self._pty_frame_containing(
-                    master, output, "Search payload.items[0].status='STRASSE' • 2/2".encode(), start=end,
+                    master, output, "2/2 occurrences • Search all text='STRASSE'".encode(), start=end,
                 )
                 self.assertIn(b"@ 2", selected)
                 self._pty_write(master, b"q")
@@ -720,7 +702,16 @@ class StandaloneTests(unittest.TestCase):
             finally:
                 self._pty_cleanup(process, master)
 
-    def test_line_cli_searches_all_text_and_paths_without_presets(self) -> None:
+    def test_cli_rejects_removed_searchable_field_option(self) -> None:
+        completed = subprocess.run(
+            [sys.executable, "-m", "jsonl_viewer", "-", "--session", "s",
+             "--conversation", "c", "--agent", "a", "--searchable-field", "content"],
+            input=b"{}\n", capture_output=True, check=False, timeout=5,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn(b"unrecognized arguments: --searchable-field content", completed.stderr)
+
+    def test_line_cli_searches_entire_phrase(self) -> None:
         source = (json.dumps({
             "content": "single", "payload": json.dumps({"items": [{"status": "two words"}]}),
         }) + "\n").encode()
@@ -735,14 +726,14 @@ class StandaloneTests(unittest.TestCase):
             completed = subprocess.run(
                 [sys.executable, "-m", "jsonl_viewer", str(path),
                  "--session", "s", "--conversation", "c", "--agent", "a"],
-                input="// two words\n/ single\n/ payload.items[0].status two words\n/ content single\nq\n",
+                input="/ two words\n/ single\n/ payload.items[0].status two words\n/ content single\nq\n",
                 capture_output=True, text=True, env=environment, check=False, timeout=5,
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stderr, "")
             for result in (
-                "Search all text='two words' • 1/1", "Search all text='single' • 1/1",
-                "Search payload.items[0].status='two words' • 1/1", "Search content='single' • 1/1",
+                "1/1 occurrences • Search all text='two words'", "1/1 occurrences • Search all text='single'",
+                "0/0 occurrences • Search all text='payload.items[0].status two words'", "0/0 occurrences • Search all text='content single'",
             ):
                 self.assertIn(result, completed.stdout)
             self.assertNotIn("\x1b", completed.stdout)
@@ -775,8 +766,6 @@ class StandaloneTests(unittest.TestCase):
                     "Provider diagnostics",
                     "--agent",
                     "standalone-agent",
-                    "--searchable-field",
-                    "content",
                 ],
                 input="q\n",
                 capture_output=True,
@@ -812,8 +801,6 @@ class StandaloneTests(unittest.TestCase):
                 "stdin-conversation",
                 "--agent",
                 "stdin-agent",
-                "--searchable-field",
-                "content",
             ],
             input=b'{"content":"from stdin"}\n',
             capture_output=True,
@@ -905,7 +892,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.2.0")
+        self.assertEqual(project["version"], "0.3.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")

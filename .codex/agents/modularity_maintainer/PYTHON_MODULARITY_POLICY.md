@@ -140,8 +140,8 @@ It is descriptive current-state navigation, not a plan or history.
 - Provider/source-controlled text MUST be safely neutralized before terminal
   rendering. Unicode cell clipping and truncation markers MUST be deterministic
   and source-preserving.
-- Search MUST use bounded literal substring matching for full-text or arbitrary
-  field/path queries; an arbitrary expression/evaluation language is prohibited.
+- Search MUST use bounded literal full-text substring matching only; field/path
+  selectors and arbitrary expression/evaluation languages are prohibited.
 
 ## Verification and change workflow
 

@@ -8,7 +8,7 @@ from dataclasses import replace
 from ._input import InputFailure, parse_jsonl
 from ._model import PromptState, SearchState, Snapshot, ViewMode, ViewState
 from ._render import render_frame, render_loading
-from ._search import MAX_FIELD_CHARACTERS, SelectorError, find_matches, parse_selector
+from ._search import SearchLimitError, find_matches
 from .contracts import ViewerHost, ViewerSpec
 
 
@@ -52,13 +52,9 @@ def _line_action(value: str) -> str:
         if line and "\t" not in line:
             return "goto\t" + line
     if command == "//" or command.startswith("// "):
-        return "search\t\t" + command[2:].strip()
-    if command.startswith("/ "):
-        parts = command[2:].split(maxsplit=1)
-        if len(parts) == 1:
-            return "search\t\t" + parts[0]
-        if len(parts) == 2 and "\t" not in parts[0] and "\t" not in parts[1]:
-            return f"search\t{parts[0]}\t{parts[1]}"
+        return "search\t" + command[2:].strip()
+    if command == "/" or command.startswith("/ "):
+        return "search\t" + command[1:].strip()
     return "unknown"
 
 
@@ -99,7 +95,6 @@ def _insert_prompt(state: ViewState, text: str) -> ViewState:
     assert state.prompt is not None
     prompt = state.prompt
     limit = {
-        "search_field": MAX_FIELD_CHARACTERS,
         "search_query": _MAX_QUERY_CHARACTERS,
         "goto": _MAX_GOTO_CHARACTERS,
     }[prompt.kind]
@@ -116,18 +111,10 @@ def _submit_prompt(state: ViewState, snapshot: Snapshot) -> tuple[ViewState, str
     assert state.prompt is not None
     prompt = state.prompt
     value = prompt.buffer.strip()
-    if prompt.kind == "search_field":
-        try:
-            parse_selector(value, snapshot)
-        except SelectorError as exc:
-            return _input_error(state, str(exc)), None
-        return replace(
-            state, prompt=PromptState("search_query", field=value)
-        ), None
     if prompt.kind == "search_query":
         if not value:
             return _input_error(state, "Search query must not be empty."), None
-        return replace(state, prompt=None), f"search\t{prompt.field}\t{value}"
+        return replace(state, prompt=None), f"search\t{value}"
     try:
         valid = int(value, 10) > 0
     except ValueError:
@@ -147,8 +134,9 @@ def _has_hidden_match(
     if not isinstance(value, dict):
         return False
     hidden = set(value).difference(spec.primary_fields)
-    return bool(hidden) and any(
-        not path or path[0] in hidden for path in search.paths_for_record(record_index)
+    hit = search.current_occurrence
+    return bool(hidden) and hit is not None and (
+        not hit.path or hit.path[0] in hidden
     )
 
 
@@ -221,7 +209,12 @@ def _transition(
                 return replace(state, prompt=None), False
             if payload == "enter":
                 state, submitted = _submit_prompt(state, snapshot)
-                return (state, False) if submitted is None else action(state, submitted)
+                if submitted is None:
+                    return state, False
+                result, closed = action(state, submitted)
+                if result.message_is_error and not closed:
+                    result = replace(state, prompt=replace(prompt, error=result.message))
+                return result, closed
             return replace(state, prompt=_edit_prompt(prompt, payload)), False
         bindings = {
             "up": "up", "down": "down", "page_up": "page_up",
@@ -281,10 +274,11 @@ def _semantic_transition(
         return _message(state, "The immutable snapshot has no records."), False
 
     if event in {"begin_search", "begin_goto"}:
-        kind = "search_field" if event == "begin_search" else "goto"
+        kind = "search_query" if event == "begin_search" else "goto"
         return replace(state, prompt=PromptState(kind)), False
 
     if event in {"up", "down"}:
+        state = replace(state, reveal_match=False)
         direction = -1 if event == "up" else 1
         selected = min(
             len(snapshot.records) - 1,
@@ -298,6 +292,7 @@ def _semantic_transition(
         ), False
 
     if event in {"page_up", "page_down"}:
+        state = replace(state, reveal_match=False)
         step = max(1, page_size - 1)
         if event == "page_up":
             if state.record_line_offset > 0:
@@ -344,17 +339,19 @@ def _semantic_transition(
             state,
             mode=mode,
             record_line_offset=0,
+            reveal_match=state.search is not None,
             message=f"Switched to {mode.value} mode.",
         ), False
 
     if event in {"next_match", "previous_match"}:
         search = state.search
-        if search is None or not search.matches:
+        if search is None or not search.occurrences:
             return _message(state, "No search matches are active."), False
         assert search.current_index is not None
         delta = 1 if event == "next_match" else -1
-        current = (search.current_index + delta) % len(search.matches)
-        selected = search.matches[current]
+        current = (search.current_index + delta) % len(search.occurrences)
+        selected = search.occurrences[current].record_index
+        search = replace(search, current_index=current)
         promote = state.mode is ViewMode.SIMPLE and _has_hidden_match(
             search, selected, snapshot, spec
         )
@@ -363,7 +360,8 @@ def _semantic_transition(
             selected_index=selected,
             record_line_offset=0,
             mode=ViewMode.VERBOSE if promote else state.mode,
-            search=replace(search, current_index=current),
+            search=search,
+            reveal_match=True,
             message=(
                 "Hidden-field match selected; switched to Verbose mode." if promote else None
             ),
@@ -388,6 +386,7 @@ def _semantic_transition(
                     state,
                     selected_index=index,
                     record_line_offset=0,
+                    reveal_match=False,
                     message=f"Moved to source line {source_line}.",
                 ), False
         return _message(
@@ -395,46 +394,47 @@ def _semantic_transition(
         ), False
 
     if event.startswith("search\t"):
-        parts = event.split("\t", 2)
-        if len(parts) != 3:
+        parts = event.split("\t")
+        if len(parts) != 2:
             return _message(
-                state, "Search requires a field and query.", error=True
+                state, "Search requires only a query; field search was removed.", error=True
             ), False
-        _, field, query = parts
-        try:
-            selector = parse_selector(field, snapshot)
-        except SelectorError as exc:
-            return _message(state, str(exc), error=True), False
+        _, query = parts
         if not query:
             return _message(state, "Search query must not be empty.", error=True), False
         if len(query) > _MAX_QUERY_CHARACTERS:
             return _message(state, "Search query is too long.", error=True), False
-        matches, match_paths = find_matches(snapshot, selector, query)
+        if not _safe_input(query):
+            return _message(state, "Search query contains unsupported controls.", error=True), False
+        try:
+            occurrences = find_matches(snapshot, query)
+        except SearchLimitError as exc:
+            return _message(state, str(exc), error=True), False
         search = SearchState(
-            field=field,
             query=query,
-            matches=matches,
-            current_index=0 if matches else None,
-            match_paths=match_paths,
+            occurrences=occurrences,
+            current_index=0 if occurrences else None,
         )
-        if not matches:
+        if not occurrences:
             return replace(
                 state,
                 search=search,
-                message=f"No matches in {field or 'all text'}.",
+                message="No matches in all text.",
                 message_is_error=False,
             ), False
         mode = state.mode
         message = None
-        if mode is ViewMode.SIMPLE and _has_hidden_match(search, matches[0], snapshot, spec):
+        selected = occurrences[0].record_index
+        if mode is ViewMode.SIMPLE and _has_hidden_match(search, selected, snapshot, spec):
             mode = ViewMode.VERBOSE
             message = "Hidden-field match selected; switched to Verbose mode."
         return replace(
             state,
-            selected_index=matches[0],
+            selected_index=selected,
             record_line_offset=0,
             mode=mode,
             search=search,
+            reveal_match=True,
             message=message,
             message_is_error=False,
         ), False
@@ -486,6 +486,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 color=bool(host.color_enabled()),
             )
             host.present(rendered.text)
+            state = replace(state, record_line_offset=rendered.record_line_offset)
             event = host.read_event()
             state, closed = _transition(
                 state,

@@ -4,7 +4,8 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 
 - `simple.txt`
 - `verbose.txt`
-- `search-matches.txt`
+- `search-matches.txt` — one focused keyword occurrence, other matching record
+  markers, and an occurrence count that includes keys and values
 - `nested-expanded-json.txt` — recursively expanded provider content and
   response text with visible derived-display cues
 - `truncated-content.txt`

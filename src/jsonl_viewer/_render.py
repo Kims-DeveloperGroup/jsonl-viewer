@@ -13,6 +13,7 @@ from ._model import (
     InputDiagnostic,
     JSONPath,
     JSONValue,
+    Occurrence,
     PromptState,
     Record,
     RenderResult,
@@ -216,6 +217,33 @@ def _string_segments(
     )
 
 
+def _focused_token(
+    text: str, hit: Occurrence, role: str, *, quoted: bool = True,
+) -> tuple[_Segment, ...]:
+    """Render a bounded source-codepoint window, then escape its fragments.
+
+    Escaping after slicing keeps Unicode fold expansions, JSON escapes and
+    unsafe controls attached to the exact original character being focused.
+    """
+    start = max(0, hit.start - 32)
+    end = min(len(text), hit.end + 32)
+
+    def safe(piece: str) -> str:
+        return _safe_json_token(piece)[1:-1] if quoted else _neutralize_text(piece)
+
+    before = ('"' if quoted else "") + ("…" if start else "")
+    before += safe(text[start:hit.start])
+    after = safe(text[hit.end:end]) + ("…" if end < len(text) else "")
+    after += '"' if quoted else ""
+    return (
+        _Segment(before, role),
+        _Segment("⟦", "current"),
+        _Segment(safe(text[hit.start:hit.end]), "match_current"),
+        _Segment("⟧", "current"),
+        _Segment(after, role),
+    )
+
+
 def _format_value(
     value: JSONValue,
     *,
@@ -227,6 +255,7 @@ def _format_value(
     content_field: str,
     budget: ExpansionBudget,
     facts: _ProjectionFacts,
+    active: Occurrence | None = None,
 ) -> list[_DisplayLine]:
     leading = (_Segment(" " * indent),) + prefix
     if isinstance(value, dict):
@@ -235,10 +264,14 @@ def _format_value(
         lines = [_DisplayLine(leading + (_Segment("{"),), path)]
         items = tuple(value.items())
         for index, (key, child) in enumerate(items):
-            child_prefix = (
-                _Segment(_safe_json_token(key), "key"),
-                _Segment(": "),
+            child_path = path + (key,)
+            key_token = (
+                _focused_token(key, active, "key")
+                if active is not None and active.path == child_path
+                and active.kind == "key" and active.text == key
+                else (_Segment(_safe_json_token(key), "key"),)
             )
+            child_prefix = key_token + (_Segment(": "),)
             child_lines = _format_value(
                 child,
                 indent=indent + 2,
@@ -249,6 +282,7 @@ def _format_value(
                 content_field=content_field,
                 budget=budget,
                 facts=facts,
+                active=active,
             )
             if index + 1 < len(items):
                 last = child_lines[-1]
@@ -273,6 +307,7 @@ def _format_value(
                 content_field=content_field,
                 budget=budget,
                 facts=facts,
+                active=active,
             )
             if index + 1 < len(value):
                 last = child_lines[-1]
@@ -305,6 +340,7 @@ def _format_value(
                 content_field=content_field,
                 budget=budget,
                 facts=facts,
+                active=active,
             )
         if isinstance(expansion, SkippedExpansion):
             facts.skipped_expansions += 1
@@ -314,19 +350,27 @@ def _format_value(
                     "warning",
                 ),
             )
-        token = _string_segments(
-            value,
-            maximum=string_limit,
-            path=path,
-            content_field=content_field,
-            facts=facts,
-        )
+        if (active is not None and active.path == path
+                and active.kind == "value" and active.text == value):
+            token = _focused_token(value, active, "string")
+        else:
+            token = _string_segments(
+                value,
+                maximum=string_limit,
+                path=path,
+                content_field=content_field,
+                facts=facts,
+            )
     elif value is None:
         token = (_Segment("null", "literal"),)
     elif type(value) is bool:
         token = (_Segment("true" if value else "false", "literal"),)
     else:
         token = (_Segment(json.dumps(value, allow_nan=False), "number"),)
+    if (not isinstance(value, str) and active is not None
+            and active.path == path and active.kind == "value"
+            and active.text == token[0].text):
+        token = _focused_token(active.text, active, token[0].role, quoted=False)
     return [_DisplayLine(leading + token, path)]
 
 
@@ -354,6 +398,7 @@ def _format_record(
     record: Record,
     spec: ViewerSpec,
     mode: ViewMode,
+    active: Occurrence | None = None,
 ) -> tuple[list[_DisplayLine], _ProjectionFacts]:
     value, _, limit = _project_record(record, spec, mode)
     budget = ExpansionBudget()
@@ -367,7 +412,20 @@ def _format_record(
         content_field=spec.content_field,
         budget=budget,
         facts=facts,
+        active=active,
     )
+    if active is not None and not any(
+        segment.role == "match_current" for line in lines for segment in line.segments
+    ):
+        # Raw/normalized hits and independently exhausted display expansion
+        # budgets still get an exact bounded excerpt and an addressable row.
+        label = active.kind if active.kind in {"raw", "normalized"} else "decoded"
+        lines.append(_DisplayLine(
+            (_Segment(f"[{label} search excerpt]", "muted"),), active.path,
+        ))
+        lines.append(_DisplayLine(
+            _focused_token(active.text, active, "string"), active.path,
+        ))
     return lines, facts
 
 
@@ -429,9 +487,9 @@ def _help_body(width: int) -> list[tuple[str, str]]:
         ("↑/↓ or j/k  previous/next source record", "plain"),
         ("PgUp/PgDn   scroll one record, then cross record boundaries", "plain"),
         ("g LINE      go to an exact source-record line", "plain"),
-        ("/ FIELD QUERY  search any field or nested path", "plain"),
-        ("// QUERY    search all text; leave the key-mode field blank", "plain"),
-        ("n / N       next / previous search match", "plain"),
+        ("/ QUERY     search all text (keys and complete values)", "plain"),
+        ("/           open Search query in key mode", "plain"),
+        ("n / N       next / previous keyword occurrence (⟦active⟧)", "plain"),
         ("m           Simple / Verbose mode", "plain"),
         ("Esc         cancel help/search/status; otherwise close", "plain"),
         ("q           close and discard all transient viewer state", "plain"),
@@ -468,28 +526,45 @@ def _status_body(
 def _record_marker(index: int, state: ViewState, *, matched: bool) -> tuple[str, str]:
     search = state.search
     if search is not None and search.current_record_index == index:
-        return "@", "match_current"
+        return "@", "current"
     if matched:
-        return "*", "match_other"
+        return "*", "gutter"
     if index == state.selected_index:
         return ">", "current"
     return " ", "gutter"
 
 
-def _is_match_line(
-    index: int,
-    line: _DisplayLine,
-    state: ViewState,
-    match_paths: frozenset[JSONPath],
-) -> str | None:
-    search = state.search
-    if search is None or not any(
-        line.path[:length] in match_paths for length in range(len(line.path) + 1)
-    ):
-        return None
-    if search.current_record_index == index:
-        return "match_current"
-    return "match_other"
+def _reveal_segments(segments: tuple[_Segment, ...], width: int) -> tuple[_Segment, ...]:
+    """Keep the active character visible even beyond indentation or long keys."""
+    focus = next((i for i, segment in enumerate(segments)
+                  if segment.role == "match_current"), None)
+    if focus is None:
+        return segments
+    if width < 24:
+        # Tiny rows spend their cells on the active token, not context or a
+        # trailing clipping ellipsis. The compact gutter below ensures room
+        # for both brackets and even a ten-cell neutralized Unicode escape.
+        token, _, _ = _take_cells(segments[focus].text, max(0, width - 2))
+        return (
+            _Segment("⟦", "current"),
+            _Segment(token, "match_current"),
+            _Segment("⟧", "current"),
+        )
+    before = segments[:focus]
+    # Reserve most of the row for the focused occurrence, including tiny views.
+    budget = max(2, width // 4)
+    if sum(_text_cells(segment.text) for segment in before) <= budget:
+        return segments
+    tail: list[_Segment] = []
+    remaining = max(0, budget - 1)
+    for segment in reversed(before):
+        piece, used, _ = _take_cells(segment.text[::-1], remaining)
+        if piece:
+            tail.append(_Segment(piece[::-1], segment.role))
+        remaining -= used
+        if remaining <= 0:
+            break
+    return (_Segment("…", "muted"),) + tuple(reversed(tail)) + segments[focus:]
 
 
 def _record_lines(
@@ -501,32 +576,38 @@ def _record_lines(
     gutter_width: int,
     body_width: int,
     color: bool,
-) -> tuple[list[str], bool, int, _ProjectionFacts]:
-    logical, facts = _format_record(record, spec, state.mode)
-    match_paths = frozenset(
-        state.search.paths_for_record(index) if state.search is not None else ()
-    )
-    marker, marker_role = _record_marker(index, state, matched=bool(match_paths))
+) -> tuple[list[str], bool, int, _ProjectionFacts, int | None]:
+    active = state.search.current_occurrence if state.search is not None else None
+    if active is not None and active.record_index != index:
+        active = None
+    logical, facts = _format_record(record, spec, state.mode, active)
+    matched = state.search is not None and state.search.has_record(index)
+    marker, marker_role = _record_marker(index, state, matched=matched)
     result: list[str] = []
     any_width_clip = False
-    for line in logical:
-        match_role = _is_match_line(index, line, state, match_paths)
-        value_segments = line.segments
-        if match_role is not None:
-            value_segments = tuple(
-                _Segment(segment.text, match_role) if segment.text.strip() else segment
-                for segment in value_segments
-            )
-        clipped, width_clip = _clip_segments(value_segments, body_width)
-        any_width_clip = any_width_clip or width_clip
+    focus_row = None
+    for row, line in enumerate(logical):
+        focused = any(segment.role == "match_current" for segment in line.segments)
+        if focused:
+            focus_row = row
         gutter = (
             _Segment(marker, marker_role),
             _Segment(" "),
             _Segment(str(record.source_line).rjust(gutter_width), "gutter"),
             _Segment(" │ ", "gutter"),
         )
+        line_width = body_width
+        if focused and body_width < 12:
+            # Omit the repeated source gutter only on the active tiny row.
+            # Its record identity remains on surrounding rows; focus takes
+            # priority when five-digit source lines consume most of a frame.
+            gutter = ()
+            line_width += gutter_width + 5
+        value_segments = _reveal_segments(line.segments, line_width)
+        clipped, width_clip = _clip_segments(value_segments, line_width)
+        any_width_clip = any_width_clip or width_clip or value_segments != line.segments
         result.append(_paint(gutter + clipped, color=color))
-    return result, any_width_clip, len(logical), facts
+    return result, any_width_clip, len(logical), facts, focus_row
 
 
 def _projection_footer_pieces(facts: _ProjectionFacts | None) -> list[str]:
@@ -569,11 +650,11 @@ def _footer_lines(
         position = (
             "0/0"
             if search.current_index is None
-            else f"{search.current_index + 1}/{len(search.matches)}"
+            else f"{search.current_index + 1}/{len(search.occurrences)}"
         )
         status = (
-            f"Search {search.field or 'all text'}={_neutralize_text(search.query)!r} • "
-            f"{position} • @ current, * other"
+            f"{position} occurrences • Search all text={_neutralize_text(search.query)!r} • "
+            "⟦active⟧ • n/N"
         )
         projection_status = _projection_footer_pieces(projection_facts)
         if projection_status:
@@ -629,7 +710,6 @@ def _prompt_lines(prompt: PromptState, *, width: int) -> list[tuple[str, str]]:
     """Keep the logical cursor visible without emitting cursor controls."""
 
     labels = {
-        "search_field": ("Search field: ", "Field: "),
         "search_query": ("Search query: ", "Query: "),
         "goto": ("Go to source line: ", "Line: "),
     }
@@ -647,11 +727,7 @@ def _prompt_lines(prompt: PromptState, *, width: int) -> list[tuple[str, str]]:
     after_budget = max(0, available - 1 - _text_cells(before))
     after = _clip_text(after, after_budget)
     editor = label + before + "│" + after
-    hint = prompt.error or (
-        "Enter blank for all text • field/path • Esc cancel"
-        if prompt.kind == "search_field"
-        else "Enter submit • Esc cancel • Ctrl+U/K/W edit"
-    )
+    hint = prompt.error or "Enter submit • Esc cancel • Ctrl+U/K/W edit"
     return [
         (_clip_text(editor, width), "chrome"),
         (_clip_text(_neutralize_text(hint), width), "error" if prompt.error else "footer"),
@@ -690,10 +766,13 @@ def render_frame(
     height = min(MAX_ROWS, max(MIN_ROWS, rows))
     header = _header_lines(spec, state, width=width)
     footer_budget = 2
+    if state.search is not None:
+        header = header[:max(1, height - footer_budget - 1)]
     available_body_rows = max(0, height - len(header) - footer_budget)
     body: list[tuple[str, str] | str] = []
     width_clipped = False
     selected_line_count = 0
+    effective_offset = state.record_line_offset
     selected_projection_facts: _ProjectionFacts | None = None
 
     if state.help_visible:
@@ -708,7 +787,7 @@ def render_frame(
             body_width = max(1, width - gutter_width - 5)
             remaining = available_body_rows
             for index in range(state.selected_index, len(snapshot.records)):
-                record_lines, clipped, logical_count, projection_facts = _record_lines(
+                record_lines, clipped, logical_count, projection_facts, focus_row = _record_lines(
                     snapshot.records[index],
                     index,
                     spec,
@@ -721,7 +800,11 @@ def render_frame(
                 if index == state.selected_index:
                     selected_line_count = logical_count
                     selected_projection_facts = projection_facts
-                    record_lines = record_lines[state.record_line_offset :]
+                    effective_offset = min(state.record_line_offset, max(0, logical_count - 1))
+                    if state.reveal_match and focus_row is not None:
+                        if not effective_offset <= focus_row < effective_offset + max(1, remaining):
+                            effective_offset = max(0, focus_row - max(0, remaining // 2))
+                    record_lines = record_lines[effective_offset :]
                 if not record_lines:
                     continue
                 take = min(remaining, len(record_lines))
@@ -760,4 +843,5 @@ def render_frame(
         text="\n".join(frame_lines),
         body_rows=max(1, available_body_rows),
         selected_line_count=selected_line_count,
+        record_line_offset=effective_offset,
     )
