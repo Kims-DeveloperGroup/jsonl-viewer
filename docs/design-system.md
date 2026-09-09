@@ -31,7 +31,7 @@ full frame):
 JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 @ 1 │ {
-@ 1 │   "request_type": "request",
+@ 1 │   "⟦r⟧equest_type": "request",
 @ 1 │   "content": "Find the mismatch."
 @ 1 │ }
 
@@ -39,7 +39,7 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 * 2 │   "request_type": "response",
 * 2 │   "content": "The field is missing."
 * 2 │ }
-Search request_type='r' • 1/2 • @ current, * other
+1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
 ↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
 ```
 
@@ -90,8 +90,8 @@ Plain gutter markers carry state without color:
 | Marker | Meaning |
 | --- | --- |
 | `>` | selected/current source record |
-| `@` | current search match (also selected when search initially lands) |
-| `*` | another search match |
+| `@` | record containing the active keyword occurrence |
+| `*` | another record containing keyword occurrences |
 | space | visible record without one of those states |
 
 For an object record, `Simple` contains only the configured date/time,
@@ -102,7 +102,7 @@ projection, but a complete JSON object or array stored inside a string may be
 shown as a visibly marked derived structure. The source record and its string
 type remain unchanged. Non-object JSON records render their original value in
 either mode, with the same derived-expansion and string-leaf preview rules.
-Search initially selects the first matching record. Selecting a hit that
+Search initially selects the first keyword occurrence. Selecting a hit that
 requires hidden object fields promotes to Verbose, including when `n`/`N`
 reaches a later hit. Simple cannot be selected while the current hit requires
 those hidden fields.
@@ -123,8 +123,8 @@ host.
 | numbers | decimal token | `35` magenta | integers and finite floats |
 | booleans / null | `true`, `false`, `null` | `33` yellow | JSON literal tokens |
 | current record | `>` gutter marker | `1;36` bold cyan | selected record when it is not a search match |
-| current match | `@` plus footer `i/N` | `1;30;43` bold black on yellow | current-match marker and every non-whitespace token on matched JSON paths' rendered rows, including descendants of a matched container |
-| non-current match | `*` marker | `4;33` underlined yellow | other-match marker and every non-whitespace token on its matched paths' rendered rows, including descendants of a matched container |
+| current match | `⟦keyword⟧`, `@`, and footer `i/N occurrences` | `1;30;43` bold black on yellow | active keyword span and current-match gutter marker; brackets use the current-record role |
+| non-current match | `*` marker | `4;33` underlined yellow | other matching records' gutter marker only |
 | warning/status | explanatory text | `1;33` bold yellow | non-error transient messages, including mode/goto/search status and hidden-field promotion |
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
@@ -140,9 +140,8 @@ commas, and colons remain the terminal default. Expansion and truncation cues
 use muted dim bright-black; a skipped-expansion cue is warning yellow. The
 normal footer is dim cyan, while a record footer containing JSON display,
 truncation, or clipping facts uses muted dim bright-black. An active search
-footer remains dim cyan, and an active search match overrides the matched
-path's token colors with the current/non-current match role. Unmatched sibling
-paths retain their ordinary roles. The literal cues and footer counts carry
+footer remains dim cyan. Only the active occurrence's characters override
+ordinary token colors; surrounding text retains its ordinary roles. The literal cues and footer counts carry
 the same information in plain mode.
 
 ## Responsive geometry
@@ -186,17 +185,13 @@ clipped`; clipping never changes the snapshot.
   is never echoed.
 - **Help:** replaces the body, keeps the header/footer, and states that commands
   never edit, replay, or retry.
-- **Input draft:** with `input_protocol="keys"`, `/` opens `Search field:`
-  and then `Search query:`; a blank field selects full-text search, while a
-  field or path narrows it. `g` opens `Go to source line:`. The engine owns
+- **Input draft:** with `input_protocol="keys"`, `/` opens one
+  `Search query:` draft; `g` opens `Go to source line:`. The engine owns
   draft text, insertion position, validation, submission, and cancellation.
-  The renderer places a printable `│` logical cursor in the first footer row
-  and `Enter blank for all text • field/path • Esc cancel` in the second for
-  the field stage. Query and goto use
-  `Enter submit • Esc cancel • Ctrl+U/K/W edit`. A validation error replaces
-  that hint. Below 32 columns, labels shorten to `Field:`,
-  `Query:`, or `Line:`; long drafts clip around the logical cursor. These are
-  complete bounded frames, with the same plain/ANSI semantics as other states.
+  A printable `│` cursor appears in the first footer row; the second shows
+  `Enter submit • Esc cancel • Ctrl+U/K/W edit` or a validation error.
+  Below 32 columns labels shorten to `Query:` or `Line:`; long drafts
+  clip around the logical cursor. Plain and ANSI frames have identical text.
 - **Close:** once a valid `view_jsonl` call begins, it calls
   `host.close_view()` exactly once in `finally`, including after a host failure.
   It retains no frame, prompt draft, cursor, search, help, or navigation state.
@@ -219,10 +214,9 @@ cursor control is embedded in a prompt frame.
 
 ## Keyboard and focus behavior
 
-The package consumes host input without reading a terminal. The appended
-`ViewerSpec.input_protocol` defaults to `"semantic"`, preserving 0.1.1
-integrations, the three public exports, existing constructor arguments, and
-all five host methods. Hosts selecting `"keys"` send `text<TAB>TEXT`,
+The package consumes host input without reading a terminal. `ViewerSpec.input_protocol` defaults to `"semantic"`. Version 0.3.0 retains
+the three public exports and five host methods but changes the constructor
+and search event; see the [migration guide](../README.md#migrating-to-030). Hosts selecting `"keys"` send `text<TAB>TEXT`,
 `key<TAB>NAME`, or `line<TAB>LITERAL_COMMAND`; each payload is bounded to
 8,192 characters independently of its envelope. Text accepts printable
 Unicode, and line input may also contain tab separators. The host decodes
@@ -237,9 +231,8 @@ Left/Right move by code point; Home/End or Ctrl-A/E move to the buffer ends;
 Backspace/Delete remove the preceding/following code point. Ctrl-U deletes
 before the cursor, Ctrl-K deletes after it, and Ctrl-W deletes preceding
 whitespace and the preceding whitespace-delimited word. Up/Down and Page keys
-leave the draft and committed viewer position unchanged. Field and goto drafts
-are bounded to 128 characters; query drafts to 1,024. Enter validates and
-submits the stage; a malformed selector, empty query, or nonpositive/noninteger
+leave the draft and committed viewer position unchanged. Goto drafts are bounded to 128 characters; query drafts to 1,024. Enter
+validates and submits the draft; an empty query or nonpositive/noninteger
 goto remains in its draft with a visible error.
 
 Bare Escape and decoded `unknown_escape` cancel only an active draft. Ctrl-C
@@ -249,19 +242,18 @@ perform bounded decoding and transport, without applying these actions or
 opening another editor lifecycle. The standalone adapter uses `"keys"` for
 both physical key input and ordinary lines.
 
-The ordinary-line grammar accepts `g LINE`, `/ FIELD QUERY`, `// QUERY`,
-`/ QUERY` for a single-token full-text query, `j`/`down`,
-`k`/`up`, `pgdn`, `pgup`, `n`, `N`, `m`, `h`/`?`, `c`/`clear`,
-`q`/`quit`, and `esc`. Textual `esc` applies semantic `cancel` and a complete
-`/ FIELD QUERY` submits a search directly. Existing semantic events remain
-accepted in either protocol:
+The ordinary-line grammar accepts `g LINE`, `/ QUERY`,
+`// QUERY`, `j`/`down`, `k`/`up`, `pgdn`, `pgup`, `n`, `N`, `m`,
+`h`/`?`, `c`/`clear`, `q`/`quit`, and `esc`. The entire trimmed text
+after the search prefix is the full-text query, including spaces. A separating
+space after `/` or `//` is required before a query in this mode. Textual
+`esc` applies semantic `cancel`. Semantic events are accepted in either protocol:
 
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
 - `goto<TAB>LINE`: select an exact positive source-record line.
-- `search<TAB>FIELD_OR_PATH<TAB>QUERY`: search any exact field or nested path.
-- `search<TAB><TAB>QUERY`: search all text with an empty field.
-- `next_match` / `previous_match`: wrap through hits and update `i/N`.
+- `search<TAB>QUERY`: search all text with one nonempty query.
+- `next_match` / `previous_match`: wrap through keyword occurrences and update `i/N`.
 - `toggle_mode`: switch mode unless a selected hidden-field hit requires
   Verbose.
 - `help`: open/close the transient help body.
@@ -269,7 +261,8 @@ accepted in either protocol:
   to dismiss it closes.
 - `close` or EOF: close immediately.
 
-There is no editable body focus, cursor inside JSON, selection clipboard,
+The body has a printable keyword focus cursor, but no editable JSON or
+selection clipboard,
 command execution, mouse link, or provider action. Search and goto accept only
 transient viewer drafts; they never edit JSON or the source snapshot. The host
 owns application focus and restores the surrounding view from `close_view()`;
@@ -279,54 +272,62 @@ focus cue without transferring terminal ownership to the engine.
 
 ## Search semantics and result projection
 
-At `Search field:`, press Enter without text, then enter a nonempty query at
-`Search query:` to search all text. Full-text search includes all JSON root
-types, object keys, scalar values, and complete values before previews. Query
-matching uses Unicode `casefold` and literal substrings. Structural matching
-uses compact normalized JSON with sorted object keys, rather than source
-whitespace or member order. Expressions, evaluation, regular expressions, and
-wildcards are unsupported.
-
-The same searches can be submitted without a draft; `<TAB>` is one literal tab:
+Press `/`, enter a phrase at `Search query:`, and press Enter. Full-text
+search covers all JSON root types, keys, scalar values, hidden fields, and
+complete values before previews. Queries use Unicode `casefold` and literal
+substrings, with no selectors, expressions, regular expressions, or wildcards.
 
 | Search | Ordinary line | Semantic event |
 | --- | --- | --- |
-| full phrase | `// correlation token mismatch` | `search<TAB><TAB>correlation token mismatch` |
-| single token | `/ provider_error` | `search<TAB><TAB>provider_error` |
-| arbitrary nested field | `/ payload.items[0].status provider_error` | `search<TAB>payload.items[0].status<TAB>provider_error` |
-| JSON Pointer | `/ /payload/items/0/status provider_error` | `search<TAB>/payload/items/0/status<TAB>provider_error` |
-| existing field/query form | `/ content correlation token mismatch` | `search<TAB>content<TAB>correlation token mismatch` |
+| phrase | `/ correlation token mismatch` | `search<TAB>correlation token mismatch` |
+| single keyword | `/ provider_error` | `search<TAB>provider_error` |
+| optional alias | `// two words` | `search<TAB>two words` |
 
-`/ two words` retains the field/query grammar: field `two`, query `words`.
-Use `// two words` for a full-text phrase. Fields/paths are bounded to 128
-characters and queries to 1,024 in every protocol. A missing field or path
-produces zero matches; invalid selectors preserve the committed search.
+Queries are nonempty printable text bounded to 1,024 characters. An absent
+substring produces zero matches. More than 100,000 occurrences rejects the
+new query transactionally with a refine-query message, retaining the committed
+search and position. Invalid search events also preserve the committed search.
+Version 0.3.0 removes `ViewerSpec.searchable_fields`, `--searchable-field`,
+and all field/path search events; see the
+[migration guide](../README.md#migrating-to-030).
 
-Field/key lookup is exact and case-sensitive. Dotted paths accept zero-based
-array indexes, including root paths such as `[0].status`; JSON Pointer also
-accepts `/0/status`. Array indexes have no leading zeros except `0`. Pointer
-decodes `~0` to `~` and `~1` to `/` and preserves empty segments:
-`/a~1b/~0key/` selects an empty key inside `~key` inside `a/b`, and `/` selects
-an empty top-level key. For each object record, an exact nonempty top-level
-key always wins before interpreting a path, including slash-prefixed or
-otherwise path-like keys. A literal `/` key therefore shadows Pointer `/`
-for the empty key. Only records without the exact key use path traversal.
-A blank field always selects full text.
+Results follow source-record order, object insertion order, array order, and
+left-to-right offsets within each key or value. Each nonoverlapping original
+character span is one result. Casefold expansions map back to original code
+points: both folded letters of `ß` identify one original character, so an
+`s` query does not create duplicate or overlapping stops there.
 
-`ViewerSpec.searchable_fields` remains a required constructor parameter; `()`
-means no presets. Existing presets and the optional repeatable CLI
-`--searchable-field` are compatibility metadata and never filter search.
-Selecting a string itself searches its original contents, preserving literal
-matching. Deeper paths and full-text search can inspect children decoded from
-complete strict object/array strings under the bounds below.
+Decoded children of complete strict JSON strings take precedence over raw
+encodings. If a subtree has no direct hits, raw encoded text or compact
+normalized JSON with sorted keys is searched as a fallback. This allows
+structural matches while avoiding duplicate representations of direct hits.
+When independent display decoding or projection cannot show an occurrence,
+a `[raw search excerpt]`, `[normalized search excerpt]`, or
+`[decoded search excerpt]` row supplies its focused text.
 
-Each matching source record contributes one result even if several paths
-match. `n`/`N` wrap in source order, update `i/N`, and promote a newly selected
-hidden-field hit to Verbose. Matched nested paths receive the current/other
-roles without coloring unrelated siblings. A matched container includes its
-descendants. Plain mode retains `@`/`*` record markers and the result count;
-`c` clears the search, and cancellation follows the draft/main-view rules
-above. Search, selection, and match position are discarded on close.
+`n`/`N` wrap through occurrences, including multiple matches in one value,
+and select the containing record. The active keyword is bracketed as
+`⟦keyword⟧` in plain and ANSI output. Its record uses `@`; other matching
+records use `*` without highlighting their whole JSON. The footer reports
+`i/N occurrences`. Hidden-field selections promote to Verbose and prevent
+Simple while that selected occurrence needs hidden fields.
+
+A focused token uses up to 32 original code points of context on either side,
+before safe JSON escaping. It can expose the selected match beyond ordinary
+leaf previews. Vertical reveal brings the occurrence into the body when rows
+are available. Manual paging can move away from it; the next `n`/`N`
+reveals the newly selected occurrence. Resize recomputes geometry and focus
+windows without changing search identity.
+
+Horizontal windows below 24 cells prioritize `⟦keyword⟧` over context and
+ellipsis. If the body after its gutter would have fewer than 12 cells, only
+the active row omits that repeated gutter and uses the full frame width;
+surrounding record rows retain their source gutters. Long keywords can still
+be clipped to fit. At minimum height the protected footer may leave no body
+row. These are printable focus cues, never hardware cursor movement.
+
+`c` clears search. Cancellation follows the draft/main-view rules above;
+search and focus state are discarded on close.
 
 ## Nested JSON, truncation, and control neutralization
 
@@ -355,10 +356,11 @@ the skipped count. The display cue `[expanded JSON string ×N]` gives the
 number of decoded string layers. These projections never mutate the source
 bytes or parsed value types.
 
-Search and rendering traverse independently with separate budgets. A decoded
-hit may therefore be behind a display expansion skip or a clipped preview;
-width clipping and paging can also hide its text. The record marker and result
-count still identify the match. A rejected decoding candidate exposes no
+Search and rendering traverse independently with separate budgets. A selected
+decoded hit receives a focused window or labeled excerpt even when ordinary
+expansion or previews hide it. Geometry bounds still apply, and manual paging
+can move away from the selected occurrence. A rejected decoding candidate
+exposes no
 partial children to search, while its original string remains searchable.
 
 Simple displayed string leaves use a 4,096-byte complete UTF-8 prefix; Verbose
@@ -384,7 +386,8 @@ the same neutralization boundary before rendering.
 
 Simple mode is not redaction or access control. Verbose mode can display every
 field of a valid object record, subject to the documented preview and geometry
-bounds. Search presets limit neither search nor visibility.
+bounds. Full-text search covers all fields regardless of Simple-mode display
+priority.
 The embedding application must authorize the user, select the correct bounded
 snapshot, and apply any retention or redaction policy before calling the
 viewer.
@@ -411,29 +414,26 @@ and source location without echoing the malformed record.
    cumulative decoded-byte limit. The user sees the exact skip reason and the
    bounded original string. No partial keys or children from that candidate are
    displayed.
-4. **Source and search immutability:** after viewing an expanded response, the
-   source bytes and parsed string types are unchanged. A search on `content`
-   still evaluates the original string. A search on
-   `content.response_text.status`, or a blank-field full-text query, can
-   inspect its decoded children under the same bounded strict decoding rules.
+4. **Source and search immutability:** viewing an expanded response preserves
+   source bytes and parsed string types. Full-text search inspects decoded
+   children under bounded strict decoding rules, using original encoded text
+   only when those children have no direct hit.
 
 ## End-to-end standalone scenario
 
 1. The user snapshots a JSONL file and launches `jsonl-viewer` with explicit
-   session, conversation/scope ID, and agent. Search needs no preset fields;
-   optional `--searchable-field` values remain compatibility metadata. Optional
+   session, conversation/scope ID, and agent. Optional
    `--conversation-label` and `--conversation-subject` values project the scope
    as, for example, `Debate: FULL_ID — subject`; the label defaults to
    `Conversation`.
 2. The standalone adapter requests at most one byte beyond the fixed snapshot
    bound so it can detect overflow before taking terminal ownership; the engine
    first shows Loading, then Simple.
-3. The user presses `/`; the adapter sends physical text and the engine opens
-   a field draft, then a query draft, in complete frames with a printable
-   logical cursor. The user leaves the field blank for full text or enters any
-   field/path, then submits a query. A match applies search and `1/N`;
-   `n` and `N` wrap through results after the draft closes.
-4. During either search stage or a goto draft, Escape discards the draft and
+3. The user presses `/`; the engine opens one query draft with a printable
+   cursor. Submitting a phrase selects its first occurrence, shows
+   `1/N occurrences`, and reveals `⟦keyword⟧`. After the draft closes,
+   `n` and `N` wrap between individual occurrences.
+4. During a search or goto draft, Escape discards the draft and
    renders the prior committed state without changing an existing result or
    position. Left/Right and Ctrl-U/K/W edit the draft; command letters insert
    literal text. Up/Down and Page keys are inert there. Bounded unsupported or
@@ -441,8 +441,8 @@ and source location without echoing the malformed record.
    inside the engine.
 5. `g` moves to a source line, `m` switches mode, Page Up/Page Down inspect a
    large record, main-view Escape cancels transient help/search/status, and `q`
-   closes. The ordinary-line fallback accepts `// QUERY`, single-token
-   `/ QUERY`, existing `/ FIELD QUERY`, and textual `esc` directly.
+   closes. The ordinary-line fallback accepts `/ QUERY`,
+   `// QUERY`, and textual `esc` directly.
 6. The adapter restores its terminal. The file bytes remain unchanged; frame,
    prompt-draft, and viewer state are discarded.
 
@@ -460,36 +460,33 @@ supplies generic inputs through the viewer's public contract:
 3. Story acquires the selected agent's bounded immutable JSONL bytes and builds
    a generic `ViewerSpec`. It supplies the Story session ID, exact agent ID,
    full selected scope ID as `conversation_id`, exact kind as
-   `conversation_label`, and subject as `conversation_subject`. Story retains
-   its existing `searchable_fields` presets as compatibility metadata; they no
-   longer restrict viewer search. The viewer header therefore reads
+   `conversation_label`, and subject as `conversation_subject`. The viewer
+   header therefore reads
    `Conversation: FULL_ID — subject` or `Debate: FULL_ID — subject`;
    Story does not concatenate the kind or subject into the
    ID. The package does not interpret those generic values and shortens them
    only through content-safe responsive width clipping. Each supplied header
    string is limited to 512 characters.
-4. An integration using 0.2.0 selects `input_protocol="keys"` and validates
+4. An integration using 0.3.0 selects `input_protocol="keys"` and validates
    that capability before opening the terminal. Story's adapter passes the
    immutable bytes to `view_jsonl` and transports decoded physical text/keys
    or literal ordinary lines through `ViewerHost`. The engine owns all viewer
    bindings, command grammar, search/goto drafts, editing, and cancellation.
    Story remains sole owner of raw mode, signals, geometry, input, output,
-   application focus, and cleanup. An exact-signature integration pinned to
-   0.1.1 must update its dependency and signature check before using this
-   protocol; the existing semantic protocol remains available to other hosts.
+   application focus, and cleanup. Integrations upgrading from older releases
+   must update their dependency,
+   constructor signature checks, and semantic search events as described in
+   the migration guide.
 5. A provider exchange whose `content` string is a complete JSON object is
    displayed as derived structure; a complete encoded `response_text` object
    inside it expands recursively. The literal expansion cues and footer counts
    distinguish that view from the unchanged source string.
-6. The user confirms session/scope/agent context in the header, leaves the
-   search field blank for full text or enters a path such as
-   `content.response_text.status`, and submits the query. The viewer finds
-   bounded decoded children, shows the transient `i/N` result, and owns `n`/`N`
-   navigation and hidden-hit Verbose promotion. Selecting an encoded string
-   itself preserves its original literal substring matching. The user can go
-   to a physical JSONL source line, switch Simple/Verbose, inspect help, and use
-   Escape to dismiss help, then search, then status; an Escape with nothing
-   transient closes.
+6. The user confirms session/scope/agent context, presses `/`, and submits
+   a full-text query. The viewer searches bounded decoded children, focuses
+   each occurrence as `⟦keyword⟧`, reports `i/N occurrences`, and owns
+   `n`/`N` traversal and hidden-hit Verbose promotion. The user can go to
+   a source line, switch mode, inspect help, or use Escape to dismiss help,
+   search, then status; an Escape with nothing transient closes.
 7. Long nested string leaves receive independent retained/full byte markers;
    their parent objects, keys, siblings, and closing structure remain present
    and pageable. If a safety bound rejects an expansion, the user sees the

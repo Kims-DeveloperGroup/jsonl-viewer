@@ -60,9 +60,8 @@ class PublicApiTests(unittest.TestCase):
             "session",
             "conversation",
             "agent",
-            ["content", "ok"],  # type: ignore[arg-type]  # Runtime normalization.
         )
-        self.assertEqual(spec.searchable_fields, ("content", "ok"))
+        self.assertFalse(hasattr(spec, "searchable_fields"))
         self.assertEqual(
             spec.primary_fields,
             ("timestamp", "request_type", "content"),
@@ -74,7 +73,6 @@ class PublicApiTests(unittest.TestCase):
             "s",
             "c",
             "a",
-            (),
             "when",
             "kind",
             "payload",
@@ -86,27 +84,19 @@ class PublicApiTests(unittest.TestCase):
         with self.assertRaises(dataclasses.FrozenInstanceError):
             spec.agent_id = "changed"  # type: ignore[misc]
 
-    def test_spec_rejects_ambiguous_or_unbounded_fields(self) -> None:
-        with self.assertRaisesRegex(ValueError, "duplicates"):
-            ViewerSpec("s", "c", "a", ("content", "content"))
+    def test_spec_rejects_removed_search_fields_and_bad_display_fields(self) -> None:
+        with self.assertRaises(TypeError):
+            ViewerSpec("s", "c", "a", searchable_fields=("content",))
         with self.assertRaisesRegex(ValueError, "control separator"):
-            ViewerSpec("s", "c", "a", ("bad\tfield",))
+            ViewerSpec("s", "c", "a", content_field="bad\tfield")
         with self.assertRaisesRegex(ValueError, "distinct"):
-            ViewerSpec(
-                "s",
-                "c",
-                "a",
-                (),
-                date_time_field="same",
-                request_type_field="same",
-            )
+            ViewerSpec("s", "c", "a", date_time_field="same", request_type_field="same")
 
     def test_spec_validates_distinct_scope_header_parts(self) -> None:
         spec = ViewerSpec(
             "session",
             "d20260829T090000_abcd1234",
             "agent",
-            (),
             conversation_label="Debate",
             conversation_subject="Provider response diagnostics",
         )
@@ -125,7 +115,7 @@ class PublicApiTests(unittest.TestCase):
         ):
             with self.subTest(values=values):
                 with self.assertRaisesRegex(ValueError, message):
-                    ViewerSpec("s", "c", "a", (), **values)
+                    ViewerSpec("s", "c", "a", **values)
 
     def test_clean_import_has_no_filesystem_or_terminal_side_effect(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -170,7 +160,6 @@ class EngineTests(unittest.TestCase):
             "session-01",
             "conversation-01",
             "agent-01",
-            ("timestamp", "request_type", "content", "latency_ms", "ok"),
         )
 
     def test_simple_goto_verbose_and_close_are_transient_and_read_only(self) -> None:
@@ -199,7 +188,7 @@ class EngineTests(unittest.TestCase):
     def test_search_wraps_and_promotes_hidden_field(self) -> None:
         host = FakeHost(
             (
-                "search\tlatency_ms\t2",
+                "search\tlatency_ms",
                 "next_match",
                 "previous_match",
                 "close",
@@ -210,30 +199,30 @@ class EngineTests(unittest.TestCase):
         first = host.frames[2]
         self.assertIn("VERBOSE", first)
         self.assertIn("Hidden-field match selected", first)
-        self.assertIn("Search latency_ms='2' • 1/2", first)
+        self.assertIn("1/3 occurrences • Search all text='latency_ms'", first)
         self.assertIn("@ 1 │", first)
         second = host.frames[3]
-        self.assertIn("Search latency_ms='2' • 2/2", second)
+        self.assertIn("2/3 occurrences • Search all text='latency_ms'", second)
         self.assertIn("@ 2 │", second)
         previous = host.frames[4]
-        self.assertIn("Search latency_ms='2' • 1/2", previous)
+        self.assertIn("1/3 occurrences • Search all text='latency_ms'", previous)
 
-    def test_search_is_case_insensitive_and_top_level_only(self) -> None:
+    def test_search_is_case_insensitive_and_includes_nested_values(self) -> None:
         source = (
             b'{"content":"Alpha top level","nested":{"content":"needle"}}\n'
             b'{"content":"unrelated","nested":{"content":"ALPHA"}}\n'
         )
         host = FakeHost(
             (
-                "search\tcontent\tALPHA",
-                "search\tcontent\tneedle",
+                "search\tALPHA",
+                "search\tneedle",
                 "close",
             ),
             size=(100, 20),
         )
         view_jsonl(source, self.spec, host)
-        self.assertIn("Search content='ALPHA' • 1/1", host.frames[2])
-        self.assertIn("Search content='needle' • 0/0", host.frames[3])
+        self.assertIn("1/2 occurrences • Search all text='ALPHA'", host.frames[2])
+        self.assertIn("1/1 occurrences • Search all text='needle'", host.frames[3])
 
     def test_embedded_json_search_uses_the_original_top_level_string(self) -> None:
         content = json.dumps(
@@ -253,9 +242,9 @@ class EngineTests(unittest.TestCase):
         )
         host = FakeHost(
             (
-                "search\tcontent\t\\n",
+                "search\t\\n",
                 "clear_search",
-                "search\tcontent\tline1\nline2",
+                "search\tline1\nline2",
                 "close",
             ),
             size=(160, 18),
@@ -263,20 +252,20 @@ class EngineTests(unittest.TestCase):
 
         view_jsonl(source, self.spec, host)
 
-        self.assertIn("Search content=", host.frames[2])
-        self.assertIn("• 1/1 • @ current", host.frames[2])
-        self.assertIn('"message": "line1\\nline2"', host.frames[2])
-        self.assertIn("Search content=", host.frames[4])
-        self.assertIn("• 0/0 • @ current", host.frames[4])
+        self.assertIn("Search all text=", host.frames[2])
+        self.assertIn("1/1 occurrences", host.frames[2])
+        self.assertIn("⟦", host.frames[2])
+        self.assertNotIn("Search all text=", host.frames[4])
+        self.assertIn("unsupported controls", host.frames[4])
 
     def test_non_enumerated_search_finds_values_and_promotes_hidden_field(self) -> None:
-        host = FakeHost(("search\tsecret\tneedle", "close"))
+        host = FakeHost(("search\tneedle", "close"))
         source = b'{"content":"safe","secret":"needle"}\n'
         view_jsonl(source, self.spec, host)
         frame = host.frames[2]
-        self.assertIn("Search secret='needle' • 1/1", frame)
+        self.assertIn("1/1 occurrences • Search all text='needle'", frame)
         self.assertIn("READ ONLY • VERBOSE", frame)
-        self.assertIn('"secret": "needle"', frame)
+        self.assertIn('"secret": "⟦needle⟧"', frame)
 
     def test_no_match_position_paging_and_invalid_goto_are_bounded(self) -> None:
         source = (
@@ -286,7 +275,7 @@ class EngineTests(unittest.TestCase):
         )
         host = FakeHost(
             (
-                "search\tcontent\tabsent",
+                "search\tabsent",
                 "clear_search",
                 "toggle_mode",
                 "page_down",
@@ -298,7 +287,7 @@ class EngineTests(unittest.TestCase):
             size=(80, 9),
         )
         view_jsonl(source, self.spec, host)
-        self.assertIn("Search content='absent' • 0/0", host.frames[2])
+        self.assertIn("0/0 occurrences • Search all text='absent'", host.frames[2])
         self.assertIn("VERBOSE", host.frames[4])
         self.assertTrue(
             any("Record 2/2" in frame for frame in host.frames),
@@ -308,14 +297,15 @@ class EngineTests(unittest.TestCase):
 
     def test_hidden_match_prevents_hiding_its_selected_field(self) -> None:
         host = FakeHost(
-            ("search\tlatency_ms\t12", "toggle_mode", "close"),
+            ("search\t12", "toggle_mode", "close"),
             size=(100, 18),
         )
         view_jsonl(_source(), self.spec, host)
         frame = host.frames[-1]
         self.assertIn("VERBOSE", frame)
         self.assertIn("Verbose mode is required", frame)
-        self.assertIn("Search latency_ms='12' • 1/1", frame)
+        self.assertIn("1/1 occurrences", frame)
+        self.assertIn('"latency_ms": ⟦12⟧', frame)
 
     def test_embedded_projection_pages_by_derived_lines_and_closes_cleanly(
         self,
@@ -368,7 +358,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn("READ ONLY", tiny.frames[-1])
 
     def test_cancel_dismisses_search_then_closes_without_persistence(self) -> None:
-        first = FakeHost(("search\tcontent\talpha", "cancel", "close"))
+        first = FakeHost(("search\talpha", "cancel", "close"))
         view_jsonl(_source(), self.spec, first)
         self.assertEqual(first.close_calls, 1)
         self.assertIn("Search cleared", first.frames[-1])
@@ -414,7 +404,7 @@ class KeyInputTests(unittest.TestCase):
     def setUp(self) -> None:
         from jsonl_viewer._input import parse_jsonl
 
-        self.spec = ViewerSpec("s", "c", "a", ("content", "latency_ms"), input_protocol="keys")
+        self.spec = ViewerSpec("s", "c", "a", input_protocol="keys")
         self.source = _source()
         self.snapshot = parse_jsonl(self.source)
 
@@ -427,7 +417,7 @@ class KeyInputTests(unittest.TestCase):
         from jsonl_viewer._model import ViewState
 
         state = ViewState()
-        for event in ("text\t/", "text\tcontent", "key\tenter"):
+        for event in ("text\t/",):
             state, closed = self.step(state, event)
             self.assertFalse(closed)
         return state
@@ -435,13 +425,13 @@ class KeyInputTests(unittest.TestCase):
     def test_input_protocol_defaults_and_exact_host_surface(self) -> None:
         import inspect
 
-        legacy = ViewerSpec("s", "c", "a", (), "t", "r", "v", "title", "Scope", "Subject")
+        legacy = ViewerSpec("s", "c", "a", "t", "r", "v", "title", "Scope", "Subject")
         self.assertEqual(legacy.input_protocol, "semantic")
         self.assertEqual(list(inspect.signature(ViewerSpec).parameters)[-1], "input_protocol")
         self.assertEqual(inspect.signature(ViewerSpec).parameters["input_protocol"].default, "semantic")
         for invalid in (None, True, 1, "", "KEYS", "other"):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "input_protocol"):
-                ViewerSpec("s", "c", "a", (), input_protocol=invalid)
+                ViewerSpec("s", "c", "a", input_protocol=invalid)
         methods = {name: member for name, member in vars(jsonl_viewer.ViewerHost).items() if not name.startswith("_")}
         self.assertEqual(set(methods), {"terminal_size", "color_enabled", "present", "read_event", "close_view"})
         for name, member in methods.items():
@@ -474,10 +464,10 @@ class KeyInputTests(unittest.TestCase):
 
     def test_ctrl_u_unicode_regression_finds_seven_records(self) -> None:
         source = b"".join((json.dumps({"content": "개요 " + str(i)}, ensure_ascii=False) + "\n").encode() for i in range(7))
-        events = ("text\t/", "text\tcontent", "key\tenter", "text\twrong", "key\tctrl_u", "text\t개", "text\t요", "key\tenter", "close")
+        events = ("text\t/", "text\twrong", "key\tctrl_u", "text\t개", "text\t요", "key\tenter", "close")
         host = FakeHost(events)
         view_jsonl(source, self.spec, host)
-        self.assertIn("Search content='개요' • 1/7", host.frames[-1])
+        self.assertIn("1/7 occurrences • Search all text='개요'", host.frames[-1])
         self.assertNotIn("U0015", "\n".join(host.frames))
         self.assertNotIn("\x15", "\n".join(host.frames))
         self.assertEqual(host.close_calls, 1)
@@ -500,11 +490,12 @@ class KeyInputTests(unittest.TestCase):
 
     def test_escape_each_draft_preserves_every_committed_state_field(self) -> None:
         from jsonl_viewer._model import SearchState, ViewMode, ViewState
+        from jsonl_viewer._search import find_matches
 
         active = ViewState(selected_index=1, record_line_offset=7, mode=ViewMode.VERBOSE,
-                           search=SearchState("content", "alpha", (0, 1), 1),
+                           search=SearchState("alpha", find_matches(self.snapshot, "alpha"), 1),
                            message="prior error", message_is_error=True)
-        for start in (("text\t/",), ("text\t/", "text\tcontent", "key\tenter"), ("text\tg",)):
+        for start in (("text\t/",), ("text\tg",)):
             for escape in ("key\tescape", "key\tunknown_escape", "cancel"):
                 with self.subTest(start=start, escape=escape):
                     state = active
@@ -522,12 +513,12 @@ class KeyInputTests(unittest.TestCase):
     def test_legacy_semantic_and_line_commands_have_matching_actions(self) -> None:
         commands = ((" j ", "down"), ("down", "down"), ("k", "up"), ("up", "up"),
                     ("pgdn", "page_down"), ("pgup", "page_up"), ("g 2", "goto\t2"),
-                    ("/ content alpha", "search\tcontent\talpha"), ("n", "next_match"),
+                    ("/ alpha", "search\talpha"), ("n", "next_match"),
                     ("N", "previous_match"), ("m", "toggle_mode"), ("h", "help"),
                     ("?", "help"), ("esc", "cancel"), ("c", "clear_search"),
                     ("clear", "clear_search"), ("q", "close"), ("quit", "close"),
                     ("", "unknown"), ("/content alpha", "unknown"), ("g x", "goto\tx"),
-                    ("/ content alpha\tbeta", "unknown"))
+                    ("/ content alpha\tbeta", "search\tcontent alpha\tbeta"))
         from jsonl_viewer._model import ViewState
         for command, semantic in commands:
             with self.subTest(command=command):
@@ -543,7 +534,7 @@ class KeyInputTests(unittest.TestCase):
 
     def test_prompt_limits_malformed_transport_and_controls_are_transactional(self) -> None:
         from jsonl_viewer._model import ViewState
-        for begin, limit in [(("text\t/",), 128), (("text\tg",), 128), (("text\t/", "text\tcontent", "key\tenter"), 1024)]:
+        for begin, limit in [(("text\t/",), 1024), (("text\tg",), 128)]:
             state = ViewState()
             for event in begin:
                 state, _ = self.step(state, event)
@@ -562,7 +553,7 @@ class KeyInputTests(unittest.TestCase):
                 self.assertFalse(closed)
                 self.assertEqual(state.prompt.buffer, "")
                 self.assertIsNotNone(state.prompt.error)
-        for event in ("key\tunknown", "key\tclose", "key\tup", "key\tbogus", "search\tcontent\talpha"):
+        for event in ("key\tunknown", "key\tclose", "key\tup", "key\tbogus", "search\talpha"):
             state, closed = self.step(initial, event)
             self.assertFalse(closed)
             self.assertEqual(state, initial)
@@ -574,13 +565,13 @@ class KeyInputTests(unittest.TestCase):
         self.assertTrue(rejected.message_is_error)
 
     def test_prompt_eof_interrupt_and_failure_close_once_without_submitting(self) -> None:
-        for begin in (("text\t/",), ("text\t/", "text\tcontent", "key\tenter"), ("text\tg",)):
+        for begin in (("text\t/",), ("text\tg",)):
             for ending in (None, "key\teof", "key\tinterrupt"):
                 with self.subTest(begin=begin, ending=ending):
                     host = FakeHost((*begin, "text\tdraft", ending))
                     view_jsonl(self.source, self.spec, host)
                     self.assertEqual(host.close_calls, 1)
-                    self.assertNotIn("Search content=", host.frames[-1])
+                    self.assertNotIn("Search all text=", host.frames[-1])
         class FailingRead(FakeHost):
             def read_event(self):
                 event = super().read_event()
@@ -592,7 +583,7 @@ class KeyInputTests(unittest.TestCase):
             view_jsonl(self.source, self.spec, host)
         self.assertEqual(host.close_calls, 1)
         from jsonl_viewer._model import ViewState
-        state, _ = self.step(ViewState(), "search\tcontent\talpha")
+        state, _ = self.step(ViewState(), "search\talpha")
         cancelled, closed = self.step(state, "key\tinterrupt")
         self.assertFalse(closed)
         self.assertIsNone(cancelled.search)
@@ -611,18 +602,15 @@ class KeyInputTests(unittest.TestCase):
             self.assertFalse(closed)
         self.assertIsNone(state.prompt)
         self.assertEqual(state.selected_index, 1)
-        for event in ("text\t/", "text\tpayload[", "key\tenter"):
+        for event in ("text\t/", "key\tenter"):
             state, _ = self.step(state, event)
         self.assertIsNone(state.search)
-        self.assertIn("Malformed field path", state.prompt.error)
-        for event in ("key\tctrl_u", "text\tcontent", "key\tenter", "key\tenter"):
-            state, _ = self.step(state, event)
         self.assertIn("must not be empty", state.prompt.error)
         self.assertEqual(state.selected_index, 1)
         for event in ("text\talpha", "key\tenter"):
             state, _ = self.step(state, event)
         self.assertIsNone(state.prompt)
-        self.assertEqual(state.search.matches, (0, 1))
+        self.assertEqual(tuple(hit.record_index for hit in state.search.occurrences), (0, 1))
         self.assertEqual(state.selected_index, 0)
 
     def test_help_empty_and_malformed_sources_cannot_open_prompts(self) -> None:
@@ -632,12 +620,12 @@ class KeyInputTests(unittest.TestCase):
             host = FakeHost(events)
             view_jsonl(source, self.spec, host)
             self.assertEqual(host.close_calls, 1)
-            self.assertFalse(any("Search field: " in frame or "Go to source line: " in frame for frame in host.frames))
+            self.assertFalse(any("Search query: " in frame or "Go to source line: " in frame for frame in host.frames))
 
     def test_prompt_rendering_is_bounded_plain_color_equivalent_and_transient(self) -> None:
         from jsonl_viewer._render import strip_ansi, _text_cells
 
-        events = ("text\t/", "text\tcontent", "key\tenter", "text\t" + "개요😀e\u0301" * 60, "key\thome", "key\tright", "key\tend", "key\tescape", "close")
+        events = ("text\t/", "text\t" + "개요😀e\u0301" * 60, "key\thome", "key\tright", "key\tend", "key\tescape", "close")
         for size in ((12, 4), (32, 8), (80, 24)):
             with self.subTest(size=size):
                 plain, color = FakeHost(events, size=size), FakeHost(events, size=size, color=True)
@@ -651,7 +639,7 @@ class KeyInputTests(unittest.TestCase):
                 self.assertEqual(plain.frames[1], plain.frames[-1])
         reopened = FakeHost(("close",))
         view_jsonl(self.source, self.spec, reopened)
-        self.assertNotIn("Search field: ", reopened.frames[-1])
+        self.assertNotIn("Search query: ", reopened.frames[-1])
 
 
 if __name__ == "__main__":

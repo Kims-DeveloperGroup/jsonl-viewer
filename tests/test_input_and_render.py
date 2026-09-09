@@ -28,7 +28,7 @@ from tests.support import FakeHost
 
 class InputDiagnosticTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.spec = ViewerSpec("s", "c", "a", ("content",))
+        self.spec = ViewerSpec("s", "c", "a")
 
     def _frame(self, source: bytes) -> str:
         host = FakeHost(("close",), size=(100, 16))
@@ -89,7 +89,6 @@ class RenderTests(unittest.TestCase):
             "session\x1b[31m",
             "대화🙂",
             "agent\u202ehidden",
-            ("content", "number", "flag", "nothing"),
         )
         self.source = (
             json.dumps(
@@ -132,7 +131,7 @@ class RenderTests(unittest.TestCase):
         snapshot = parse_jsonl(self._content_source(content))
         lines, facts = _format_record(
             snapshot.records[0],
-            ViewerSpec("s", "c", "a", ("content",)),
+            ViewerSpec("s", "c", "a"),
             mode,
         )
         logical = "\n".join(
@@ -158,7 +157,6 @@ class RenderTests(unittest.TestCase):
                     "session",
                     "conversation-full-id",
                     "agent",
-                    ("content",),
                     conversation_subject="A concise subject",
                 ),
                 "Conversation: conversation-full-id — A concise subject",
@@ -169,7 +167,6 @@ class RenderTests(unittest.TestCase):
                     "s",
                     "debate-full-id",
                     "a",
-                    ("content",),
                     conversation_label="Debate",
                     conversation_subject="Provider diagnostics",
                 ),
@@ -181,7 +178,6 @@ class RenderTests(unittest.TestCase):
                     "s",
                     "d1",
                     "a",
-                    ("content",),
                     conversation_label="Debate",
                     conversation_subject="topic",
                 ),
@@ -199,7 +195,6 @@ class RenderTests(unittest.TestCase):
             "s",
             "d\x1b[2J",
             "a",
-            ("content",),
             conversation_label="Debate\nkind",
             conversation_subject="subject\u202ehidden",
         )
@@ -243,7 +238,7 @@ class RenderTests(unittest.TestCase):
         source = self._content_source(
             json.dumps(outer, ensure_ascii=False, separators=(",", ":"))
         )
-        spec = ViewerSpec("s", "c", "a", ("content",))
+        spec = ViewerSpec("s", "c", "a")
 
         plain = FakeHost(("close",), size=(240, 30), color=False)
         ansi = FakeHost(("close",), size=(240, 30), color=True)
@@ -335,7 +330,7 @@ class RenderTests(unittest.TestCase):
 
         _format_record(
             snapshot.records[0],
-            ViewerSpec("s", "c", "a", ("content",)),
+            ViewerSpec("s", "c", "a"),
             ViewMode.SIMPLE,
         )
 
@@ -414,7 +409,7 @@ class RenderTests(unittest.TestCase):
         with mock.patch.object(json_module, "MAX_DERIVED_VALUE_NODES", 5):
             view_jsonl(
                 self._content_source(aggregate_outer),
-                ViewerSpec("s", "c", "a", ("content",)),
+                ViewerSpec("s", "c", "a"),
                 host,
             )
         self.assertIn(
@@ -451,7 +446,7 @@ class RenderTests(unittest.TestCase):
         snapshot = parse_jsonl(self._content_source(encoded))
         line_count = record_line_count(
             snapshot.records[0],
-            ViewerSpec("s", "c", "a", ("content",)),
+            ViewerSpec("s", "c", "a"),
             ViewMode.SIMPLE,
         )
 
@@ -494,7 +489,7 @@ class RenderTests(unittest.TestCase):
         host = FakeHost(("close",), size=(240, 20))
         view_jsonl(
             self._content_source(encoded),
-            ViewerSpec("s", "c", "a", ("content",)),
+            ViewerSpec("s", "c", "a"),
             host,
         )
         frame = host.frames[-1]
@@ -523,7 +518,7 @@ class RenderTests(unittest.TestCase):
         host = FakeHost(("toggle_mode", "close"), size=(240, 12))
         view_jsonl(
             self._content_source(mode_value),
-            ViewerSpec("s", "c", "a", ("content",)),
+            ViewerSpec("s", "c", "a"),
             host,
         )
         self.assertIn("JSON display 1 expanded, 0 skipped, 1 truncated", host.frames[1])
@@ -575,7 +570,7 @@ class RenderTests(unittest.TestCase):
             + b"\n"
         )
         host = FakeHost(("close",), size=(120, 15))
-        view_jsonl(source, ViewerSpec("s", "c", "a", ("content",)), host)
+        view_jsonl(source, ViewerSpec("s", "c", "a"), host)
         frame = host.frames[-1]
         self.assertIn("content preview 4095/6000 UTF-8 bytes", frame)
         self.assertIn("width clipped", frame)
@@ -593,7 +588,7 @@ class RenderTests(unittest.TestCase):
             + b"\n"
         )
         host = FakeHost(("toggle_mode", "cancel", "close"), size=(120, 15))
-        view_jsonl(source, ViewerSpec("s", "c", "a", ("content",)), host)
+        view_jsonl(source, ViewerSpec("s", "c", "a"), host)
         self.assertIn("content preview 65536/65537 UTF-8 bytes", host.frames[-1])
 
     def test_tiny_terminal_retains_read_only_and_help_close_cues(self) -> None:
@@ -631,23 +626,25 @@ class RenderTests(unittest.TestCase):
             b'{"timestamp":"1","request_type":"response","content":"hit"}\n'
             b'{"timestamp":"2","request_type":"response","content":"hit"}\n'
         )
-        host = FakeHost(("search\tcontent\thit", "close"), size=(100, 30))
-        view_jsonl(source, ViewerSpec("s", "c", "a", ("content",)), host)
+        host = FakeHost(("search\thit", "close"), size=(100, 30))
+        view_jsonl(source, ViewerSpec("s", "c", "a"), host)
         frame = host.frames[-1]
         self.assertIn("@ 1 │", frame)
         self.assertIn("* 2 │", frame)
-        self.assertIn("@ current, * other", frame)
+        self.assertIn("⟦active⟧ • n/N", frame)
 
         ansi = FakeHost(
-            ("search\tcontent\thit", "close"),
+            ("search\thit", "close"),
             size=(100, 30),
             color=True,
         )
-        view_jsonl(source, ViewerSpec("s", "c", "a", ("content",)), ansi)
+        view_jsonl(source, ViewerSpec("s", "c", "a"), ansi)
         colored = ansi.frames[-1]
         self.assertEqual(strip_ansi(colored), frame)
-        self.assertIn("\x1b[1;30;43m@\x1b[0m", colored)
-        self.assertIn("\x1b[4;33m*\x1b[0m", colored)
+        self.assertIn("\x1b[1;36m@\x1b[0m", colored)
+        self.assertIn("\x1b[2;90m*\x1b[0m", colored)
+        self.assertIn("\x1b[1;30;43mhit\x1b[0m", colored)
+        self.assertNotIn("\x1b[1;30;43m@", colored)
 
 
 if __name__ == "__main__":

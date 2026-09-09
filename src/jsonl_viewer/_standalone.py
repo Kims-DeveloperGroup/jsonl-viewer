@@ -244,14 +244,6 @@ def _parser() -> argparse.ArgumentParser:
         help="optional header scope subject",
     )
     parser.add_argument("--agent", required=True, help="header agent value")
-    parser.add_argument(
-        "--searchable-field",
-        action="append",
-        dest="searchable_fields",
-        default=[],
-        metavar="FIELD",
-        help="compatibility field preset; all fields remain searchable; repeatable",
-    )
     parser.add_argument("--date-time-field", default="timestamp")
     parser.add_argument("--request-type-field", default="request_type")
     parser.add_argument("--content-field", default="content")
@@ -283,7 +275,6 @@ def main(argv: list[str] | None = None) -> int:
             session_id=arguments.session,
             conversation_id=arguments.conversation,
             agent_id=arguments.agent,
-            searchable_fields=tuple(arguments.searchable_fields),
             date_time_field=arguments.date_time_field,
             request_type_field=arguments.request_type_field,
             content_field=arguments.content_field,

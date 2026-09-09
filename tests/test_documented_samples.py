@@ -20,7 +20,6 @@ def _spec() -> ViewerSpec:
         "session-01",
         "conversation-01",
         "agent-01",
-        ("timestamp", "request_type", "content", "latency_ms"),
     )
 
 
@@ -108,7 +107,7 @@ class DocumentedSampleTests(unittest.TestCase):
             ),
             "search-matches.txt": (
                 _ordinary_source(),
-                ("search\trequest_type\tr", "close"),
+                ("search\tr", "close"),
                 (88, 20),
             ),
             "nested-expanded-json.txt": (

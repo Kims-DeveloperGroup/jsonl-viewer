@@ -7,7 +7,6 @@ from typing import Protocol
 
 
 _MAX_HEADER_VALUE_CHARACTERS = 512
-_MAX_SEARCHABLE_FIELDS = 64
 _MAX_FIELD_CHARACTERS = 128
 
 
@@ -33,15 +32,13 @@ def _validate_field(value: object, *, label: str) -> str:
 class ViewerSpec:
     """Describe one generic immutable view with unrestricted literal search.
 
-    ``searchable_fields`` retains bounded compatibility presets; an empty
-    tuple is valid and presets never restrict search. Primary display fields
-    identify exact top-level keys supplied by the embedding application.
+    Primary display fields identify exact top-level keys supplied by the
+    embedding application; search always covers full text.
     """
 
     session_id: str
     conversation_id: str
     agent_id: str
-    searchable_fields: tuple[str, ...]
     date_time_field: str = "timestamp"
     request_type_field: str = "request_type"
     content_field: str = "content"
@@ -77,19 +74,6 @@ class ViewerSpec:
                     label="conversation_subject",
                 ),
             )
-
-        try:
-            fields = tuple(self.searchable_fields)
-        except TypeError as exc:
-            raise TypeError("searchable_fields must be an iterable of text") from exc
-        if len(fields) > _MAX_SEARCHABLE_FIELDS:
-            raise ValueError("searchable_fields contains too many fields")
-        validated = tuple(
-            _validate_field(field, label="searchable field") for field in fields
-        )
-        if len(set(validated)) != len(validated):
-            raise ValueError("searchable_fields contains duplicates")
-        object.__setattr__(self, "searchable_fields", validated)
 
         primary = tuple(
             _validate_field(getattr(self, attribute), label=attribute)
@@ -128,7 +112,7 @@ class ViewerHost(Protocol):
     returns ``None`` for EOF or one closed event string:
     ``up``, ``down``, ``page_up``, ``page_down``, ``next_match``,
     ``previous_match``, ``toggle_mode``, ``help``, ``cancel``, ``clear_search``,
-    ``close``, ``goto<TAB>LINE``, or ``search<TAB>FIELD<TAB>QUERY``.
+    ``close``, ``goto<TAB>LINE``, or ``search<TAB>QUERY``.
 
     ``input_protocol='keys'`` additionally accepts ``text<TAB>TEXT``,
     ``line<TAB>COMMAND``, and ``key<TAB>NAME``. Each payload is bounded to

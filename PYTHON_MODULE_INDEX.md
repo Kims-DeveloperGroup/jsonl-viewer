@@ -96,11 +96,13 @@ unit imports Story or any third-party runtime package.
   JSON expansion, and renderer share JSON value types and frozen record,
   snapshot, diagnostic, mode, search, prompt, view, and render-result values.
   Immutable `JSONPath` tuples distinguish string keys from integer array
-  indices; `MatchPaths` and `SearchState.match_paths` align resolved paths with
-  deduplicated record matches. `paths_for_record` also supports private legacy
-  search-state values without explicit paths. Prompt values hold an uncommitted
-  stage, buffer, code-point cursor, selected field/path, and local validation
-  error.
+  indices. Frozen `Occurrence` values retain record index, path, key/value or
+  fallback kind, original-codepoint span, and matching text. `SearchState`
+  holds ordered occurrences and the active index, with binary-search record
+  membership/path access. Prompt values hold an uncommitted query or goto
+  buffer, code-point cursor, and local validation error. `ViewState.reveal_match`
+  requests focus positioning; `RenderResult.record_line_offset` reports the
+  effective viewport offset for the engine to retain.
 - **Direct internal dependencies:** None.
 - **State, resources, and side effects:** Defines values only; it owns no module
   state, lifecycle, or I/O.
@@ -136,7 +138,7 @@ unit imports Story or any third-party runtime package.
 - **Responsibility:** Render deterministic bounded semantic ANSI/plain frames
   from call-local derived JSON projections.
 - **Supported surface:** No supported consumer API. The engine consumes private
-  loading/frame renderers and the current record-line count; tests use the
+  loading/frame renderers, effective viewport offset, and current record-line count; tests use the
   private SGR-stripping verifier.
 - **Direct internal dependencies:** `_json`, `_model`, and `contracts`.
 - **State, resources, and side effects:** Owns immutable role/bound metadata,
@@ -147,11 +149,15 @@ unit imports Story or any third-party runtime package.
   accepted by `_json`, without mutating source/search values. Shared
   layer/depth/node/decoded-byte bounds retain an over-bound candidate as its
   original string with a content-safe cue. Display paths include integer array
-  indices; supplied match paths determine line highlighting while record
-  markers identify selected/other matches. Independent search/display
-  traversal order, projection, expansion limits, or preview clipping can leave
-  matched text absent from a displayed frame without removing its record marker.
-  String-leaf preview bounds apply only after expansion at complete UTF-8 code
+  indices; the active occurrence identifies the exact key/value span for SGR
+  emphasis and printable `⟦…⟧` focus. Focused tokens use the original span plus
+  at most 32 code points of context on either side, escaped after slicing;
+  horizontal segment windows prioritize focus before final cell clipping.
+  Raw, normalized, or unavailable decoded occurrences receive labeled bounded
+  excerpts when no corresponding token is rendered. Focus-row metadata lets
+  rendering resolve requested vertical positioning without terminal controls.
+  Record markers retain selected/other membership without whole-line styling.
+  Ordinary string-leaf preview bounds apply after expansion at complete UTF-8 code
   points; visible per-leaf markers and footer aggregates report expansion,
   skipped, and retained/full truncation facts without removing keys,
   containers, delimiters, or child presence. The same renderer formats
@@ -160,7 +166,7 @@ unit imports Story or any third-party runtime package.
   clipping, and emits optional SGR without cursor/lifecycle controls. Isolated
   surrogate leaves use visible escapes and a localized bounded preview fallback.
   Active
-  search-field, search-query, and goto editors occupy the two footer rows;
+  search-query and goto editors occupy the two footer rows;
   bounded horizontal windows keep a printable logical cursor visible and
   display prompt-local validation errors without altering committed state.
 - **Primary verification/documentation:** `tests/test_input_and_render.py`,
@@ -170,23 +176,24 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer._search`
 
 - **Source:** `src/jsonl_viewer/_search.py`
-- **Responsibility:** Resolve bounded literal searches against complete JSON
+- **Responsibility:** Locate bounded full-text occurrences in complete JSON
   record values.
 - **Supported surface:** No supported consumer API. The engine uses
-  `parse_selector`, immutable `Selector`, content-safe `SelectorError`,
-  `MAX_FIELD_CHARACTERS`, and `find_matches`.
+  `find_matches` and transactional `SearchLimitError`; `MAX_OCCURRENCES`
+  bounds successful results to 100,000 occurrences.
 - **Direct internal dependencies:** `_json` and `_model`.
-- **State, resources, and side effects:** Owns selector syntax and pure matching
-  with call-local paths and one explicit expansion budget per record. The
-  128-character selector accepts dotted keys, nonnegative `[INDEX]` segments,
-  or JSON Pointer with `~0`/`~1` escaping. Nonempty exact top-level keys take
-  precedence over path interpretation, including slash-prefixed keys that
-  shadow a Pointer. Blank field searches the whole record. Matching case-folds
-  full keys, strings, and scalar text, with compact JSON container fallback;
-  it never searches clipped frames. Selecting a string itself retains literal
-  substring semantics, while deeper selectors and full text can traverse
-  strict encoded containers through `_json`. Results contain deduplicated
-  record indices and immutable resolved paths. It owns no prompt, navigation,
+- **State, resources, and side effects:** Owns pure matching with call-local
+  paths and one explicit expansion budget per record. Source-record order,
+  insertion-order keys/children, and leaf offsets determine occurrence order.
+  Literal Unicode-casefold matches map back to original-codepoint spans using
+  a compact offset array; overlapping original spans are suppressed. Full keys,
+  strings, and scalar text are searched independently of clipped frames.
+  Strict encoded containers expand through `_json`; decoded children take
+  precedence over raw encoding. Containers without child hits use compact
+  normalized JSON fallback; encoded strings without decoded hits use raw
+  fallback. Returned immutable occurrences distinguish these representations.
+  Exceeding the occurrence limit raises instead of returning partial results.
+  It owns no prompt, navigation,
   committed search state, source mutation, I/O, or terminal resource.
 - **Primary verification/documentation:** `tests/test_public_api_and_engine.py`,
   `tests/test_input_and_render.py`, `tests/test_unrestricted_search.py`,
@@ -201,8 +208,7 @@ unit imports Story or any third-party runtime package.
   internal `main(argv=None)`. `_TerminalHost` and read/parser helpers are not
   supported library APIs. The CLI accepts the exact conversation/scope ID,
   scope label (default `Conversation`), and optional scope subject separately.
-  Repeatable `--searchable-field` values are compatibility presets and do not
-  restrict searches.
+  Search is full-text only; there is no field-selection CLI option.
 - **Direct internal dependencies:** `_input`, `contracts`, and `engine`.
 - **State, resources, and side effects:** A `main` call opens its selected source
   only for a bounded binary read. On a supported interactive POSIX terminal its
@@ -230,11 +236,9 @@ unit imports Story or any third-party runtime package.
 - **Supported surface:** Package-supported frozen `ViewerSpec` and structural
   `ViewerHost` protocol through the root facade. `ViewerSpec` supplies exact
   header values—including a separate scope label, exact scope ID, and optional
-  subject—bounded ordered compatibility presets in the required
-  `searchable_fields` constructor argument, and configurable Simple-mode field
-  identities. Empty presets are valid and never restrict search. Its appended
-  `input_protocol` field defaults
-  to `semantic` for existing hosts; `keys` additionally enables bounded
+  subject—and configurable Simple-mode field identities. There is no
+  `searchable_fields` constructor argument. `input_protocol` defaults
+  to `semantic`, whose search event is `search<TAB>QUERY`; `keys` additionally enables bounded
   text/key/literal-line envelopes without changing the three-name facade or
   host method signatures. `ViewerHost` owns size/color decisions,
   complete-frame presentation, closed event delivery, and close restoration.
@@ -255,18 +259,21 @@ unit imports Story or any third-party runtime package.
 - **Direct internal dependencies:** `_input`, `_model`, `_render`, `_search`,
   and `contracts`.
 - **State, resources, and side effects:** Owns navigation, within-record paging,
-  Simple/Verbose, committed field/full-text search, current result, help, and
-  transient message state only for one call. It delegates selector validation
-  and matching to `_search`, then carries resolved paths in immutable search
-  state. Hidden top-level match paths trigger Verbose promotion on initial
-  search or next/previous selection; renderer visibility never limits matching.
+  Simple/Verbose, committed full-text search, active occurrence, help, and
+  transient message state only for one call. It delegates matching to `_search`,
+  retaining prior committed search on an occurrence-limit failure. Next/previous
+  wraps through individual occurrences and requests viewport focus positioning;
+  manual record/page navigation disables automatic reveal. The effective
+  renderer offset is retained in immutable view state. The active occurrence's
+  hidden top-level path triggers Verbose promotion on initial search or
+  next/previous selection; renderer visibility never limits matching.
   In `keys` mode it additionally owns all
   navigation bindings, ordinary-line command grammar, and search/goto prompt
-  stages, text editing, validation, and cancellation. A blank search field
-  commits full-text search; semantic `search<TAB><TAB>QUERY`, line `// QUERY`,
-  and single-token `/ QUERY` reach the same action. Legacy `/ FIELD QUERY` and
-  semantic field searches remain accepted. Event payloads are bounded
-  independently of envelope prefixes at 8,192 characters; field/goto drafts
+  drafts, text editing, validation, and cancellation. Search opens one query
+  draft; semantic `search<TAB>QUERY`, line `/ QUERY`, and alias `// QUERY`
+  reach the same full-text action, preserving an entire multiword phrase.
+  Field-bearing semantic search events are rejected. Event payloads are bounded
+  independently of envelope prefixes at 8,192 characters; goto drafts
   are limited to 128 and query drafts to 1,024 code points. Raw controls cannot
   enter a draft. Logical cursor edits include arrows, Home/End, Backspace,
   Delete, Ctrl+A/E, prefix deletion with Ctrl+U, suffix deletion with Ctrl+K,
@@ -274,7 +281,7 @@ unit imports Story or any third-party runtime package.
   and preserves committed view state, including prior messages and search
   position. EOF closes; interrupt closes an active prompt's view and otherwise
   follows main-view cancel precedence. Help and malformed/empty snapshots
-  cannot begin prompts. Legacy semantic events remain accepted in both input
+  cannot begin prompts. Supported semantic events remain accepted in both input
   modes. It presents Loading before parsing, renders bounded snapshot/error
   states, and calls `host.close_view()` in `finally`. It performs no file,
   terminal-driver, network, persistence, replay, retry, or live-tail operation.

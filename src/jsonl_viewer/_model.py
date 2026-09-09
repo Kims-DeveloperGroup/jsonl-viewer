@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from enum import Enum
 from typing import TypeAlias
@@ -40,38 +40,48 @@ class ViewMode(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Occurrence:
+    record_index: int
+    path: JSONPath
+    kind: str
+    start: int
+    end: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
 class SearchState:
-    field: str
     query: str
-    matches: tuple[int, ...]
+    occurrences: tuple[Occurrence, ...]
     current_index: int | None
-    match_paths: tuple[MatchPaths, ...] = ()
+
+    @property
+    def current_occurrence(self) -> Occurrence | None:
+        return None if self.current_index is None else self.occurrences[self.current_index]
 
     @property
     def current_record_index(self) -> int | None:
         if self.current_index is None:
             return None
-        return self.matches[self.current_index]
+        return self.occurrences[self.current_index].record_index
 
     def paths_for_record(self, record_index: int) -> MatchPaths:
-        """Return paths aligned with sorted, deduplicated source-record matches."""
+        start = bisect_left(self.occurrences, record_index, key=lambda hit: hit.record_index)
+        end = bisect_right(self.occurrences, record_index, key=lambda hit: hit.record_index)
+        return tuple(hit.path for hit in self.occurrences[start:end])
 
-        position = bisect_left(self.matches, record_index)
-        if position == len(self.matches) or self.matches[position] != record_index:
-            return ()
-        if self.match_paths:
-            return self.match_paths[position]
-        return ((self.field,),) if self.field else ((),)
+    def has_record(self, record_index: int) -> bool:
+        position = bisect_left(self.occurrences, record_index, key=lambda hit: hit.record_index)
+        return position < len(self.occurrences) and self.occurrences[position].record_index == record_index
 
 
 @dataclass(frozen=True, slots=True)
 class PromptState:
-    """An uncommitted search-field, search-query, or goto edit."""
+    """An uncommitted search-query or goto edit."""
 
     kind: str
     buffer: str = ""
     cursor: int = 0
-    field: str = ""
     error: str | None = None
 
 
@@ -85,6 +95,7 @@ class ViewState:
     message: str | None = None
     message_is_error: bool = False
     prompt: PromptState | None = None
+    reveal_match: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,3 +103,4 @@ class RenderResult:
     text: str
     body_rows: int
     selected_line_count: int
+    record_line_offset: int = 0
