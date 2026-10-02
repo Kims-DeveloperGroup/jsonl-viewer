@@ -241,6 +241,18 @@ def _focused_token(
     def safe(piece: str) -> str:
         return _safe_json_token(piece)[1:-1] if quoted else _neutralize_text(piece)
 
+    focused = text[focus_start:focus_end]
+    leading_marks = 0
+    while leading_marks < len(focused) and _character_cells(focused[leading_marks]) == 0:
+        leading_marks += 1
+    # A match beginning with an unattached mark has no readable cursor cell.
+    # Escape only that leading run; keep ordinary base/mark clusters intact and
+    # leave source offsets, occurrence counts, and the immutable text unchanged.
+    focused_display = (
+        json.dumps(focused[:leading_marks], ensure_ascii=True)[1:-1]
+        + safe(focused[leading_marks:])
+    )
+
     result: list[_Segment] = []
     if quoted:
         result.append(_Segment('"', role))
@@ -248,7 +260,7 @@ def _focused_token(
         result.append(_Segment("…", "muted"))
     result.extend((
         _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current"),
-        _Segment(safe(text[focus_start:focus_end]), "match_current"),
+        _Segment(focused_display, "match_current"),
         _Segment("⟧", "current"), _Segment(safe(text[focus_end:end]), role),
     ))
     if end < len(text):

@@ -362,6 +362,45 @@ class CursorSearchAndInputTests(unittest.TestCase):
         self.assertTrue(cell.search_focus)
         self.assertEqual(view.state.folds, frozenset())
 
+    def test_leading_combining_search_hits_keep_readable_focus_and_original_occurrences(self):
+        mark = "\u0301"
+        value = {"content": {mark: mark + "base"}}
+        source = _source(value)
+        digest = hashlib.sha256(source).digest()
+        for color in (False, True):
+            view = _View(source, color=color)
+            for event, ordinal, count, kind, escaped in (
+                ("search\t" + mark, 1, 2, "key", r"\u0301"),
+                ("next_match", 2, 2, "value", r"\u0301"),
+                ("previous_match", 1, 2, "key", r"\u0301"),
+                ("search\t" + mark + "base", 1, 1, "value", r"\u0301base"),
+            ):
+                with self.subTest(color=color, event=event):
+                    result = view.step(event)
+                    plain = strip_ansi(result.text)
+                    self.assertIn("⟦" + escaped + "⟧", plain)
+                    self.assertNotIn("⟦" + mark, plain)
+                    self.assertIn(f"{ordinal}/{count} occurrences", plain)
+                    search = view.state.search
+                    self.assertEqual(len(search.occurrences), count)
+                    hit = search.current_occurrence
+                    self.assertEqual((hit.path, hit.kind, hit.start, hit.end),
+                                     (("content", mark), kind, 0, len(search.query)))
+                    self.assertEqual(hit.text, mark if kind == "key" else mark + "base")
+                    focused = next(cell for cell in result.characters
+                                   if cell.position == result.cursor)
+                    self.assertTrue(focused.search_focus)
+                    self.assertEqual(focused.text, "\\")
+                    self.assertEqual(_text_cells(focused.text), 1)
+                    if color:
+                        self.assertEqual(styled_text(result.text, "7"), "\\")
+                        self.assertIn(escaped, styled_text(result.text, "43"))
+                    else:
+                        self.assertEqual(plain.splitlines()[focused.screen_row + 1],
+                                         " " * focused.position.column + "^")
+                    self.assertEqual(view.snapshot.records[0].value, value)
+                    self.assertEqual(hashlib.sha256(source).digest(), digest)
+
     def test_main_keys_and_line_commands_match_semantic_events(self):
         source = _source({"content": [1, 2]}, {"content": [3, 4]})
         pairs = (("text\tj", "cursor_down"), ("text\tk", "cursor_up"),
