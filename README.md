@@ -3,7 +3,7 @@
 `jsonl-viewer` is a read-only, transient, structured JSONL viewer for Python
 terminals. It parses one bounded immutable byte snapshot, renders colored
 multiline JSON with source-record line gutters, and discards navigation,
-search, help, and mode state when the view closes.
+cursor, fold, search, help, and mode state when the view closes.
 
 The package is Python 3.11+, MIT licensed, and has no runtime dependencies. It
 has no knowledge of Story, agent runtimes, storage layouts, provider schemas,
@@ -24,7 +24,7 @@ or terminal-driver implementations.
 - literal, case-insensitive full-text search, including decoded nested JSON,
   with `n`/`N` moving between individual keyword occurrences, visible keyword
   focus, current/total counts, and hidden-hit Verbose promotion;
-- deterministic semantic ANSI or exactly equivalent plain output;
+- character navigation and structural folding with readable ANSI focus or a plain caret;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
@@ -37,8 +37,8 @@ or arbitrary search-expression language.
 
 ## Preview
 
-This excerpt shows the plain semantic view. ANSI-capable terminals add color
-without changing the text, markers, or layout:
+This excerpt shows the plain view. ANSI uses inverse-video character focus;
+plain output inserts an aligned caret row below the focused JSON row:
 
 ```text
 JSONL VIEWER • READ ONLY • SIMPLE
@@ -46,6 +46,7 @@ Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnosti
 @ 1 │ {
 @ 1 │   "timestamp": "2026-08-29T09:00:00Z",
 @ 1 │   "⟦r⟧equest_type": "request",
+          ^
 @ 1 │   "content": "Find the mismatch."
 @ 1 │ }
 
@@ -55,7 +56,7 @@ Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnosti
 * 2 │   "content": "The field is missing."
 * 2 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
+h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
 ```
 
 An encoded provider response is expanded as a derived, read-only display. The
@@ -79,9 +80,9 @@ Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
 ```
 
 The [design system](docs/design-system.md) defines every visual role and user
-state. Nine [deterministic full-frame samples](docs/samples/README.md) cover
+state. Eleven [deterministic full-frame samples](docs/samples/README.md) cover
 Simple, Verbose, search, nested expansion, leaf truncation, malformed input,
-tiny terminals, and plain / `NO_COLOR` output.
+cursor folding, search through folds, tiny terminals, and plain / `NO_COLOR` output.
 
 ## Install and run
 
@@ -95,13 +96,15 @@ jsonl-viewer exchanges.jsonl \
   --agent agent-01
 ```
 
-`NO_COLOR` or `--no-color` disables ANSI color without changing any semantic
-text or marker. A non-TTY uses an ordinary-line command fallback. Use `-` as
+`NO_COLOR` or `--no-color` disables ANSI styling and uses an aligned caret row
+under the focused JSON character, leaving one fewer data row when space allows.
+A non-TTY uses an ordinary-line command fallback. Use `-` as
 the path to snapshot standard input; because that consumes stdin, the view is
 then rendered once and closes on EOF.
 
-Standalone keys are `↑`/`↓` or `j`/`k`, Page Up/Page Down or `b`/Space, `g`,
-`/`, `n`, `N`, `m`, `h`/`?`, `c` to clear search, Escape, and `q`. In
+Standalone keys are `h/j/k/l` for the character cursor, Up/Down for records,
+Page Up/Page Down or `b`/Space for paging, Enter to fold, `g`, `/`, `n`, `N`,
+`m`, `?` for help, `c` to clear search, Escape, and `q`. In
 ordinary-line mode, use `g LINE` to navigate and the
 [search commands below](#search-in-ordinary-line-mode) to search.
 
@@ -206,6 +209,35 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
+### Migrating to 0.4.0
+
+Main-view `h` now moves left, and `j`/`k` move down/up within visible JSON.
+Use `?` for help and the Up/Down arrows to select records. `l` moves right;
+Enter folds the innermost nonempty object or array containing the cursor.
+Ordinary-line input accepts `h`, `j`, `k`, `l`, `fold`, and `?`/`help`.
+Prompt editing retains its existing keys and treats these letters as text.
+Semantic hosts can send `cursor_left`, `cursor_right`, `cursor_up`,
+`cursor_down`, and `toggle_fold`; existing `up`, `down`, and `help` events
+retain their meanings. The three public exports and five host methods remain
+unchanged.
+
+The cursor starts at the first JSON character of the top visible data row.
+Successful record, page, go-to-line, and mode changes reset it there. Vertical
+movement preserves its preferred display column and resizing clamps it to
+visible content. Gutters and display annotations are skipped. ANSI output uses
+a readable inverse-video cell and bolds visible matching container delimiters;
+plain/NO_COLOR output reserves a caret row underneath the focused row.
+The layouts therefore intentionally differ by that row.
+
+Folded objects and arrays appear as `{…}` and `[…]`, preserving their keys,
+commas, and encoded-JSON expansion cues. Fold state belongs to a record and
+structural path for this viewer session; reopening a parent restores nested
+folds. Enter leaves the cursor on the toggled opening delimiter. Empty
+containers and scalar roots do nothing. Braces inside strings are text.
+Search and `n`/`N` unfold the selected hit's ancestors and focus its first
+character without changing occurrence counts. Manually folding an active hit
+stays effective until the next search navigation.
+
 ### Migrating to 0.3.0
 
 Version 0.3.0 deliberately removes field-scoped search. Remove
@@ -263,6 +295,7 @@ vocabulary is:
 ```text
 up | down | page_up | page_down | next_match | previous_match
 toggle_mode | help | cancel | clear_search | close
+cursor_left | cursor_right | cursor_up | cursor_down | toggle_fold
 goto<TAB>POSITIVE_SOURCE_LINE
 search<TAB>NONEMPTY_QUERY
 ```

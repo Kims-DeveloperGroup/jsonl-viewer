@@ -6,6 +6,8 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `verbose.txt`
 - `search-matches.txt` — one focused keyword occurrence, other matching record
   markers, and an occurrence count that includes keys and values
+- `cursor-folding.txt` — focused opening delimiter and a folded record object
+- `folded-search.txt` — manual folding hides the active hit while retaining its occurrence count
 - `nested-expanded-json.txt` — recursively expanded provider content and
   response text with visible derived-display cues
 - `truncated-content.txt`
@@ -18,8 +20,9 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 `tests/test_documented_samples.py` reconstructs every frame through the public
 API and compares it byte for byte. ANSI is code-native rather than stored as
 opaque terminal bytes: the renderer's SGR role table is documented in the
-[design system](../design-system.md), and tests require stripping those SGR
-sequences to produce the exact corresponding plain frame.
+[design system](../design-system.md), and tests verify the same JSON and focus semantics in both modes. Plain
+frames reserve a caret row; ANSI frames use inverse video on the character
+itself, so their visible data-row counts intentionally differ.
 
 The sample files are intentionally not screenshots. They remain searchable,
 reviewable, accessible without color, and byte-synchronized with the behavior

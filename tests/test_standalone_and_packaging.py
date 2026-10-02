@@ -27,7 +27,7 @@ from jsonl_viewer._standalone import _TerminalHost, _read_bounded
 
 ROOT = Path(__file__).resolve().parents[1]
 _PRESENT = b"\x1b[H\x1b[2J"
-_HELP = "h help • q close".encode()
+_HELP = "? help • q close".encode()
 
 
 class _TerminalBuffer(io.StringIO):
@@ -480,7 +480,7 @@ class StandaloneTests(unittest.TestCase):
                 self.assertNotIn(b"\x1b[?25h", prompt_segment)
                 self.assertNotIn(b"\x1b[?25l", prompt_segment)
 
-                self._pty_write(master, b"j")
+                self._pty_write(master, b"\x1b[B")
                 moved, moved_end = self._pty_frame_containing(
                     master,
                     output,
@@ -892,7 +892,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.3.0")
+        self.assertEqual(project["version"], "0.4.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")

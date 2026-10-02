@@ -3,6 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import re
+
+
+def without_caret(frame: str) -> str:
+    """Remove only the extra plain-mode character-cursor row."""
+    return "\n".join(line for line in frame.splitlines() if line.strip() != "^")
+
+
+def styled_text(frame: str, code: str) -> str:
+    """Collect readable text carrying one SGR attribute, across cell boundaries."""
+    return "".join(text for style, text in re.findall(
+        r"\x1b\[([0-9;]*)m([^\x1b]*)\x1b\[0m", frame
+    ) if code in style.split(";"))
 
 
 class FakeHost:

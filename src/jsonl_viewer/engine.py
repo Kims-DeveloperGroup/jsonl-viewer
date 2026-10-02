@@ -6,7 +6,7 @@ import unicodedata
 from dataclasses import replace
 
 from ._input import InputFailure, parse_jsonl
-from ._model import PromptState, SearchState, Snapshot, ViewMode, ViewState
+from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState
 from ._render import render_frame, render_loading
 from ._search import SearchLimitError, find_matches
 from .contracts import ViewerHost, ViewerSpec
@@ -39,10 +39,10 @@ def _line_action(value: str) -> str:
 
     command = value.strip()
     mapping = {
-        "q": "close", "quit": "close", "j": "down", "down": "down",
-        "k": "up", "up": "up", "pgdn": "page_down", "pgup": "page_up",
+        "q": "close", "quit": "close", "j": "cursor_down", "down": "down",
+        "k": "cursor_up", "up": "up", "pgdn": "page_down", "pgup": "page_up",
         "n": "next_match", "N": "previous_match", "m": "toggle_mode",
-        "h": "help", "?": "help", "esc": "cancel",
+        "h": "cursor_left", "l": "cursor_right", "?": "help", "help": "help", "fold": "toggle_fold", "esc": "cancel",
         "c": "clear_search", "clear": "clear_search",
     }
     if command in mapping:
@@ -157,21 +157,42 @@ def _transition(
     page_size: int,
     selected_line_count: int,
     malformed: bool = False,
+    rendered: RenderResult | None = None,
 ) -> tuple[ViewState, bool]:
     """Validate transport before applying context-sensitive viewer behavior."""
 
+    rendered_state = state
+
+    def projection_key(current: ViewState) -> tuple:
+        return (current.selected_index, current.record_line_offset, current.mode,
+                current.search, current.folds, current.help_visible, current.focus_container)
+
     def action(current: ViewState, value: str | None) -> tuple[ViewState, bool]:
+        nonlocal rendered, rendered_state
+        if (rendered is not None and value in {
+                "cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold",
+                "page_up", "page_down",
+            } and projection_key(current) != projection_key(rendered_state)):
+            # A text envelope may combine mode/fold/navigation and movement.
+            # Refresh its structural positions before consuming another cursor key.
+            rendered = render_frame(spec, current, snapshot=snapshot, diagnostic=None,
+                                    columns=rendered.columns, rows=rendered.rows, color=rendered.color)
+            current = replace(current, cursor=rendered.cursor if rendered.characters else current.cursor,
+                              record_line_offset=rendered.record_line_offset, focus_container=None)
+            rendered_state = current
         return _semantic_transition(
-            current, value, snapshot, spec, page_size=page_size,
-            selected_line_count=selected_line_count, malformed=malformed,
+            current, value, snapshot, spec,
+            page_size=rendered.body_rows if rendered is not None else page_size,
+            selected_line_count=rendered.selected_line_count if rendered is not None else selected_line_count,
+            malformed=malformed, rendered=rendered,
         )
 
     if event is None:
         return action(state, None)
     if type(event) is not str:
-        return _input_error(state, "Unsupported host event; press h for help."), False
+        return _input_error(state, "Unsupported host event; press ? for help."), False
     if len(event) > _MAX_EVENT_CHARACTERS + len("text\t"):
-        return _input_error(state, "Unsupported host event; press h for help."), False
+        return _input_error(state, "Unsupported host event; press ? for help."), False
     kind, separator, payload = event.partition("\t")
     if spec.input_protocol == "keys" and separator and kind in {"text", "key", "line"}:
         if len(payload) > _MAX_EVENT_CHARACTERS:
@@ -187,9 +208,9 @@ def _transition(
             if state.prompt is not None:
                 return _insert_prompt(state, payload), False
             bindings = {
-                "q": "close", "j": "down", "k": "up", " ": "page_down",
+                "q": "close", "j": "cursor_down", "k": "cursor_up", " ": "page_down",
                 "b": "page_up", "n": "next_match", "N": "previous_match",
-                "m": "toggle_mode", "h": "help", "?": "help",
+                "m": "toggle_mode", "h": "cursor_left", "l": "cursor_right", "?": "help",
                 "c": "clear_search", "/": "begin_search", "g": "begin_goto",
             }
             for index, character in enumerate(payload):
@@ -220,16 +241,59 @@ def _transition(
             "up": "up", "down": "down", "page_up": "page_up",
             "page_down": "page_down", "escape": "cancel",
             "unknown_escape": "unknown",
+            "enter": "toggle_fold",
         }
         if payload in bindings:
             return action(state, bindings[payload])
         return state, False
     if len(event) > _MAX_EVENT_CHARACTERS:
-        return _input_error(state, "Unsupported host event; press h for help."), False
+        return _input_error(state, "Unsupported host event; press ? for help."), False
     # Old hosts keep their closed semantic vocabulary in either protocol mode.
     if event in {"begin_search", "begin_goto"}:
         event = "unknown"
     return action(state, event)
+
+
+def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | None) -> ViewState:
+    if rendered is None or not rendered.characters:
+        return state
+    characters = rendered.characters
+    cursor = state.cursor or rendered.cursor
+    current = next((cell for cell in characters if cell.position == cursor), characters[0])
+    if event == "toggle_fold":
+        container = next((item for item in rendered.containers
+                          if item.identity == current.container), None)
+        if container is None or not container.nonempty:
+            return state
+        folds = state.folds.symmetric_difference((container.identity,))
+        return replace(state, folds=folds, cursor=None, preferred_column=None,
+                       focus_container=container.identity, reveal_match=False,
+                       message=None, message_is_error=False)
+    rows = sorted({cell.screen_row for cell in characters})
+    preferred = current.position.column if state.preferred_column is None else state.preferred_column
+    if event in {"cursor_left", "cursor_right"}:
+        row = [cell for cell in characters if cell.screen_row == current.screen_row]
+        index = row.index(current)
+        index = max(0, min(len(row) - 1, index + (-1 if event == "cursor_left" else 1)))
+        destination = row[index]
+        preferred = destination.position.column
+    else:
+        index = rows.index(current.screen_row)
+        index = max(0, min(len(rows) - 1, index + (-1 if event == "cursor_up" else 1)))
+        row = [cell for cell in characters if cell.screen_row == rows[index]]
+        destination = min(row, key=lambda cell: (abs(cell.position.column - preferred), cell.position.column))
+    return replace(state, cursor=destination.position, preferred_column=preferred,
+                   focus_container=None, reveal_match=False, message=None, message_is_error=False)
+
+
+def _unfold_match(state: ViewState, search: SearchState) -> frozenset[FoldIdentity]:
+    hit = search.current_occurrence
+    if hit is None:
+        return state.folds
+    return frozenset(fold for fold in state.folds
+                     if fold.record_index != hit.record_index
+                     or hit.path[:len(fold.path)] != fold.path
+                     or (hit.kind == "key" and hit.path == fold.path))
 
 
 def _semantic_transition(
@@ -241,6 +305,7 @@ def _semantic_transition(
     page_size: int,
     selected_line_count: int,
     malformed: bool = False,
+    rendered: RenderResult | None = None,
 ) -> tuple[ViewState, bool]:
     if event is None or event == "close":
         return state, True
@@ -277,6 +342,8 @@ def _semantic_transition(
         kind = "search_query" if event == "begin_search" else "goto"
         return replace(state, prompt=PromptState(kind)), False
 
+    if event in {"cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold"}:
+        return _cursor_transition(state, event, rendered), False
     if event in {"up", "down"}:
         state = replace(state, reveal_match=False)
         direction = -1 if event == "up" else 1
@@ -284,10 +351,13 @@ def _semantic_transition(
             len(snapshot.records) - 1,
             max(0, state.selected_index + direction),
         )
+        if selected == state.selected_index:
+            return _clear_message(state), False
         return replace(
             state,
             selected_index=selected,
             record_line_offset=0,
+            cursor=None, preferred_column=None, focus_container=None,
             message=None,
         ), False
 
@@ -297,12 +367,13 @@ def _semantic_transition(
         if event == "page_up":
             if state.record_line_offset > 0:
                 offset = max(0, state.record_line_offset - step)
-                return replace(state, record_line_offset=offset, message=None), False
+                return replace(state, record_line_offset=offset, cursor=None, preferred_column=None, focus_container=None, message=None), False
             if state.selected_index > 0:
                 return replace(
                     state,
                     selected_index=state.selected_index - 1,
                     record_line_offset=0,
+                    cursor=None, preferred_column=None, focus_container=None,
                     message=None,
                 ), False
             return _clear_message(state), False
@@ -310,6 +381,7 @@ def _semantic_transition(
             return replace(
                 state,
                 record_line_offset=state.record_line_offset + step,
+                cursor=None, preferred_column=None, focus_container=None,
                 message=None,
             ), False
         if state.selected_index + 1 < len(snapshot.records):
@@ -317,6 +389,7 @@ def _semantic_transition(
                 state,
                 selected_index=state.selected_index + 1,
                 record_line_offset=0,
+                cursor=None, preferred_column=None, focus_container=None,
                 message=None,
             ), False
         return _clear_message(state), False
@@ -339,7 +412,8 @@ def _semantic_transition(
             state,
             mode=mode,
             record_line_offset=0,
-            reveal_match=state.search is not None,
+            cursor=None, preferred_column=None, focus_container=None,
+            reveal_match=False,
             message=f"Switched to {mode.value} mode.",
         ), False
 
@@ -359,9 +433,10 @@ def _semantic_transition(
             state,
             selected_index=selected,
             record_line_offset=0,
+            cursor=None, preferred_column=None, focus_container=None,
             mode=ViewMode.VERBOSE if promote else state.mode,
             search=search,
-            reveal_match=True,
+            reveal_match=True, folds=_unfold_match(state, search),
             message=(
                 "Hidden-field match selected; switched to Verbose mode." if promote else None
             ),
@@ -386,6 +461,7 @@ def _semantic_transition(
                     state,
                     selected_index=index,
                     record_line_offset=0,
+                    cursor=None, preferred_column=None, focus_container=None,
                     reveal_match=False,
                     message=f"Moved to source line {source_line}.",
                 ), False
@@ -432,14 +508,15 @@ def _semantic_transition(
             state,
             selected_index=selected,
             record_line_offset=0,
+            cursor=None, preferred_column=None, focus_container=None,
             mode=mode,
             search=search,
-            reveal_match=True,
+            reveal_match=True, folds=_unfold_match(state, search),
             message=message,
             message_is_error=False,
         ), False
 
-    return _message(state, "Unknown event; press h for help.", error=True), False
+    return _message(state, "Unknown event; press ? for help.", error=True), False
 
 
 def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
@@ -486,7 +563,9 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 color=bool(host.color_enabled()),
             )
             host.present(rendered.text)
-            state = replace(state, record_line_offset=rendered.record_line_offset)
+            state = replace(state, record_line_offset=rendered.record_line_offset,
+                            cursor=rendered.cursor if rendered.characters else state.cursor,
+                            focus_container=None)
             event = host.read_event()
             state, closed = _transition(
                 state,
@@ -495,7 +574,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 spec,
                 page_size=rendered.body_rows,
                 selected_line_count=rendered.selected_line_count,
-                malformed=diagnostic is not None,
+                malformed=diagnostic is not None, rendered=rendered,
             )
     finally:
         host.close_view()

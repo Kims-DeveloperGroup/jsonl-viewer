@@ -86,6 +86,38 @@ class PromptState:
 
 
 @dataclass(frozen=True, slots=True)
+class FoldIdentity:
+    """A container in one immutable source record, including decoded children."""
+
+    record_index: int
+    path: JSONPath
+
+
+@dataclass(frozen=True, slots=True)
+class CursorPosition:
+    record_index: int
+    line_index: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class VisibleCharacter:
+    position: CursorPosition
+    screen_row: int
+    text: str
+    container: FoldIdentity | None = None
+    delimiter: str | None = None
+    search_focus: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ContainerMetadata:
+    identity: FoldIdentity
+    nonempty: bool
+    folded: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ViewState:
     selected_index: int = 0
     record_line_offset: int = 0
@@ -96,6 +128,10 @@ class ViewState:
     message_is_error: bool = False
     prompt: PromptState | None = None
     reveal_match: bool = False
+    cursor: CursorPosition | None = None
+    preferred_column: int | None = None
+    folds: frozenset[FoldIdentity] = frozenset()
+    focus_container: FoldIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,3 +140,9 @@ class RenderResult:
     body_rows: int
     selected_line_count: int
     record_line_offset: int = 0
+    cursor: CursorPosition | None = None
+    characters: tuple[VisibleCharacter, ...] = ()
+    containers: tuple[ContainerMetadata, ...] = ()
+    columns: int = 80
+    rows: int = 24
+    color: bool = False

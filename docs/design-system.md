@@ -13,6 +13,8 @@ renderer, not illustrative mockups:
 - [Simple](samples/simple.txt)
 - [Verbose](samples/verbose.txt)
 - [current and non-current search matches](samples/search-matches.txt)
+- [cursor and root folding](samples/cursor-folding.txt)
+- [manual folding of an active search hit](samples/folded-search.txt)
 - [recursively expanded provider JSON](samples/nested-expanded-json.txt)
 - [truncated content](samples/truncated-content.txt)
 - [truncated nested string leaves](samples/truncated-nested-leaves.txt)
@@ -20,9 +22,10 @@ renderer, not illustrative mockups:
 - [tiny terminal](samples/tiny-terminal.txt)
 - [plain / `NO_COLOR`](samples/plain-no-color.txt)
 
-ANSI uses the same characters and geometry. Tests strip only SGR sequences and
-require exact equality with the plain frame. The samples are compared byte for
-byte with deterministic renderer cases in `tests/test_documented_samples.py`.
+ANSI uses an inverse-video character cursor; plain output inserts an aligned
+caret row below the focused data row. Tests account for this intentional
+geometry difference and check the JSON content and focus in both modes.
+The samples are compared byte for byte with deterministic renderer cases in `tests/test_documented_samples.py`.
 
 A search view looks like this in plain mode (the linked fixture is the exact
 full frame):
@@ -32,6 +35,7 @@ JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 @ 1 │ {
 @ 1 │   "⟦r⟧equest_type": "request",
+          ^
 @ 1 │   "content": "Find the mismatch."
 @ 1 │ }
 
@@ -40,7 +44,7 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 * 2 │   "content": "The field is missing."
 * 2 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
+h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
 ```
 
 That fixture uses the default `Conversation` label and no subject. Supplying
@@ -81,7 +85,7 @@ Every normal frame has three areas:
    same source line number repeats on continuation rows so paging cannot detach
    content from its source identity.
 3. **Footer:** transient status/search position followed by persistent command
-   help. The normal footer retains at least `h help • q close` in the tiny
+   help. The normal footer retains at least `? help • q close` in the tiny
    tier. An active input draft replaces these two rows with its editor and
    submit/cancel/edit hint or validation error.
 
@@ -129,11 +133,14 @@ host.
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
 | footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, persistent footer help, and draft editing hint |
+| character cursor | aligned `^` on the following row | inverse video | focused visible JSON character; the character remains readable |
+| matching container | `{}` / `[]` | bold | visible opening and closing delimiters of the innermost containing container |
 | plain structure | JSON punctuation or help text | `0` reset/default | braces, brackets, commas, colons, whitespace, and Help command descriptions |
 
 Every colored role has words, JSON punctuation, a gutter marker, or both. Color
 is never the only distinction. `NO_COLOR`, `--no-color`, or a host returning
-`False` from `color_enabled()` removes SGR only; semantic text remains exact.
+`False` from `color_enabled()` removes SGR and adds the plain caret row.
+JSON text and search markers retain their meanings; viewport capacity changes.
 Expanded object keys use blue, genuine string leaves use green, numbers use
 magenta, booleans and `null` use yellow, and structural braces, brackets,
 commas, and colons remain the terminal default. Expansion and truncation cues
@@ -153,19 +160,27 @@ host-supplied geometry cannot cause unbounded rendering.
 | --- | --- | --- | --- |
 | wide | 100–240 | one line with session, `LABEL: FULL_ID — subject`, and agent | full help, maximum JSON width |
 | compact | 48–99 | mode line plus the same identifier projection | full help clipped by cells |
-| narrow/tiny | 12–47 | `READ ONLY • MODE`; the second line starts `S:`, then the complete scope projection, then `A:`, with left-to-right cell clipping | reduced `h help • q close`; JSON remains guttered |
+| narrow/tiny | 12–47 | `READ ONLY • MODE`; the second line starts `S:`, then the complete scope projection, then `A:`, with left-to-right cell clipping | reduced `? help • q close`; JSON remains guttered |
 
 Height uses these exact allocations:
 
 | Requested rows | Effective rows | Allocation |
 | --- | --- | --- |
-| 0–4 | 4 | header, then zero or one body row depending on header tier, then both footer rows |
-| 5–99 | requested value | header, `rows - header rows - 2` body rows, then both footer rows |
+| 0–4 | 4 | normal data view: one header, one data row, then caret/status in plain or both footers in ANSI |
+| 5–99 | requested value | responsive header, body with one caret row reserved in plain, then footer rows as space allows |
 | 100+ | 100 | the same allocation at the renderer's maximum height |
 
-The two footer rows are protected; body rows shrink to zero before the normal
-help/close cues or active draft rows disappear. Loading uses the same header
-followed by its loading line and `h help • q close`, clipped only by the
+A normal plain frame reserves a caret row immediately below the focused data
+row. At the minimum four-row height, it uses one header, one data row, the
+caret, and one footer; the usual bottom help row is omitted. ANSI needs no
+extra focus row and can retain both footer rows. Help, loading, empty, and
+error views have no JSON character cursor.
+
+At larger heights the two footer rows are retained. An active prompt always
+retains both editor and validation/editing-hint rows; if the remaining height
+cannot fit JSON plus its plain caret, the body is omitted until the prompt
+closes. The committed character cursor is preserved. Loading uses the same header
+followed by its loading line and `? help • q close`, clipped only by the
 effective height. Page Down advances
 through the selected record's pretty rows and then crosses to the next source
 record; Page Up reverses that behavior. JSON and chrome use Unicode cell width:
@@ -191,7 +206,8 @@ clipped`; clipping never changes the snapshot.
   A printable `│` cursor appears in the first footer row; the second shows
   `Enter submit • Esc cancel • Ctrl+U/K/W edit` or a validation error.
   Below 32 columns labels shorten to `Query:` or `Line:`; long drafts
-  clip around the logical cursor. Plain and ANSI frames have identical text.
+  clip around the logical cursor. The editor text is identical in plain and
+  ANSI; the body follows the cursor geometry described above.
 - **Close:** once a valid `view_jsonl` call begins, it calls
   `host.close_view()` exactly once in `finally`, including after a host failure.
   It retains no frame, prompt draft, cursor, search, help, or navigation state.
@@ -214,9 +230,11 @@ cursor control is embedded in a prompt frame.
 
 ## Keyboard and focus behavior
 
-The package consumes host input without reading a terminal. `ViewerSpec.input_protocol` defaults to `"semantic"`. Version 0.3.0 retains
-the three public exports and five host methods but changes the constructor
-and search event; see the [migration guide](../README.md#migrating-to-030). Hosts selecting `"keys"` send `text<TAB>TEXT`,
+The package consumes host input without reading a terminal. `ViewerSpec.input_protocol` defaults to `"semantic"`. Version 0.4.0 retains the
+three public exports and five host methods, adds cursor/fold events, and
+changes the main-view h/j/k bindings; see the
+[migration guide](../README.md#migrating-to-040). Hosts selecting
+`"keys"` send `text<TAB>TEXT`,
 `key<TAB>NAME`, or `line<TAB>LITERAL_COMMAND`; each payload is bounded to
 8,192 characters independently of its envelope. Text accepts printable
 Unicode, and line input may also contain tab separators. The host decodes
@@ -224,8 +242,9 @@ physical controls and bounded Escape sequences and preserves literal command
 text. The engine owns bindings, actions, and line grammar. The exact key-name
 vocabulary is listed in the [embedding contract](../README.md#embed-without-transferring-terminal-ownership).
 
-The engine binds arrows or `j`/`k`, Page Up/Page Down or `b`/Space, `g`, `/`,
-`n`, `N`, `m`, `h`/`?`, `c`, Escape, and `q`. In a draft, all printable
+The engine binds `h/j/k/l` to character movement, Up/Down arrows to records,
+Page Up/Page Down or `b`/Space to paging, Enter to folding, and `g`, `/`,
+`n`, `N`, `m`, `?`, `c`, Escape, and `q`. In a draft, all printable
 characters, including navigation and close letters, insert literal text.
 Left/Right move by code point; Home/End or Ctrl-A/E move to the buffer ends;
 Backspace/Delete remove the preceding/following code point. Ctrl-U deletes
@@ -243,12 +262,15 @@ opening another editor lifecycle. The standalone adapter uses `"keys"` for
 both physical key input and ordinary lines.
 
 The ordinary-line grammar accepts `g LINE`, `/ QUERY`,
-`// QUERY`, `j`/`down`, `k`/`up`, `pgdn`, `pgup`, `n`, `N`, `m`,
-`h`/`?`, `c`/`clear`, `q`/`quit`, and `esc`. The entire trimmed text
+`// QUERY`, `h/j/k/l`, `fold`, `down`, `up`, `pgdn`, `pgup`, `n`, `N`, `m`,
+`?`/`help`, `c`/`clear`, `q`/`quit`, and `esc`. The entire trimmed text
 after the search prefix is the full-text query, including spaces. A separating
 space after `/` or `//` is required before a query in this mode. Textual
 `esc` applies semantic `cancel`. Semantic events are accepted in either protocol:
 
+- `cursor_left` / `cursor_right`: move through visible JSON characters.
+- `cursor_up` / `cursor_down`: move across visible data rows, retaining the preferred display column.
+- `toggle_fold`: toggle the innermost nonempty container containing the cursor.
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
 - `goto<TAB>LINE`: select an exact positive source-record line.
@@ -261,7 +283,7 @@ space after `/` or `//` is required before a query in this mode. Textual
   to dismiss it closes.
 - `close` or EOF: close immediately.
 
-The body has a printable keyword focus cursor, but no editable JSON or
+The body has a character cursor and printable keyword focus markers, but no editable JSON or
 selection clipboard,
 command execution, mouse link, or provider action. Search and goto accept only
 transient viewer drafts; they never edit JSON or the source snapshot. The host
@@ -269,6 +291,33 @@ owns application focus and restores the surrounding view from `close_view()`;
 the standalone adapter owns and restores its alternate-screen, hardware cursor
 visibility, and terminal mode. The printable draft cursor provides a non-color
 focus cue without transferring terminal ownership to the engine.
+
+## Character cursor and folding
+
+The cursor starts on the first JSON character of the top visible data row and
+resets there after successful record, page, goto, or mode changes. It moves
+only within visible JSON content, skips gutters, indentation, and annotations,
+and clamps at viewport boundaries and after resize. Horizontal moves set a
+new preferred display column; vertical moves retain it across shorter rows.
+Combining characters stay attached to their display cell, and wide characters
+occupy their full terminal width. Escaped controls remain visible safe text.
+
+Parsed container metadata determines which opening and closing delimiters are
+bold in ANSI. The innermost container containing the focused character wins;
+quoted punctuation is ordinary string content. Only visible delimiters receive
+emphasis, without scrolling to reveal a partner.
+
+Enter folds a nonempty object to `{…}` or array to `[…]`. Keys, commas, and
+encoded-JSON expansion cues remain present. The cursor moves to the opening
+delimiter after toggling. Folds are immutable transient identities scoped by
+record and structural path; reopening a parent preserves folds inside it.
+Empty containers and scalar roots ignore folding.
+
+Search and next/previous occurrence navigation unfold the selected hit's
+ancestors and put the cursor on its first visible matching character. Counts
+are computed from the immutable record independently of folds. Manually
+folding the active hit remains effective until later search navigation.
+Search emphasis and cursor focus can occupy the same cell.
 
 ## Search semantics and result projection
 
@@ -467,7 +516,7 @@ supplies generic inputs through the viewer's public contract:
    ID. The package does not interpret those generic values and shortens them
    only through content-safe responsive width clipping. Each supplied header
    string is limited to 512 characters.
-4. An integration using 0.3.0 selects `input_protocol="keys"` and validates
+4. An integration using 0.4.0 selects `input_protocol="keys"` and validates
    that capability before opening the terminal. Story's adapter passes the
    immutable bytes to `view_jsonl` and transports decoded physical text/keys
    or literal ordinary lines through `ViewerHost`. The engine owns all viewer

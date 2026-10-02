@@ -5,11 +5,15 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from ._json import Expansion, ExpansionBudget, SkippedExpansion, expand_json_string
 from ._model import (
+    ContainerMetadata,
+    CursorPosition,
+    FoldIdentity,
+    VisibleCharacter,
     InputDiagnostic,
     JSONPath,
     JSONValue,
@@ -54,6 +58,11 @@ _SGR = re.compile(r"\x1b\[[0-9;]*m")
 class _Segment:
     text: str
     role: str = "plain"
+    navigable: bool = False
+    container: JSONPath | None = None
+    delimiter: str | None = None
+    nonempty: bool = False
+    folded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +150,7 @@ def _clip_segments(
             break
         piece, used, clipped = _take_cells(segment.text, remaining)
         if piece:
-            result.append(_Segment(piece, segment.role))
+            result.append(replace(segment, text=piece))
         remaining -= used
         if clipped:
             break
@@ -213,34 +222,49 @@ def _string_segments(
     marker = f"[truncated {retained}/{complete} UTF-8 bytes] "
     return (
         _Segment(marker, "muted"),
-        _Segment(token[:-1] + '…"', "string"),
+        _Segment(token[:-1], "string"),
+        _Segment("…", "muted"), _Segment('"', "string"),
     )
 
 
 def _focused_token(
     text: str, hit: Occurrence, role: str, *, quoted: bool = True,
 ) -> tuple[_Segment, ...]:
-    """Render a bounded source-codepoint window, then escape its fragments.
-
-    Escaping after slicing keeps Unicode fold expansions, JSON escapes and
-    unsafe controls attached to the exact original character being focused.
-    """
-    start = max(0, hit.start - 32)
-    end = min(len(text), hit.end + 32)
+    """Escape bounded context and keep combining marks with their base cell."""
+    focus_start, focus_end = hit.start, hit.end
+    while focus_start > 0 and unicodedata.combining(text[focus_start]):
+        focus_start -= 1
+    while focus_end < len(text) and unicodedata.combining(text[focus_end]):
+        focus_end += 1
+    start, end = max(0, focus_start - 32), min(len(text), focus_end + 32)
 
     def safe(piece: str) -> str:
         return _safe_json_token(piece)[1:-1] if quoted else _neutralize_text(piece)
 
-    before = ('"' if quoted else "") + ("…" if start else "")
-    before += safe(text[start:hit.start])
-    after = safe(text[hit.end:end]) + ("…" if end < len(text) else "")
-    after += '"' if quoted else ""
-    return (
-        _Segment(before, role),
-        _Segment("⟦", "current"),
-        _Segment(safe(text[hit.start:hit.end]), "match_current"),
-        _Segment("⟧", "current"),
-        _Segment(after, role),
+    result: list[_Segment] = []
+    if quoted:
+        result.append(_Segment('"', role))
+    if start:
+        result.append(_Segment("…", "muted"))
+    result.extend((
+        _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current"),
+        _Segment(safe(text[focus_start:focus_end]), "match_current"),
+        _Segment("⟧", "current"), _Segment(safe(text[focus_end:end]), role),
+    ))
+    if end < len(text):
+        result.append(_Segment("…", "muted"))
+    if quoted:
+        result.append(_Segment('"', role))
+    return tuple(result)
+
+
+def _data_segments(
+    segments: tuple[_Segment, ...], container: JSONPath | None,
+) -> tuple[_Segment, ...]:
+    return tuple(
+        replace(segment, navigable=True, container=container)
+        if segment.role not in {"current", "warning", "muted"} else segment
+        for segment in segments
     )
 
 
@@ -256,122 +280,80 @@ def _format_value(
     budget: ExpansionBudget,
     facts: _ProjectionFacts,
     active: Occurrence | None = None,
+    folds: frozenset[JSONPath] = frozenset(),
+    parent: JSONPath | None = None,
 ) -> list[_DisplayLine]:
     leading = (_Segment(" " * indent),) + prefix
-    if isinstance(value, dict):
+    if isinstance(value, (dict, list)):
+        opening, closing = ("{", "}") if isinstance(value, dict) else ("[", "]")
+        folded = bool(value) and path in folds
+        opener = _Segment(opening, navigable=True, container=path,
+                          delimiter="open", nonempty=bool(value), folded=folded)
+        closer = replace(opener, text=closing, delimiter="close")
         if not value:
-            return [_DisplayLine(leading + (_Segment("{}"),), path)]
-        lines = [_DisplayLine(leading + (_Segment("{"),), path)]
-        items = tuple(value.items())
+            return [_DisplayLine(leading + (opener, closer), path)]
+        lines = [_DisplayLine(leading + (opener,), path)]
+        items = tuple(value.items()) if isinstance(value, dict) else tuple(enumerate(value))
         for index, (key, child) in enumerate(items):
             child_path = path + (key,)
-            key_token = (
-                _focused_token(key, active, "key")
-                if active is not None and active.path == child_path
-                and active.kind == "key" and active.text == key
-                else (_Segment(_safe_json_token(key), "key"),)
-            )
-            child_prefix = key_token + (_Segment(": "),)
+            child_prefix: tuple[_Segment, ...] = ()
+            if isinstance(value, dict):
+                key_token = (
+                    _focused_token(key, active, "key")
+                    if active is not None and active.path == child_path
+                    and active.kind == "key" and active.text == key
+                    else (_Segment(_safe_json_token(key), "key"),)
+                )
+                child_prefix = _data_segments(key_token + (_Segment(": "),), path)
             child_lines = _format_value(
-                child,
-                indent=indent + 2,
-                display_depth=display_depth + 1,
-                path=path + (key,),
-                prefix=child_prefix,
-                string_limit=string_limit,
-                content_field=content_field,
-                budget=budget,
-                facts=facts,
-                active=active,
+                child, indent=indent + 2, display_depth=display_depth + 1,
+                path=child_path, prefix=child_prefix, string_limit=string_limit,
+                content_field=content_field, budget=budget, facts=facts,
+                active=active, folds=folds, parent=path,
             )
             if index + 1 < len(items):
                 last = child_lines[-1]
                 child_lines[-1] = _DisplayLine(
-                    last.segments + (_Segment(","),),
+                    last.segments + (_Segment(",", navigable=True, container=path),),
                     last.path,
                 )
             lines.extend(child_lines)
-        lines.append(_DisplayLine((_Segment(" " * indent + "}"),), path))
-        return lines
-    if isinstance(value, list):
-        if not value:
-            return [_DisplayLine(leading + (_Segment("[]"),), path)]
-        lines = [_DisplayLine(leading + (_Segment("["),), path)]
-        for index, child in enumerate(value):
-            child_lines = _format_value(
-                child,
-                indent=indent + 2,
-                display_depth=display_depth + 1,
-                path=path + (index,),
-                string_limit=string_limit,
-                content_field=content_field,
-                budget=budget,
-                facts=facts,
-                active=active,
-            )
-            if index + 1 < len(value):
-                last = child_lines[-1]
-                child_lines[-1] = _DisplayLine(
-                    last.segments + (_Segment(","),),
-                    last.path,
-                )
-            lines.extend(child_lines)
-        lines.append(_DisplayLine((_Segment(" " * indent + "]"),), path))
+        lines.append(_DisplayLine((_Segment(" " * indent), closer), path))
+        # Traverse first even when folded: folding must not change expansion
+        # budgets, projection facts, or acceptance of later encoded strings.
+        if folded:
+            return [_DisplayLine(leading + (opener, _Segment("…", "muted"), closer), path)]
         return lines
     if isinstance(value, str):
-        expansion = expand_json_string(
-            value,
-            display_depth=display_depth,
-            budget=budget,
-        )
+        expansion = expand_json_string(value, display_depth=display_depth, budget=budget)
         if isinstance(expansion, Expansion):
             facts.expanded_strings += 1
-            cue = _Segment(
-                f"[expanded JSON string ×{expansion.layers}] ",
-                "muted",
-            )
+            cue = _Segment(f"[expanded JSON string ×{expansion.layers}] ", "muted")
             return _format_value(
-                expansion.value,
-                indent=indent,
-                display_depth=display_depth,
-                path=path,
-                prefix=prefix + (cue,),
-                string_limit=string_limit,
-                content_field=content_field,
-                budget=budget,
-                facts=facts,
-                active=active,
+                expansion.value, indent=indent, display_depth=display_depth,
+                path=path, prefix=prefix + (cue,), string_limit=string_limit,
+                content_field=content_field, budget=budget, facts=facts,
+                active=active, folds=folds, parent=parent,
             )
         if isinstance(expansion, SkippedExpansion):
             facts.skipped_expansions += 1
-            leading += (
-                _Segment(
-                    f"[JSON expansion skipped: {expansion.reason}] ",
-                    "warning",
-                ),
-            )
-        if (active is not None and active.path == path
-                and active.kind == "value" and active.text == value):
+            leading += (_Segment(f"[JSON expansion skipped: {expansion.reason}] ", "warning"),)
+        if (active is not None and active.path == path and active.kind == "value"
+                and active.text == value):
             token = _focused_token(value, active, "string")
         else:
-            token = _string_segments(
-                value,
-                maximum=string_limit,
-                path=path,
-                content_field=content_field,
-                facts=facts,
-            )
+            token = _string_segments(value, maximum=string_limit, path=path,
+                                     content_field=content_field, facts=facts)
     elif value is None:
         token = (_Segment("null", "literal"),)
     elif type(value) is bool:
         token = (_Segment("true" if value else "false", "literal"),)
     else:
         token = (_Segment(json.dumps(value, allow_nan=False), "number"),)
-    if (not isinstance(value, str) and active is not None
-            and active.path == path and active.kind == "value"
-            and active.text == token[0].text):
+    if (not isinstance(value, str) and active is not None and active.path == path
+            and active.kind == "value" and active.text == token[0].text):
         token = _focused_token(active.text, active, token[0].role, quoted=False)
-    return [_DisplayLine(leading + token, path)]
+    return [_DisplayLine(leading + _data_segments(token, parent), path)]
 
 
 def _project_record(
@@ -399,6 +381,7 @@ def _format_record(
     spec: ViewerSpec,
     mode: ViewMode,
     active: Occurrence | None = None,
+    folds: frozenset[JSONPath] = frozenset(),
 ) -> tuple[list[_DisplayLine], _ProjectionFacts]:
     value, _, limit = _project_record(record, spec, mode)
     budget = ExpansionBudget()
@@ -413,8 +396,13 @@ def _format_record(
         budget=budget,
         facts=facts,
         active=active,
+        folds=folds,
     )
-    if active is not None and not any(
+    hidden_by_fold = active is not None and any(
+        active.path[:len(path)] == path
+        and not (active.kind == "key" and active.path == path) for path in folds
+    )
+    if active is not None and not hidden_by_fold and not any(
         segment.role == "match_current" for line in lines for segment in line.segments
     ):
         # Raw/normalized hits and independently exhausted display expansion
@@ -423,8 +411,13 @@ def _format_record(
         lines.append(_DisplayLine(
             (_Segment(f"[{label} search excerpt]", "muted"),), active.path,
         ))
+        containing_paths = [segment.container for line in lines for segment in line.segments
+                            if segment.delimiter == "open" and segment.container is not None
+                            and active.path[:len(segment.container)] == segment.container
+                            and not (active.kind == "key" and active.path == segment.container)]
+        container = max(containing_paths, key=len) if containing_paths else None
         lines.append(_DisplayLine(
-            _focused_token(active.text, active, "string"), active.path,
+            _data_segments(_focused_token(active.text, active, "string"), container), active.path,
         ))
     return lines, facts
 
@@ -484,7 +477,11 @@ def _header_lines(
 def _help_body(width: int) -> list[tuple[str, str]]:
     values = (
         ("Help — immutable snapshot; commands never edit, replay, or retry.", "chrome"),
-        ("↑/↓ or j/k  previous/next source record", "plain"),
+        ("h/l         move character cursor left/right", "plain"),
+        ("j/k         move cursor down/up within visible JSON", "plain"),
+        ("↑/↓         previous/next source record", "plain"),
+        ("Enter/fold  collapse/expand focused nonempty container", "plain"),
+        ("? / help    show or dismiss help", "plain"),
         ("PgUp/PgDn   scroll one record, then cross record boundaries", "plain"),
         ("g LINE      go to an exact source-record line", "plain"),
         ("/ QUERY     search all text (keys and complete values)", "plain"),
@@ -509,7 +506,7 @@ def _status_body(
             (_clip_text(_neutralize_text(diagnostic.detail), width), "error"),
             (
                 _clip_text(
-                    "Source bytes are unchanged. Press h for help or q to close.", width
+                    "Source bytes are unchanged. Press ? for help or q to close.", width
                 ),
                 "muted",
             ),
@@ -547,7 +544,7 @@ def _reveal_segments(segments: tuple[_Segment, ...], width: int) -> tuple[_Segme
         token, _, _ = _take_cells(segments[focus].text, max(0, width - 2))
         return (
             _Segment("⟦", "current"),
-            _Segment(token, "match_current"),
+            replace(segments[focus], text=token),
             _Segment("⟧", "current"),
         )
     before = segments[:focus]
@@ -560,54 +557,149 @@ def _reveal_segments(segments: tuple[_Segment, ...], width: int) -> tuple[_Segme
     for segment in reversed(before):
         piece, used, _ = _take_cells(segment.text[::-1], remaining)
         if piece:
-            tail.append(_Segment(piece[::-1], segment.role))
+            tail.append(replace(segment, text=piece[::-1]))
         remaining -= used
         if remaining <= 0:
             break
     return (_Segment("…", "muted"),) + tuple(reversed(tail)) + segments[focus:]
 
 
+@dataclass(frozen=True, slots=True)
+class _RecordLine:
+    segments: tuple[_Segment, ...]
+    record_index: int
+    line_index: int
+
+
 def _record_lines(
-    record: Record,
-    index: int,
-    spec: ViewerSpec,
-    state: ViewState,
-    *,
-    gutter_width: int,
-    body_width: int,
-    color: bool,
-) -> tuple[list[str], bool, int, _ProjectionFacts, int | None]:
+    record: Record, index: int, spec: ViewerSpec, state: ViewState, *,
+    gutter_width: int, body_width: int, color: bool,
+) -> tuple[list[_RecordLine], bool, int, _ProjectionFacts, int | None, tuple[ContainerMetadata, ...]]:
     active = state.search.current_occurrence if state.search is not None else None
     if active is not None and active.record_index != index:
         active = None
-    logical, facts = _format_record(record, spec, state.mode, active)
+    folds = frozenset(fold.path for fold in state.folds if fold.record_index == index)
+    logical, facts = _format_record(record, spec, state.mode, active, folds)
     matched = state.search is not None and state.search.has_record(index)
     marker, marker_role = _record_marker(index, state, matched=matched)
-    result: list[str] = []
+    result: list[_RecordLine] = []
+    containers: list[ContainerMetadata] = []
     any_width_clip = False
     focus_row = None
     for row, line in enumerate(logical):
+        for segment in line.segments:
+            if segment.delimiter == "open":
+                assert segment.container is not None
+                containers.append(ContainerMetadata(
+                    FoldIdentity(index, segment.container), segment.nonempty, segment.folded,
+                ))
         focused = any(segment.role == "match_current" for segment in line.segments)
         if focused:
             focus_row = row
         gutter = (
-            _Segment(marker, marker_role),
-            _Segment(" "),
+            _Segment(marker, marker_role), _Segment(" "),
             _Segment(str(record.source_line).rjust(gutter_width), "gutter"),
             _Segment(" │ ", "gutter"),
         )
         line_width = body_width
         if focused and body_width < 12:
-            # Omit the repeated source gutter only on the active tiny row.
-            # Its record identity remains on surrounding rows; focus takes
-            # priority when five-digit source lines consume most of a frame.
             gutter = ()
             line_width += gutter_width + 5
         value_segments = _reveal_segments(line.segments, line_width)
+        opener = next((i for i, segment in enumerate(line.segments)
+                       if segment.delimiter == "open" and segment.nonempty), None)
+        if not focused and opener is not None and sum(
+                _text_cells(segment.text) for segment in line.segments[:opener + 1]) > line_width:
+            # Retain a clipped key/cue prefix and the structural token. Otherwise
+            # folding a visible child behind a long key could hide its opener
+            # again on the next frame, leaving no stable cursor cell.
+            suffix = line.segments[opener:]
+            suffix_width = sum(_text_cells(segment.text) for segment in suffix)
+            prefix, _ = _clip_segments(line.segments[:opener], max(0, line_width - suffix_width))
+            value_segments = prefix + suffix
         clipped, width_clip = _clip_segments(value_segments, line_width)
         any_width_clip = any_width_clip or width_clip or value_segments != line.segments
-        result.append(_paint(gutter + clipped, color=color))
-    return result, any_width_clip, len(logical), facts, focus_row
+        result.append(_RecordLine(gutter + clipped, index, row))
+    return result, any_width_clip, len(logical), facts, focus_row, tuple(containers)
+
+
+def _clusters(text: str) -> Iterable[str]:
+    """Keep combining marks attached to their readable inverse-video cell."""
+    cluster = ""
+    for character in text:
+        if _character_cells(character) == 0 and cluster:
+            cluster += character
+        else:
+            if cluster:
+                yield cluster
+            cluster = character
+    if cluster:
+        yield cluster
+
+
+def _visible_characters(line: _RecordLine, screen_row: int) -> tuple[VisibleCharacter, ...]:
+    result: list[VisibleCharacter] = []
+    column = 0
+    for segment in line.segments:
+        for cluster in _clusters(segment.text):
+            width = _text_cells(cluster)
+            if segment.navigable and width:
+                result.append(VisibleCharacter(
+                    CursorPosition(line.record_index, line.line_index, column),
+                    screen_row, cluster,
+                    None if segment.container is None else FoldIdentity(line.record_index, segment.container),
+                    segment.delimiter, segment.role == "match_current",
+                ))
+            column += width
+    return tuple(result)
+
+
+def _resolve_cursor(state: ViewState, characters: tuple[VisibleCharacter, ...]) -> CursorPosition | None:
+    if not characters:
+        return None
+    if state.focus_container is not None:
+        opener = next((cell for cell in characters if cell.container == state.focus_container
+                       and cell.delimiter == "open"), None)
+        if opener is not None:
+            return opener.position
+    if state.reveal_match:
+        match = next((cell for cell in characters if cell.search_focus), None)
+        if match is not None:
+            return match.position
+    if state.cursor is None:
+        return characters[0].position
+    exact = next((cell for cell in characters if cell.position == state.cursor), None)
+    if exact is not None:
+        return exact.position
+    same_record = [cell for cell in characters if cell.position.record_index == state.cursor.record_index]
+    if not same_record:
+        return characters[0].position
+    return min(same_record, key=lambda cell: (
+        abs(cell.position.line_index - state.cursor.line_index),
+        abs(cell.position.column - state.cursor.column),
+    )).position
+
+
+def _paint_record_line(
+    line: _RecordLine, *, cursor: CursorPosition | None,
+    container: FoldIdentity | None, color: bool,
+) -> str:
+    if not color:
+        return _paint(line.segments, color=False)
+    result: list[str] = []
+    column = 0
+    for segment in line.segments:
+        for cluster in _clusters(segment.text):
+            position = CursorPosition(line.record_index, line.line_index, column)
+            bold = (segment.delimiter is not None and container is not None
+                    and container == FoldIdentity(line.record_index, segment.container))
+            inverse = segment.navigable and cursor == position
+            style = _ANSI.get(segment.role, _ANSI["plain"])
+            style += ";1" if bold else ""
+            style += ";7" if inverse else ""
+            result.append(f"\x1b[{style}m{cluster}\x1b[0m")
+            column += _text_cells(cluster)
+    return "".join(result)
 
 
 def _projection_footer_pieces(facts: _ProjectionFacts | None) -> list[str]:
@@ -696,9 +788,9 @@ def _footer_lines(
     if not status:
         status = "Immutable snapshot • no persistent viewer state"
     help_text = (
-        "h help • q close"
+        "? help • q close"
         if width < 48
-        else "↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close"
+        else "h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close"
     )
     return [
         (_clip_text(_neutralize_text(status), width), role),
@@ -746,7 +838,7 @@ def render_loading(
     state = ViewState()
     values = _header_lines(spec, state, width=width)
     values.append((_clip_text("Loading immutable JSONL snapshot…", width), "muted"))
-    values.append((_clip_text("h help • q close", width), "footer"))
+    values.append((_clip_text("? help • q close", width), "footer"))
     return "\n".join(
         _paint((_Segment(text, role),), color=color) for text, role in values[:height]
     )
@@ -764,17 +856,20 @@ def render_frame(
 ) -> RenderResult:
     width = min(MAX_COLUMNS, max(MIN_COLUMNS, columns))
     height = min(MAX_ROWS, max(MIN_ROWS, rows))
+    has_data = (not state.help_visible and diagnostic is None
+                and snapshot is not None and bool(snapshot.records))
+    caret_rows = int(has_data and not color)
+    footer_budget = 1 if caret_rows and height == MIN_ROWS and state.prompt is None else 2
     header = _header_lines(spec, state, width=width)
-    footer_budget = 2
-    if state.search is not None:
-        header = header[:max(1, height - footer_budget - 1)]
-    available_body_rows = max(0, height - len(header) - footer_budget)
-    body: list[tuple[str, str] | str] = []
+    if has_data:
+        header = header[:max(1, height - footer_budget - caret_rows - 1)]
+    available_body_rows = max(0, height - len(header) - footer_budget - caret_rows)
+    body: list[tuple[str, str] | _RecordLine | str] = []
     width_clipped = False
     selected_line_count = 0
     effective_offset = state.record_line_offset
     selected_projection_facts: _ProjectionFacts | None = None
-
+    containers: list[ContainerMetadata] = []
     if state.help_visible:
         body.extend(_help_body(width)[:available_body_rows])
     else:
@@ -787,24 +882,27 @@ def render_frame(
             body_width = max(1, width - gutter_width - 5)
             remaining = available_body_rows
             for index in range(state.selected_index, len(snapshot.records)):
-                record_lines, clipped, logical_count, projection_facts, focus_row = _record_lines(
-                    snapshot.records[index],
-                    index,
-                    spec,
-                    state,
-                    gutter_width=gutter_width,
-                    body_width=body_width,
-                    color=color,
+                record_lines, clipped, logical_count, facts, focus_row, record_containers = _record_lines(
+                    snapshot.records[index], index, spec, state,
+                    gutter_width=gutter_width, body_width=body_width, color=color,
                 )
+                containers.extend(record_containers)
                 width_clipped = width_clipped or clipped
                 if index == state.selected_index:
                     selected_line_count = logical_count
-                    selected_projection_facts = projection_facts
+                    selected_projection_facts = facts
                     effective_offset = min(state.record_line_offset, max(0, logical_count - 1))
-                    if state.reveal_match and focus_row is not None:
+                    if state.focus_container is not None:
+                        opener_row = next((line.line_index for line in record_lines
+                            if any(segment.delimiter == "open"
+                                   and FoldIdentity(index, segment.container) == state.focus_container
+                                   for segment in line.segments)), None)
+                        if opener_row is not None:
+                            focus_row = opener_row
+                    if (state.reveal_match or state.focus_container is not None) and focus_row is not None:
                         if not effective_offset <= focus_row < effective_offset + max(1, remaining):
                             effective_offset = max(0, focus_row - max(0, remaining // 2))
-                    record_lines = record_lines[effective_offset :]
+                    record_lines = record_lines[effective_offset:]
                 if not record_lines:
                     continue
                 take = min(remaining, len(record_lines))
@@ -815,33 +913,39 @@ def render_frame(
                 if index + 1 < len(snapshot.records):
                     body.append("")
                     remaining -= 1
-                if remaining <= 0:
-                    break
-
-    footer = _footer_lines(
-        snapshot,
-        state,
-        spec=spec,
-        width=width,
-        width_clipped=width_clipped,
-        projection_facts=selected_projection_facts,
+                    if remaining <= 0:
+                        break
+    characters = tuple(
+        cell for row, line in enumerate(body, start=len(header))
+        if isinstance(line, _RecordLine) for cell in _visible_characters(line, row)
     )
-    rendered_header = [
-        _paint((_Segment(text, role),), color=color) for text, role in header
-    ]
-    rendered_body = [
-        value
-        if isinstance(value, str)
-        else _paint((_Segment(value[0], value[1]),), color=color)
-        for value in body
-    ]
-    rendered_footer = [
-        _paint((_Segment(text, role),), color=color) for text, role in footer
-    ]
+    cursor = _resolve_cursor(state, characters)
+    focused = next((cell for cell in characters if cell.position == cursor), None)
+    if caret_rows and focused is not None:
+        characters = tuple(replace(cell, screen_row=cell.screen_row + int(cell.screen_row > focused.screen_row))
+                           for cell in characters)
+    footer = _footer_lines(
+        snapshot, state, spec=spec, width=width, width_clipped=width_clipped,
+        projection_facts=selected_projection_facts,
+    )[:footer_budget]
+    rendered_body: list[str] = []
+    for row, line in enumerate(body, start=len(header)):
+        if isinstance(line, _RecordLine):
+            rendered_body.append(_paint_record_line(
+                line, cursor=cursor, container=None if focused is None else focused.container, color=color,
+            ))
+        elif isinstance(line, str):
+            rendered_body.append(line)
+        else:
+            rendered_body.append(_paint((_Segment(line[0], line[1]),), color=color))
+        if caret_rows and focused is not None and row == focused.screen_row:
+            rendered_body.append(" " * focused.position.column + "^")
+    rendered_header = [_paint((_Segment(text, role),), color=color) for text, role in header]
+    rendered_footer = [_paint((_Segment(text, role),), color=color) for text, role in footer]
     frame_lines = (rendered_header + rendered_body + rendered_footer)[:height]
     return RenderResult(
-        text="\n".join(frame_lines),
-        body_rows=max(1, available_body_rows),
-        selected_line_count=selected_line_count,
-        record_line_offset=effective_offset,
+        text="\n".join(frame_lines), body_rows=max(1, available_body_rows),
+        selected_line_count=selected_line_count, record_line_offset=effective_offset,
+        cursor=cursor, characters=characters, containers=tuple(containers),
+        columns=width, rows=height, color=color,
     )
