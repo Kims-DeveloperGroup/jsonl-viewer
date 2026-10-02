@@ -489,7 +489,7 @@ def _header_lines(
 def _help_body(width: int) -> list[tuple[str, str]]:
     values = (
         ("Help — immutable snapshot; commands never edit, replay, or retry.", "chrome"),
-        ("h/l         move character cursor left/right", "plain"),
+        ("h/l         move cursor left/right; wrap visible rows", "plain"),
         ("j/k         move cursor down/up within visible JSON", "plain"),
         ("↑/↓         previous/next source record", "plain"),
         ("Enter/fold  collapse/expand focused nonempty container", "plain"),

@@ -268,7 +268,7 @@ after the search prefix is the full-text query, including spaces. A separating
 space after `/` or `//` is required before a query in this mode. Textual
 `esc` applies semantic `cancel`. Semantic events are accepted in either protocol:
 
-- `cursor_left` / `cursor_right`: move through visible JSON characters.
+- `cursor_left` / `cursor_right`: move through visible JSON characters, wrapping across adjacent visible data rows.
 - `cursor_up` / `cursor_down`: move across visible data rows, retaining the preferred display column.
 - `toggle_fold`: toggle the innermost nonempty container containing the cursor.
 - `up` / `down`: select adjacent source records and reset within-record paging.
@@ -293,6 +293,10 @@ visibility, and terminal mode. The printable draft cursor provides a non-color
 focus cue without transferring terminal ownership to the engine.
 
 ## Character cursor and folding
+
+Since 0.4.1, right at a row's end wraps to the next visible data row's first
+character; left at its start wraps to the previous row's last character. Wrapping
+skips caret/separator rows and never scrolls or changes the selected record.
 
 The cursor starts on the first JSON character of the top visible data row and
 resets there after successful record, page, goto, or mode changes. It moves

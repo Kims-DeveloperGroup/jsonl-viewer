@@ -272,10 +272,9 @@ def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | No
     rows = sorted({cell.screen_row for cell in characters})
     preferred = current.position.column if state.preferred_column is None else state.preferred_column
     if event in {"cursor_left", "cursor_right"}:
-        row = [cell for cell in characters if cell.screen_row == current.screen_row]
-        index = row.index(current)
-        index = max(0, min(len(row) - 1, index + (-1 if event == "cursor_left" else 1)))
-        destination = row[index]
+        index = characters.index(current)
+        index = max(0, min(len(characters) - 1, index + (-1 if event == "cursor_left" else 1)))
+        destination = characters[index]
         preferred = destination.position.column
     else:
         index = rows.index(current.screen_row)

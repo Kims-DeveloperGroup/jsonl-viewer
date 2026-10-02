@@ -209,7 +209,7 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
-### Migrating to 0.4.0
+### Migrating to 0.4.x
 
 Main-view `h` now moves left, and `j`/`k` move down/up within visible JSON.
 Use `?` for help and the Up/Down arrows to select records. `l` moves right;
@@ -220,6 +220,11 @@ Semantic hosts can send `cursor_left`, `cursor_right`, `cursor_up`,
 `cursor_down`, and `toggle_fold`; existing `up`, `down`, and `help` events
 retain their meanings. The three public exports and five host methods remain
 unchanged.
+
+From 0.4.1, `l` at a row's end moves to the next visible JSON row's first
+character; `h` at a row's start moves to the previous row's last character. Both
+stop at the viewport boundaries without scrolling. Gutters, display annotations,
+caret rows, and record separators are skipped.
 
 The cursor starts at the first JSON character of the top visible data row.
 Successful record, page, go-to-line, and mode changes reset it there. Vertical
