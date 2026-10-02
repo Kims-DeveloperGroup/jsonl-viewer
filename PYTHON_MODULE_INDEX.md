@@ -89,6 +89,13 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer._model`
 
+- **Cursor/fold values:** Frozen `CursorPosition`, `FoldIdentity`,
+  `VisibleCharacter`, and `ContainerMetadata` link visible display cells to
+  source-record identity, structural paths, and parsed container delimiters.
+  `ViewState` owns immutable session folds, cursor/preferred column, and a transient
+  container-focus request. `RenderResult` carries effective cursor, visible cells,
+  container facts, and geometry for subsequent context-sensitive input.
+
 - **Source:** `src/jsonl_viewer/_model.py`
 - **Responsibility:** Define immutable private snapshot and transient view-state
   values.
@@ -133,6 +140,16 @@ unit imports Story or any third-party runtime package.
   and the README input contract.
 
 ### `jsonl_viewer._render`
+
+- **Cursor/folding projection:** Parsed container membership travels with JSON
+  token segments through bounded expansion, search windows, and cell clipping.
+  Nonempty folded containers retain opener/closer, keys, commas, and expansion
+  cues; hidden children are still traversed to preserve expansion budgets and
+  aggregate facts. Focus metadata excludes gutters, indentation, and display
+  annotations. ANSI paints a readable inverse-video character cluster and bold
+  matching delimiters; plain output reserves a caret row, intentionally reducing
+  data capacity. At minimum height it retains one header, data row, caret, and
+  status row. Search windows keep combining marks with their base character.
 
 - **Source:** `src/jsonl_viewer/_render.py`
 - **Responsibility:** Render deterministic bounded semantic ANSI/plain frames
@@ -249,6 +266,16 @@ unit imports Story or any third-party runtime package.
   `README.md`, and `docs/design-system.md`.
 
 ### `jsonl_viewer.engine`
+
+- **Cursor/fold transitions:** Main-view `h/l` move visible character cells,
+  `j/k` preserve a preferred display column across visible data rows, and Enter
+  toggles the innermost nonempty container. Arrow/semantic record navigation and
+  paging retain their responsibilities. Successful viewport/mode changes reset
+  focus; geometry changes clamp it. Folds are immutable record/path identities
+  retained for this call, including nested folds beneath a folded parent. Search
+  selection unfolds only containers hiding the hit and focuses its first display
+  cell; later manual folding remains effective until search navigation. Batched
+  text input refreshes structural geometry before subsequent cursor actions.
 
 - **Source:** `src/jsonl_viewer/engine.py`
 - **Responsibility:** Coordinate one transient read-only view through an

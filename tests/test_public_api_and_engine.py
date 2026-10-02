@@ -15,7 +15,7 @@ from pathlib import Path
 import jsonl_viewer
 from jsonl_viewer import ViewerSpec, view_jsonl
 
-from tests.support import FakeHost
+from tests.support import FakeHost, without_caret
 
 
 def _source() -> bytes:
@@ -281,6 +281,11 @@ class EngineTests(unittest.TestCase):
                 "page_down",
                 "page_down",
                 "page_down",
+                "page_down",
+                "page_down",
+                "page_down",
+                "page_down",
+                "page_down",
                 "goto\tzero",
                 "close",
             ),
@@ -335,7 +340,7 @@ class EngineTests(unittest.TestCase):
             + "\n"
         ).encode("utf-8")
         before = hashlib.sha256(source).digest()
-        host = FakeHost(("page_down",) * 8 + ("close",), size=(80, 9))
+        host = FakeHost(("page_down",) * 16 + ("close",), size=(80, 9))
 
         view_jsonl(source, self.spec, host)
 
@@ -511,10 +516,11 @@ class KeyInputTests(unittest.TestCase):
         self.assertEqual(self.source, _source())
 
     def test_legacy_semantic_and_line_commands_have_matching_actions(self) -> None:
-        commands = ((" j ", "down"), ("down", "down"), ("k", "up"), ("up", "up"),
+        commands = ((" j ", "cursor_down"), ("down", "down"), ("k", "cursor_up"), ("up", "up"),
+                    ("h", "cursor_left"), ("l", "cursor_right"), ("fold", "toggle_fold"),
                     ("pgdn", "page_down"), ("pgup", "page_up"), ("g 2", "goto\t2"),
                     ("/ alpha", "search\talpha"), ("n", "next_match"),
-                    ("N", "previous_match"), ("m", "toggle_mode"), ("h", "help"),
+                    ("N", "previous_match"), ("m", "toggle_mode"), ("help", "help"),
                     ("?", "help"), ("esc", "cancel"), ("c", "clear_search"),
                     ("clear", "clear_search"), ("q", "close"), ("quit", "close"),
                     ("", "unknown"), ("/content alpha", "unknown"), ("g x", "goto\tx"),
@@ -616,7 +622,7 @@ class KeyInputTests(unittest.TestCase):
     def test_help_empty_and_malformed_sources_cannot_open_prompts(self) -> None:
         for source, events in ((b"", ("text\t/", "text\tg", "close")),
                                (b"{bad}\n", ("text\t/", "text\tg", "line\t/ content alpha", "close")),
-                               (self.source, ("text\th", "text\t/", "text\tg", "close"))):
+                               (self.source, ("text\t?", "text\t/", "text\tg", "close"))):
             host = FakeHost(events)
             view_jsonl(source, self.spec, host)
             self.assertEqual(host.close_calls, 1)
@@ -631,8 +637,10 @@ class KeyInputTests(unittest.TestCase):
                 plain, color = FakeHost(events, size=size), FakeHost(events, size=size, color=True)
                 view_jsonl(self.source, self.spec, plain)
                 view_jsonl(self.source, self.spec, color)
-                self.assertEqual(plain.frames, [strip_ansi(frame) for frame in color.frames])
-                for frame in plain.frames:
+                if size[1] == 24:
+                    self.assertEqual([without_caret(frame) for frame in plain.frames],
+                                     [strip_ansi(frame) for frame in color.frames])
+                for frame in [*plain.frames, *(strip_ansi(frame) for frame in color.frames)]:
                     self.assertLessEqual(len(frame.splitlines()), size[1])
                     self.assertTrue(all(_text_cells(line) <= size[0] for line in frame.splitlines()))
                     self.assertNotIn("\x1b", frame)

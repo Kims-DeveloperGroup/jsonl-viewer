@@ -1,5 +1,6 @@
 JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conversation-01 | Agent: agent-01
 > 1 │ {
+      ^
 > 1 │   "timestamp": "2026-08-29T09:00:00Z",
 > 1 │   "request_type": "response",
 > 1 │   "content": [expanded JSON string ×1] {
@@ -8,4 +9,4 @@ JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conv
 > 1 │   }
 > 1 │ }
 Record 1/1 • source line 1 • width clipped • JSON display 1 expanded, 0 skipped, 1 truncated (4095/6000 UTF-8 bytes retained)
-↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
+h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close

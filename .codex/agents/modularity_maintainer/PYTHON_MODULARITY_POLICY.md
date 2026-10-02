@@ -135,8 +135,13 @@ It is descriptive current-state navigation, not a plan or history.
 - ANSI frames MAY contain semantic SGR sequences only. Cursor movement,
   alternate-screen, erase, mouse, clipboard, title, hyperlink, and raw-mode
   controls belong to a terminal-owning host.
-- Plain and ANSI rendering MUST have exactly equivalent semantic text after SGR
-  removal. Color MUST NOT be the only state signal.
+- Plain and ANSI rendering MUST convey equivalent JSON content and state.
+  Color MUST NOT be the only state signal. The user-approved 0.4.0 character
+  cursor uses inverse video in ANSI and an aligned caret on an extra plain
+  row, so exact text/layout equality is intentionally waived for that row and
+  its viewport capacity. This affects frame consumers comparing ANSI/plain
+  output; focus/geometry tests and the migration guide contain the difference.
+  Retire this exception if both modes later use the same focus layout.
 - Provider/source-controlled text MUST be safely neutralized before terminal
   rendering. Unicode cell clipping and truncation markers MUST be deterministic
   and source-preserving.

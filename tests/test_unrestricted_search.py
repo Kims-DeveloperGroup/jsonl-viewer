@@ -17,7 +17,7 @@ from jsonl_viewer._model import Occurrence, Record, SearchState, Snapshot, ViewS
 from jsonl_viewer._render import _text_cells, render_frame, strip_ansi
 from jsonl_viewer._search import SearchLimitError, find_matches
 
-from tests.support import FakeHost
+from tests.support import FakeHost, without_caret
 
 
 def _source(*records: object) -> bytes:
@@ -210,8 +210,10 @@ class FullTextOccurrenceTests(unittest.TestCase):
         for size in ((12, 4), (32, 8), (120, 30)):
             plain = self._view(source, "search\t개요", "next_match", size=size)
             ansi = self._view(source, "search\t개요", "next_match", size=size, color=True)
-            self.assertEqual(plain.frames, [strip_ansi(f) for f in ansi.frames])
-            for frame in plain.frames:
+            if size[1] == 30:
+                self.assertEqual([without_caret(f) for f in plain.frames],
+                                 [strip_ansi(f) for f in ansi.frames])
+            for frame in [*plain.frames, *(strip_ansi(f) for f in ansi.frames)]:
                 frame.encode("utf-8", errors="strict")
                 self.assertNotRegex(frame, r"[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e\u2028\ud800]")
                 self.assertLessEqual(len(frame.splitlines()), size[1])

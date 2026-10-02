@@ -3,6 +3,7 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 @ 1 │ {
 @ 1 │   "timestamp": "2026-08-29T09:00:00Z",
 @ 1 │   "⟦r⟧equest_type": "request",
+          ^
 @ 1 │   "content": "Find the mismatch."
 @ 1 │ }
 
@@ -12,4 +13,4 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 * 2 │   "content": "The field is missing."
 * 2 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
+h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? hel…

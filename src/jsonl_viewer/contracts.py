@@ -127,6 +127,10 @@ class ViewerHost(Protocol):
     EOF closes the view. Interrupt closes an active prompt's view and otherwise
     applies semantic cancel. Bare or unsupported Escape cancels only
     an active prompt draft; main-view Escape retains semantic cancel behavior.
+    Main-view character cursors and container folds are transient. Hosts may send
+    ``cursor_left``, ``cursor_right``, ``cursor_up``, ``cursor_down``, and
+    ``toggle_fold`` semantic events. Plain frames reserve a caret row; ANSI frames
+    use a readable inverse-video character cell.
     Prompts and their logical cursors are rendered in ordinary complete frames;
     hosts never acquire a second input lifecycle or edit a prompt buffer.
     """

@@ -5,7 +5,6 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
-import re
 import unicodedata
 import unittest
 from unittest import mock
@@ -23,7 +22,7 @@ from jsonl_viewer._input import (
 from jsonl_viewer._model import ViewMode
 from jsonl_viewer._render import _format_record, record_line_count, strip_ansi
 
-from tests.support import FakeHost
+from tests.support import FakeHost, styled_text, without_caret
 
 
 class InputDiagnosticTests(unittest.TestCase):
@@ -59,7 +58,7 @@ class InputDiagnosticTests(unittest.TestCase):
     def test_empty_snapshot_is_a_read_only_state(self) -> None:
         frame = self._frame(b"")
         self.assertIn("empty immutable JSONL snapshot", frame)
-        self.assertIn("h help • q close", frame)
+        self.assertIn("? help • q close", frame)
 
     def test_source_record_and_count_bounds_are_reported(self) -> None:
         self.assertIn(
@@ -207,17 +206,17 @@ class RenderTests(unittest.TestCase):
             frame,
         )
 
-    def test_ansi_and_plain_have_exact_semantic_text_equivalence(self) -> None:
+    def test_ansi_and_plain_have_exact_semantic_text_apart_from_caret(self) -> None:
         plain = FakeHost(("toggle_mode", "close"), size=(120, 24), color=False)
         ansi = FakeHost(("toggle_mode", "close"), size=(120, 24), color=True)
         view_jsonl(self.source, self.spec, plain)
         view_jsonl(self.source, self.spec, ansi)
-        self.assertEqual(strip_ansi(ansi.frames[-1]), plain.frames[-1])
-        self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[34m.*timestamp"))
-        self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[32m.*2026"))
-        self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[35m7"))
-        self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[33mtrue"))
-        self.assertRegex(ansi.frames[-1], re.compile(r"\x1b\[33mnull"))
+        self.assertEqual(strip_ansi(ansi.frames[-1]), without_caret(plain.frames[-1]))
+        self.assertIn("timestamp", styled_text(ansi.frames[-1], "34"))
+        self.assertIn("2026", styled_text(ansi.frames[-1], "32"))
+        self.assertIn("7", styled_text(ansi.frames[-1], "35"))
+        self.assertIn("true", styled_text(ansi.frames[-1], "33"))
+        self.assertIn("null", styled_text(ansi.frames[-1], "33"))
 
     def test_story_like_nested_json_is_structured_and_semantically_colored(
         self,
@@ -254,13 +253,13 @@ class RenderTests(unittest.TestCase):
         self.assertNotIn("\x1b", frame)
         self.assertIn(r"line1\nline2\u001b[2J\u202e", frame)
         self.assertIn("JSON display 2 expanded, 0 skipped, 0 truncated", frame)
-        self.assertEqual(strip_ansi(colored), frame)
-        self.assertRegex(colored, re.compile(r"\x1b\[34m.*response_text"))
-        self.assertRegex(colored, re.compile(r"\x1b\[32m.*provider_response"))
-        self.assertRegex(colored, re.compile(r"\x1b\[35m7"))
-        self.assertRegex(colored, re.compile(r"\x1b\[33mtrue"))
-        self.assertRegex(colored, re.compile(r"\x1b\[33mnull"))
-        self.assertIn("\x1b[2;90m[expanded JSON string ×1] \x1b[0m", colored)
+        self.assertEqual(strip_ansi(colored), without_caret(frame))
+        self.assertIn("response_text", styled_text(colored, "34"))
+        self.assertIn("provider_response", styled_text(colored, "32"))
+        self.assertIn("7", styled_text(colored, "35"))
+        self.assertIn("true", styled_text(colored, "33"))
+        self.assertIn("null", styled_text(colored, "33"))
+        self.assertIn("[expanded JSON string ×1] ", styled_text(colored, "90"))
 
     def test_only_complete_strict_object_or_array_strings_expand(self) -> None:
         accepted = (
@@ -599,7 +598,7 @@ class RenderTests(unittest.TestCase):
         self.assertLessEqual(len(lines), 6)
         self.assertTrue(all(len(line) <= 28 for line in lines))
         self.assertIn("READ ONLY", frame)
-        self.assertIn("h help • q close", frame)
+        self.assertIn("? help • q close", frame)
 
     def test_unicode_cell_geometry_is_bounded_at_minimum_size(self) -> None:
         host = FakeHost(("close",), size=(12, 4))
@@ -640,10 +639,10 @@ class RenderTests(unittest.TestCase):
         )
         view_jsonl(source, ViewerSpec("s", "c", "a"), ansi)
         colored = ansi.frames[-1]
-        self.assertEqual(strip_ansi(colored), frame)
+        self.assertEqual(strip_ansi(colored), without_caret(frame))
         self.assertIn("\x1b[1;36m@\x1b[0m", colored)
         self.assertIn("\x1b[2;90m*\x1b[0m", colored)
-        self.assertIn("\x1b[1;30;43mhit\x1b[0m", colored)
+        self.assertIn("hit", styled_text(colored, "43"))
         self.assertNotIn("\x1b[1;30;43m@", colored)
 
 

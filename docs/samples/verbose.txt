@@ -1,6 +1,7 @@
 JSONL VIEWER • READ ONLY • VERBOSE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 > 1 │ {
+      ^
 > 1 │   "timestamp": "2026-08-29T09:00:00Z",
 > 1 │   "request_type": "request",
 > 1 │   "content": "Find the mismatch.",
@@ -14,4 +15,4 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
   2 │   "latency_ms": 23
   2 │ }
 Switched to Verbose mode.
-↑/↓ records • PgUp/PgDn scroll • g goto • / search • n/N • m mode • h help • q close
+h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? hel…
