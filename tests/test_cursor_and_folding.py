@@ -83,7 +83,7 @@ class CursorTests(unittest.TestCase):
             frames.append(without_caret(strip_ansi(result.text)))
         self.assertEqual(*frames)
 
-    def test_horizontal_movement_clamps_and_skips_gutters_and_expansion_cues(self):
+    def test_horizontal_movement_wraps_and_skips_gutters_and_expansion_cues(self):
         view = _View(_source({"content": json.dumps({"value": 1})}))
         opener = view.opener(("content",))
         view.focus(opener)
@@ -92,13 +92,45 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(previous.text, " ")
         self.assertGreater(opener.position.column - previous.position.column, 1)
         self.assertEqual(view.step("cursor_right").cursor, opener.position)
-        self.assertEqual(view.step("cursor_right").cursor, opener.position)
+        following = result.characters[next(index for index, cell in enumerate(result.characters) if cell.position == opener.position) + 1]
+        self.assertEqual(view.step("cursor_right").cursor, following.position)
+        self.assertEqual(view.step("cursor_left").cursor, opener.position)
         row = [cell for cell in result.characters
                if cell.position.line_index == opener.position.line_index]
         view.focus(row[0])
-        self.assertEqual(view.step("cursor_left").cursor, row[0].position)
+        preceding = result.characters[result.characters.index(row[0]) - 1]
+        self.assertEqual(view.step("cursor_left").cursor, preceding.position)
+        self.assertEqual(view.step("cursor_right").cursor, row[0].position)
         self.assertEqual(row[0].text, '"')
         self.assertFalse(any(cell.text in {"│", "…"} for cell in result.characters))
+
+    def test_horizontal_wrap_preserves_visible_json_cells_and_viewport(self):
+        source = _source({"content": json.dumps({"items": ["界e\u0301", {"x": 1}], "tail": 2}, ensure_ascii=False)}, "次e\u0301")
+        for color in (False, True):
+            for folded, size in ((False, (120, 40)), (True, (120, 40)), (False, (24, 12)), (True, (24, 12))):
+                with self.subTest(color=color, folded=folded, size=size):
+                    view = _View(source, color=color)
+                    if folded:
+                        view.toggle(("content", "items"))
+                    view.size = size
+                    result = view.render()
+                    positions = tuple(cell.position for cell in result.characters)
+                    before = (view.state.selected_index, view.state.record_line_offset, view.state.folds)
+                    for left, right in zip(result.characters, result.characters[1:]):
+                        if left.screen_row == right.screen_row:
+                            continue
+                        view.focus(left)
+                        self.assertEqual(view.step("cursor_right").cursor, right.position)
+                        self.assertEqual(view.state.preferred_column, right.position.column)
+                        self.assertEqual(view.step("cursor_left").cursor, left.position)
+                        self.assertEqual(view.state.preferred_column, left.position.column)
+                    view.focus(result.characters[0])
+                    self.assertEqual(view.step("cursor_left").cursor, positions[0])
+                    view.focus(result.characters[-1])
+                    self.assertEqual(view.step("cursor_right").cursor, positions[-1])
+                    self.assertEqual(tuple(cell.position for cell in view.render().characters), positions)
+                    self.assertEqual((view.state.selected_index, view.state.record_line_offset, view.state.folds), before)
+                    self.assertEqual(view.snapshot, parse_jsonl(source))
 
     def test_vertical_movement_preserves_preferred_display_column(self):
         view = _View(_source({"content": {"long": "abcdefghijk", "x": 0,
@@ -290,7 +322,7 @@ class CursorSearchAndInputTests(unittest.TestCase):
                 # Exclude the footer: it already documents these commands and
                 # must not hide stale instructions in the actual help body.
                 body = "\n".join(strip_ansi(result.text).splitlines()[1:-2])
-                self.assertRegex(body, r"h/l[^\n]*cursor[^\n]*left/right")
+                self.assertRegex(body, r"h/l[^\n]*cursor[^\n]*left/right[^\n]*wrap")
                 self.assertRegex(body, r"j/k[^\n]*cursor[^\n]*down/up")
                 self.assertRegex(body, r"Enter[^\n]*(?:fold|collapse|expand)")
                 self.assertRegex(body, r"↑/↓[^\n]*record")

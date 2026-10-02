@@ -267,7 +267,8 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer.engine`
 
-- **Cursor/fold transitions:** Main-view `h/l` move visible character cells,
+- **Cursor/fold transitions:** Main-view `h/l` move visible character cells and
+  wrap across adjacent data rows, clamping only at viewport ends;
   `j/k` preserve a preferred display column across visible data rows, and Enter
   toggles the innermost nonempty container. Arrow/semantic record navigation and
   paging retain their responsibilities. Successful viewport/mode changes reset
