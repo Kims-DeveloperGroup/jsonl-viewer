@@ -230,12 +230,14 @@ The cursor starts at the first JSON character of the top visible data row.
 Successful record, page, go-to-line, and mode changes reset it there. Vertical
 movement preserves its preferred display column and resizing clamps it to
 visible content. Gutters and display annotations are skipped. ANSI output uses
-a readable inverse-video cell and bolds visible matching container delimiters;
-plain/NO_COLOR output reserves a caret row underneath the focused row.
+a readable inverse-video cell and bold inverse-video matching delimiters;
+the cursor is also underlined when it sits on a highlighted delimiter.
+Plain/NO_COLOR output reserves a caret row underneath the focused row.
 The layouts therefore intentionally differ by that row.
 
-Folded objects and arrays appear as `{…}` and `[…]`, preserving their keys,
-commas, and encoded-JSON expansion cues. Fold state belongs to a record and
+From 0.4.2, folded objects and arrays use three full-contrast dots in `{...}`
+and `[...]`, distinct from the dim `…` used for clipping and previews. They
+preserve keys, commas, and encoded-JSON expansion cues. Fold state belongs to a record and
 structural path for this viewer session; reopening a parent restores nested
 folds. Enter leaves the cursor on the toggled opening delimiter. Empty
 containers and scalar roots do nothing. Braces inside strings are text.

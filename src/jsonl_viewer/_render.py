@@ -334,7 +334,7 @@ def _format_value(
         # Traverse first even when folded: folding must not change expansion
         # budgets, projection facts, or acceptance of later encoded strings.
         if folded:
-            return [_DisplayLine(leading + (opener, _Segment("…", "muted"), closer), path)]
+            return [_DisplayLine(leading + (opener, _Segment("..."), closer), path)]
         return lines
     if isinstance(value, str):
         expansion = expand_json_string(value, display_depth=display_depth, budget=budget)
@@ -492,7 +492,7 @@ def _help_body(width: int) -> list[tuple[str, str]]:
         ("h/l         move cursor left/right; wrap visible rows", "plain"),
         ("j/k         move cursor down/up within visible JSON", "plain"),
         ("↑/↓         previous/next source record", "plain"),
-        ("Enter/fold  collapse/expand focused nonempty container", "plain"),
+        ("Enter/fold  collapse/expand container: {...} / [...]", "plain"),
         ("? / help    show or dismiss help", "plain"),
         ("PgUp/PgDn   scroll one record, then cross record boundaries", "plain"),
         ("g LINE      go to an exact source-record line", "plain"),
@@ -703,12 +703,13 @@ def _paint_record_line(
     for segment in line.segments:
         for cluster in _clusters(segment.text):
             position = CursorPosition(line.record_index, line.line_index, column)
-            bold = (segment.delimiter is not None and container is not None
-                    and container == FoldIdentity(line.record_index, segment.container))
-            inverse = segment.navigable and cursor == position
+            matching = (segment.delimiter is not None and container is not None
+                        and container == FoldIdentity(line.record_index, segment.container))
+            focused = segment.navigable and cursor == position
             style = _ANSI.get(segment.role, _ANSI["plain"])
-            style += ";1" if bold else ""
-            style += ";7" if inverse else ""
+            style += ";1" if matching else ""
+            style += ";7" if matching or focused else ""
+            style += ";4" if matching and focused else ""
             result.append(f"\x1b[{style}m{cluster}\x1b[0m")
             column += _text_cells(cluster)
     return "".join(result)
