@@ -13,6 +13,7 @@ renderer, not illustrative mockups:
 - [Simple](samples/simple.txt)
 - [Verbose](samples/verbose.txt)
 - [current and non-current search matches](samples/search-matches.txt)
+- [record traversal](samples/record-navigation.txt)
 - [sibling key navigation](samples/sibling-navigation.txt)
 - [idle cursor phase](samples/cursor-idle.txt)
 - [cursor and root folding](samples/cursor-folding.txt)
@@ -581,3 +582,14 @@ supplies generic inputs through the viewer's public contract:
 9. Story owns the pickers, labels, snapshot location, and retention policy. No
    request, response, picker choice, or viewer state is modified or persisted
    by the viewer package.
+
+## Circular record traversal
+
+Since 0.5.2, Up/Down and semantic `up`/`down` cycle within the immutable source
+snapshot. Down wraps last to first; Up wraps first to last. Destination endpoints
+show `First record.` or `Last record.`; one record shows `Only record.`. Every
+traversal resets the viewport and cursor, including a one-record cycle. These
+non-error footer notices persist through idle/redraw, clear on ordinary cursor
+movement, and Escape dismisses them before clearing active search. Fold identities
+and occurrence counts remain unchanged. Page Up/Down (`b`/Space) scroll within a
+record first, then cycle records at its boundary with the same notices.

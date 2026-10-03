@@ -120,6 +120,7 @@ def sample_frames() -> dict[str, str]:
             ("cursor_down", "cursor_down", "cursor_down", "toggle_fold", "close"),
             (100, 24),
         ),
+        "record-navigation.txt": (_ordinary_source(), ("page_up", "page_down", "close"), (88, 20)),
         "sibling-navigation.txt": (
             _nested_json_source(),
             ("next_sibling", "close"),

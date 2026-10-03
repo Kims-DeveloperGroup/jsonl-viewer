@@ -209,6 +209,18 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
+### New in 0.5.2
+
+Up/Down cycle through source records: Down wraps from the last record to the first,
+and Up wraps from the first to the last. Arrival at an endpoint shows
+`First record.` or `Last record.`; a single-record snapshot shows `Only record.`.
+Each traversal resets the viewport and cursor to the first visible JSON character.
+Record notices follow sibling notices: idle/redraw preserves them, ordinary cursor
+movement clears them, and Escape dismisses them before clearing active search.
+Page Up/Down (`b`/Space) scroll within a record first, then cycle records at
+its boundary with the same notices. Semantic `up`/`down` events and ordinary-line
+`up`/`down` commands use the same circular traversal.
+
 ### New in 0.5.1
 
 `J`/`K` now cycle through the nearest object's displayed sibling properties.
