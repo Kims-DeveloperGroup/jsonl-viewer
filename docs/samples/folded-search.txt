@@ -6,7 +6,7 @@ JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conv
 @ 1 │     "action": "provider_response",
 @ 1 │     "response_text": [expanded JSON string ×1] {
 @ 1 │       "status": "provider_error",
-@ 1 │       "details": […]
+@ 1 │       "details": [...]
                        ^
 @ 1 │     }
 @ 1 │   }

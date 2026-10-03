@@ -75,7 +75,8 @@ class CursorTests(unittest.TestCase):
             self.assertEqual(cell.text, "{")
             lines = result.text.splitlines()
             if color:
-                self.assertEqual(styled_text(result.text, "7"), "{")
+                self.assertEqual(styled_text(result.text, "7"), "{}")
+                self.assertEqual(styled_text(result.text, "4"), "{")
                 self.assertNotIn("^", strip_ansi(result.text))
             else:
                 self.assertEqual(lines[cell.screen_row + 1], " " * cell.position.column + "^")
@@ -204,7 +205,7 @@ class CursorTests(unittest.TestCase):
         cell = next(cell for cell in combined.characters if cell.position == combined.cursor)
         self.assertEqual(cell.text, "e\u0301")
         self.assertEqual(cell.position.column, wide.position.column + 2)
-        self.assertEqual(styled_text(combined.text, "7"), "e\u0301")
+        self.assertEqual(styled_text(combined.text, "7"), "{e\u0301}")
         emoji = view.step("cursor_right")
         self.assertEqual(emoji.cursor.column, cell.position.column + 1)
         plain = strip_ansi(emoji.text)
@@ -215,7 +216,7 @@ class CursorTests(unittest.TestCase):
 
 
 class FoldingTests(unittest.TestCase):
-    def test_innermost_delimiters_are_bold_and_string_punctuation_is_ordinary(self):
+    def test_innermost_delimiters_are_inverse_and_string_punctuation_is_ordinary(self):
         view = _View(_source({"content": {"items": ["{}[]"]}}), color=True)
         result = view.render()
         literal = next(cell for cell in result.characters if cell.text == "{" and cell.delimiter is None)
@@ -223,9 +224,10 @@ class FoldingTests(unittest.TestCase):
         self.assertEqual(literal.container, FoldIdentity(0, ("content", "items")))
         data = "\n".join(line.split("│", 1)[1] for line in result.text.splitlines() if "│" in line)
         self.assertEqual(styled_text(data, "1"), "[]")
-        self.assertEqual(styled_text(data, "7"), "{")
+        self.assertEqual(styled_text(data, "7"), "[{]")
+        self.assertEqual(styled_text(data, "4"), "")
         folded = view.step("toggle_fold")
-        self.assertIn('"items": […]', strip_ansi(folded.text))
+        self.assertIn('"items": [...]', strip_ansi(folded.text))
 
     def test_offscreen_matching_delimiter_does_not_scroll_into_view(self):
         view = _View(_source({"content": list(range(30))}), size=(80, 9), color=True)
@@ -239,14 +241,48 @@ class FoldingTests(unittest.TestCase):
 
     def test_folded_shape_keeps_keys_commas_and_opening_focus(self):
         view = _View(_source({"content": {"items": [1, 2], "object": {"a": 1}, "last": 3}}))
-        for path, expected in ((("content", "items"), '"items": […],'),
-                               (("content", "object"), '"object": {…},')):
+        for path, expected in ((("content", "items"), '"items": [...],'),
+                               (("content", "object"), '"object": {...},')):
             result = view.toggle(path)
             self.assertIn(expected, result.text)
             focused = next(cell for cell in result.characters if cell.position == result.cursor)
             self.assertEqual(focused.container, FoldIdentity(0, path))
             self.assertEqual(focused.delimiter, "open")
         self.assertIn('"last": 3', result.text)
+
+    def test_fold_dots_keep_contrast_and_cursor_skips_to_highlighted_closer(self):
+        source = _source({"content": {"array": [1], "object": {"x": 1}}})
+        for color in (False, True):
+            for name, pair in (("array", "[]"), ("object", "{}")):
+                with self.subTest(color=color, container=name):
+                    view = _View(source, color=color)
+                    result = view.toggle(("content", name))
+                    token = pair[0] + "..." + pair[1]
+                    self.assertIn(token, strip_ansi(result.text))
+                    self.assertFalse(any(cell.text == "." for cell in result.characters))
+                    opening = result.cursor
+                    if color:
+                        self.assertEqual(styled_text(result.text, "7"), pair)
+                        self.assertEqual(styled_text(result.text, "4"), pair[0])
+                        self.assertNotIn("...", styled_text(result.text, "2"))
+                        self.assertEqual(result.text.count("\x1b[0m.\x1b[0m"), 3)
+                    result = view.step("cursor_right")
+                    self.assertEqual(result.cursor.line_index, opening.line_index)
+                    self.assertEqual(result.cursor.column, opening.column + 4)
+                    if color:
+                        self.assertEqual(styled_text(result.text, "7"), pair)
+                        self.assertEqual(styled_text(result.text, "4"), pair[1])
+                    else:
+                        cell = next(cell for cell in result.characters
+                                    if cell.position == result.cursor)
+                        self.assertEqual(result.text.splitlines()[cell.screen_row + 1],
+                                         " " * cell.position.column + "^")
+                    self.assertEqual(view.step("cursor_left").cursor, opening)
+                    for size in ((12, 4), (16, 8), (24, 12), (80, 24)):
+                        view.size = size
+                        frame = strip_ansi(view.render().text).splitlines()
+                        self.assertLessEqual(len(frame), size[1])
+                        self.assertTrue(all(_text_cells(line) <= size[0] for line in frame))
 
     def test_nested_folds_survive_parent_reopen_and_mode_changes(self):
         view = _View(_source({"content": {"child": [1, 2], "tail": 3}, "hidden": 4}))
@@ -256,10 +292,10 @@ class FoldingTests(unittest.TestCase):
         view.toggle(parent.path)
         self.assertEqual(view.state.folds, frozenset({child, parent}))
         result = view.toggle(parent.path)
-        self.assertIn('"child": […],', result.text)
+        self.assertIn('"child": [...],', result.text)
         self.assertEqual(view.state.folds, frozenset({child}))
-        self.assertIn('"child": […],', view.step("toggle_mode").text)
-        self.assertIn('"child": […],', view.step("toggle_mode").text)
+        self.assertIn('"child": [...],', view.step("toggle_mode").text)
+        self.assertIn('"child": [...],', view.step("toggle_mode").text)
 
     def test_fold_paths_are_per_record_and_can_target_a_later_visible_record(self):
         source = _source({"content": [1]}, {"content": [2]})
@@ -269,7 +305,7 @@ class FoldingTests(unittest.TestCase):
         self.assertEqual(view.state.selected_index, 0)
         self.assertIn("1", view.render().text)
         result = view.step("down")
-        self.assertIn('"content": […]', result.text)
+        self.assertIn('"content": [...]', result.text)
         view.step("up")
         self.assertFalse(next(item for item in view.render().containers
                               if item.identity == FoldIdentity(0, ("content",))).folded)
@@ -280,12 +316,12 @@ class FoldingTests(unittest.TestCase):
         digest = hashlib.sha256(source).digest()
         view = _View(source)
         result = view.toggle(("content", "child"))
-        self.assertIn('"child": [expanded JSON string ×1] […]', result.text)
+        self.assertIn('"child": [expanded JSON string ×1] [...]', result.text)
         self.assertIn("JSON display 2 expanded", result.text)
         result = view.toggle(("content",))
-        self.assertIn('"content": [expanded JSON string ×1] {…}', result.text)
+        self.assertIn('"content": [expanded JSON string ×1] {...}', result.text)
         result = view.toggle(("content",))
-        self.assertIn('"child": [expanded JSON string ×1] […]', result.text)
+        self.assertIn('"child": [expanded JSON string ×1] [...]', result.text)
         self.assertEqual(view.snapshot.records[0].value, value)
         self.assertEqual(hashlib.sha256(source).digest(), digest)
 
@@ -306,8 +342,8 @@ class FoldingTests(unittest.TestCase):
         first, second = FakeHost(("toggle_fold", "close")), FakeHost(("close",))
         view_jsonl(source, ViewerSpec("s", "c", "a"), first)
         view_jsonl(source, ViewerSpec("s", "c", "a"), second)
-        self.assertIn("{…}", first.frames[-1])
-        self.assertNotIn("{…}", second.frames[-1])
+        self.assertIn("{...}", first.frames[-1])
+        self.assertNotIn("{...}", second.frames[-1])
         self.assertEqual((first.close_calls, second.close_calls), (1, 1))
 
 
@@ -359,15 +395,15 @@ class CursorSearchAndInputTests(unittest.TestCase):
         result = view.step("toggle_fold")
         identity = FoldIdentity(0, ("content", "items"))
         self.assertIn(identity, view.state.folds)
-        self.assertIn('"items": […]', result.text)
+        self.assertIn('"items": [...]', result.text)
         self.assertNotIn("⟦needle⟧", result.text)
         self.assertIn("1/2 occurrences", result.text)
         for event in ("cursor_right", "cursor_left", "unknown"):
             result = view.step(event)
             self.assertIn(identity, view.state.folds)
-            self.assertIn('"items": […]', result.text)
+            self.assertIn('"items": [...]', result.text)
         view.size = (80, 14)
-        self.assertIn('"items": […]', view.render().text)
+        self.assertIn('"items": [...]', view.render().text)
         result = view.step("next_match")
         self.assertNotIn(identity, view.state.folds)
         self.assertIn("2/2 occurrences", result.text)
@@ -379,7 +415,7 @@ class CursorSearchAndInputTests(unittest.TestCase):
         view.toggle(("content",))
         result = view.step("search\tneedle")
         self.assertEqual(view.state.folds, frozenset({FoldIdentity(0, ("content", "needle"))}))
-        self.assertIn('"⟦needle⟧": […]', result.text)
+        self.assertIn('"⟦needle⟧": [...]', result.text)
 
     def test_encoded_search_reveal_and_cursor_inverse_share_readable_first_character(self):
         source = _source({"content": json.dumps({"items": ["界e\u0301 needle"]}, ensure_ascii=False)})
@@ -387,7 +423,7 @@ class CursorSearchAndInputTests(unittest.TestCase):
         view.toggle(("content", "items"))
         result = view.step("search\t界e\u0301")
         self.assertIn("⟦界e\u0301⟧", strip_ansi(result.text))
-        self.assertEqual(styled_text(result.text, "7"), "界")
+        self.assertEqual(styled_text(result.text, "7"), "[界]")
         self.assertIn("界e\u0301", styled_text(result.text, "43"))
         cell = next(cell for cell in result.characters if cell.position == result.cursor)
         self.assertEqual(cell.text, "界")
@@ -425,7 +461,7 @@ class CursorSearchAndInputTests(unittest.TestCase):
                     self.assertEqual(focused.text, "\\")
                     self.assertEqual(_text_cells(focused.text), 1)
                     if color:
-                        self.assertEqual(styled_text(result.text, "7"), "\\")
+                        self.assertEqual(styled_text(result.text, "7"), "{\\}")
                         self.assertIn(escaped, styled_text(result.text, "43"))
                     else:
                         self.assertEqual(plain.splitlines()[focused.screen_row + 1],

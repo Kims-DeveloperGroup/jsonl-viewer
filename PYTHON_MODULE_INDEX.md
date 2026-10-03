@@ -146,9 +146,10 @@ unit imports Story or any third-party runtime package.
   Nonempty folded containers retain opener/closer, keys, commas, and expansion
   cues; hidden children are still traversed to preserve expansion budgets and
   aggregate facts. Focus metadata excludes gutters, indentation, and display
-  annotations. ANSI paints a readable inverse-video character cluster and bold
-  matching delimiters; plain output reserves a caret row, intentionally reducing
-  data capacity. At minimum height it retains one header, data row, caret, and
+  annotations. ANSI paints a readable inverse-video character cluster and
+  bold inverse matching delimiters, with underline for cursor overlap. Folded placeholders
+  use full-contrast `{...}` / `[...]`; plain output reserves a caret row,
+  intentionally reducing data capacity. At minimum height it retains one header, data row, caret, and
   status row. Search windows keep combining marks with their base character.
 
 - **Source:** `src/jsonl_viewer/_render.py`

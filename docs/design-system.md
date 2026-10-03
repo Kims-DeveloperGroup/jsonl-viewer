@@ -133,8 +133,8 @@ host.
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
 | footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, persistent footer help, and draft editing hint |
-| character cursor | aligned `^` on the following row | inverse video | focused visible JSON character; the character remains readable |
-| matching container | `{}` / `[]` | bold | visible opening and closing delimiters of the innermost containing container |
+| character cursor | aligned `^` on the following row | inverse video; also underlined on a matching delimiter | focused visible JSON character; the character remains readable |
+| matching container | `{}` / `[]` | bold inverse video | visible opening and closing delimiters of the innermost containing container |
 | plain structure | JSON punctuation or help text | `0` reset/default | braces, brackets, commas, colons, whitespace, and Help command descriptions |
 
 Every colored role has words, JSON punctuation, a gutter marker, or both. Color
@@ -307,11 +307,15 @@ Combining characters stay attached to their display cell, and wide characters
 occupy their full terminal width. Escaped controls remain visible safe text.
 
 Parsed container metadata determines which opening and closing delimiters are
-bold in ANSI. The innermost container containing the focused character wins;
+bold and inverse in ANSI. When the cursor overlaps one of these delimiters,
+underline additionally distinguishes its position. The innermost container
+containing the focused character wins;
 quoted punctuation is ordinary string content. Only visible delimiters receive
 emphasis, without scrolling to reveal a partner.
 
-Enter folds a nonempty object to `{…}` or array to `[…]`. Keys, commas, and
+Enter folds a nonempty object to `{...}` or array to `[...]`. Three full-contrast
+dots remain non-navigable annotations, distinct from dim Unicode ellipses used
+for clipping and string previews. Keys, commas, and
 encoded-JSON expansion cues remain present. The cursor moves to the opening
 delimiter after toggling. Folds are immutable transient identities scoped by
 record and structural path; reopening a parent preserves folds inside it.
