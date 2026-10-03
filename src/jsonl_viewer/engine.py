@@ -301,15 +301,19 @@ def _sibling_transition(state: ViewState, event: str, rendered: RenderResult | N
     if not siblings:
         return state
     if owner is None:
-        target = siblings[0 if event == "next_sibling" else -1]
+        index = 0 if event == "next_sibling" else len(siblings) - 1
     else:
-        index = siblings.index(owner) + (1 if event == "next_sibling" else -1)
-        if not 0 <= index < len(siblings):
-            return state
-        target = siblings[index]
+        index = (siblings.index(owner) + (1 if event == "next_sibling" else -1)) % len(siblings)
+    target = siblings[index]
+    message = (
+        "Only sibling." if len(siblings) == 1 else
+        "First sibling." if index == 0 else
+        "Last sibling." if index == len(siblings) - 1 else None
+    )
     return replace(state, selected_index=target.identity.record_index,
                    cursor=None, preferred_column=None, focus_container=None,
-                   focus_property=target.identity, reveal_match=False)
+                   focus_property=target.identity, reveal_match=False,
+                   message=message, message_is_error=False)
 
 
 def _unfold_match(state: ViewState, search: SearchState) -> frozenset[FoldIdentity]:
@@ -355,6 +359,8 @@ def _semantic_transition(
     if event == "help":
         return replace(state, help_visible=True, message=None), False
     if event == "cancel":
+        if state.message in {"First sibling.", "Last sibling.", "Only sibling."}:
+            return _clear_message(state), False
         if state.search is not None:
             return replace(state, search=None, message="Search cleared."), False
         if state.message is not None:

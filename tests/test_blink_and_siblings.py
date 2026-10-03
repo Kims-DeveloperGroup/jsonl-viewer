@@ -126,22 +126,24 @@ class SiblingTests(unittest.TestCase):
             self.assertEqual(cell.text, text)
         return result
 
-    def test_root_entry_boundaries_and_key_order_do_not_cross_records(self):
+    def test_root_entry_cycles_follow_displayed_order_without_crossing_records(self):
         view = _View(_source({'content': 1, 'request_type': 2}, {'content': 3}))
         view.step('toggle_mode')
-        view.step('next_sibling')
-        self.assert_key(view, ('request_type',), 'r')
-        before = view.state.cursor
-        view.step('previous_sibling')
-        self.assertEqual(view.state.cursor, before)
-        view.step('next_sibling')
-        self.assert_key(view, ('content',), 'c')
-        before = view.state.cursor
-        view.step('next_sibling')
-        self.assertEqual(view.state.cursor, before)
+        for event, path, notice in (
+            ('next_sibling', 'request_type', 'First sibling.'),
+            ('previous_sibling', 'content', 'Last sibling.'),
+            ('next_sibling', 'request_type', 'First sibling.'),
+            ('next_sibling', 'content', 'Last sibling.'),
+            ('next_sibling', 'request_type', 'First sibling.'),
+        ):
+            view.step(event)
+            self.assert_key(view, (path,), path[0], record=0)
+            self.assertEqual(view.state.message, notice)
+            self.assertFalse(view.state.message_is_error)
         view.focus(view.opener())
         view.step('previous_sibling')
         self.assert_key(view, ('content',), 'c')
+        self.assertEqual(view.state.message, 'Last sibling.')
 
     def test_nested_values_arrays_and_container_delimiters_use_owning_property(self):
         value = {'content': {'before': 0, 'group': {'one': 'needle', 'two': [7, 8]},
@@ -294,3 +296,108 @@ class SiblingTests(unittest.TestCase):
         self.assertEqual(focused.delimiter, 'open')
         self.assertEqual(focused.container.path, ('content', 'second'))
         self.assertIn('"second": [...]', strip_ansi(folded.text))
+
+    def test_arrival_notices_clear_on_interior_and_ordinary_cursor_movement(self):
+        source = _source({'content': {'alpha': 1, 'beta': 2, 'gamma': 3}})
+        for color in (False, True):
+            with self.subTest(color=color):
+                view = _View(source, color=color, size=(48, 12))
+                view.step('search\tbeta')
+                for event, key, notice in (
+                    ('previous_sibling', 'alpha', 'First sibling.'),
+                    ('previous_sibling', 'gamma', 'Last sibling.'),
+                    ('next_sibling', 'alpha', 'First sibling.'),
+                    ('next_sibling', 'beta', None),
+                    ('next_sibling', 'gamma', 'Last sibling.'),
+                    ('previous_sibling', 'beta', None),
+                ):
+                    result = view.step(event)
+                    self.assert_key(view, ('content', key), key[0])
+                    self.assertEqual(view.state.message, notice)
+                    if notice:
+                        self.assertIn(notice, strip_ansi(result.text))
+                view.step('next_sibling')
+                view.step('cursor_right')
+                self.assertIsNone(view.state.message)
+
+    def test_singleton_focuses_key_and_root_empty_folded_or_unowned_stays_inert(self):
+        view = _View(_source({'content': {'only': 'value'}}))
+        view.step('search\tvalue')
+        for event in ('next_sibling', 'previous_sibling'):
+            result = view.step(event)
+            self.assert_key(view, ('content', 'only'), 'o')
+            self.assertEqual(view.state.message, 'Only sibling.')
+            self.assertIn('Only sibling.', result.text)
+        for value in ({}, [], 1, [1, 2]):
+            view = _View(_source(value))
+            before = view.render()
+            self.assertEqual(view.step('next_sibling').text, before.text)
+            self.assertEqual(view.step('previous_sibling').text, before.text)
+        view = _View(_source({'content': {'only': 1}}))
+        before = view.toggle(())
+        self.assertEqual(view.step('next_sibling').text, before.text)
+        self.assertIsNone(view.state.message)
+
+    def test_notice_survives_idle_and_resize_and_escape_preserves_active_search(self):
+        source = _source({'content': {'first': 'needle', 'last': 'needle'}})
+        view = _View(source)
+        view.step('search\tneedle')
+        search = view.state.search
+        view.step('previous_sibling')
+        self.assertEqual(view.state.message, 'Last sibling.')
+        position, folds = view.state.cursor, view.state.folds
+        view.step('idle')
+        self.assertEqual((view.state.cursor, view.state.folds, view.state.search),
+                         (position, folds, search))
+        self.assertEqual(view.state.message, 'Last sibling.')
+        view.size = (24, 9)
+        self.assertIn('Last sibling.', view.render().text)
+        view.step('key\tescape')
+        self.assertIsNone(view.state.message)
+        self.assertEqual(view.state.search, search)
+        view.step('key\tescape')
+        self.assertIsNone(view.state.search)
+        self.assertEqual(view.state.message, 'Search cleared.')
+        host = _ObservedHost(('search\tneedle', 'previous_sibling', 'idle', 'text\t/', 'close'))
+        view_jsonl(source, ViewerSpec('s', 'c', 'a', input_protocol='keys'), host)
+        self.assertIn('Last sibling.', host.observed[2])
+        self.assertIn('Last sibling.', host.observed[3])
+        self.assertIn('Search query:', host.observed[4])
+        self.assertNotIn('Last sibling.', host.observed[4])
+
+    def test_encoded_folded_offscreen_siblings_cycle_without_changing_search_or_folds(self):
+        payload = {'first': list(range(30)), 'middle': 2, 'last': [3, 4]}
+        source = _source({'content': json.dumps(payload)}, {'content': payload})
+        view = _View(source, size=(32, 10))
+        view.step('search\tlast')
+        view.toggle(('content', 'last'))
+        view.step('search\tlast')
+        search, folds = view.state.search, view.state.folds
+        for event, key in (('next_sibling', 'first'), ('previous_sibling', 'last'),
+                           ('previous_sibling', 'middle'), ('previous_sibling', 'first')):
+            view.step(event)
+            self.assert_key(view, ('content', key), key[0], record=0)
+            self.assertEqual(view.state.search, search)
+            self.assertEqual(view.state.folds, folds)
+        self.assertEqual(view.snapshot.records[0].value, json.loads(source.splitlines()[0]))
+
+    def test_all_key_protocols_wrap_and_batched_cycles_keep_final_notice(self):
+        source = _source({'content': {'first': 1, 'last': 2}})
+        for forward, backward in (('next_sibling', 'previous_sibling'),
+                                  ('text\tJ', 'text\tK'), ('line\tJ', 'line\tK')):
+            view = _View(source)
+            view.step('search\tlast')
+            view.step(forward)
+            self.assert_key(view, ('content', 'first'), 'f')
+            self.assertEqual(view.state.message, 'First sibling.')
+            view.step(backward)
+            self.assert_key(view, ('content', 'last'), 'l')
+            self.assertEqual(view.state.message, 'Last sibling.')
+        combined, separate = _View(source), _View(source)
+        for view in (combined, separate):
+            view.step('search\tfirst')
+        actual = combined.step('text\tJJJKK')
+        for key in 'JJJKK':
+            expected = separate.step('text\t' + key)
+        self.assertEqual(actual.text, expected.text)
+        self.assertEqual(combined.state, separate.state)

@@ -209,6 +209,16 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
+### New in 0.5.1
+
+`J`/`K` now cycle through the nearest object's displayed sibling properties.
+The footer shows `First sibling.` or `Last sibling.` when a jump reaches an
+endpoint, including after wrapping. A single-property group shows `Only sibling.`.
+These notices stay visible during cursor blinking and redraws, clear when moving
+to an interior sibling or using ordinary cursor movement, and can be dismissed
+with Escape without clearing an active search. Prompts retain their own footer.
+Lowercase `h/j/k/l` keep their existing movement behavior.
+
 ### New in 0.5.0
 
 The main-view cursor blinks every 500 ms while idle in the standalone terminal
@@ -226,7 +236,8 @@ keys and reveals clipped key starts without opening folded values, changing
 search counts, or promoting Simple mode. The destination is the first displayed
 character inside the key's quotes, or the opening quote for an empty key.
 
-Sibling movement stops at either end and never crosses records. A container's
+Sibling movement is circular: `J` wraps from the last sibling to the first, and
+`K` wraps from the first to the last, without crossing records. A container's
 braces/brackets belong to its owning property; array contents use the nearest
 owning property. At a root object's delimiters, `J` selects its first key and `K`
 its last. A folded or empty root has no reachable keys, so these jumps do nothing.

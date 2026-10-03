@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jsonl-viewer"
-version = "0.5.0"
+version = "0.5.1"
 description = "Read-only transient structured JSONL viewer for Python terminals"
 readme = "README.md"
 requires-python = ">=3.11"
