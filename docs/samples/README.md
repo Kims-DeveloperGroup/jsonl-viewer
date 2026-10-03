@@ -6,6 +6,8 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `verbose.txt`
 - `search-matches.txt` — one focused keyword occurrence, other matching record
   markers, and an occurrence count that includes keys and values
+- `sibling-navigation.txt` — key focus after a structural sibling jump
+- `cursor-idle.txt` — hidden caret phase with unchanged reserved row
 - `cursor-folding.txt` — focused opening delimiter and a folded record object
 - `folded-search.txt` — manual folding hides the active hit while retaining its occurrence count
 - `nested-expanded-json.txt` — recursively expanded provider content and
@@ -27,3 +29,7 @@ itself, so their visible data-row counts intentionally differ.
 The sample files are intentionally not screenshots. They remain searchable,
 reviewable, accessible without color, and byte-synchronized with the behavior
 that produces them.
+
+Samples use the visible cursor phase unless their name specifies otherwise.
+Idle-phase verification keeps the same caret row and data geometry; interactive
+blinking is driven by host idle events, not wall-clock sampling of snapshots.

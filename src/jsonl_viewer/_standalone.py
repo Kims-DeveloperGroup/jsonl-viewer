@@ -166,7 +166,12 @@ class _TerminalHost:
 
     def _raw_event(self) -> str | None:
         assert self._descriptor is not None
+        deadline = time.monotonic() + 0.5
         while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([self._descriptor], [], [], remaining)
+            if not ready:
+                return "idle"
             value = os.read(self._descriptor, 1)
             if not value:
                 self._decoder.decode(b"", final=True)

@@ -13,6 +13,8 @@ renderer, not illustrative mockups:
 - [Simple](samples/simple.txt)
 - [Verbose](samples/verbose.txt)
 - [current and non-current search matches](samples/search-matches.txt)
+- [sibling key navigation](samples/sibling-navigation.txt)
+- [idle cursor phase](samples/cursor-idle.txt)
 - [cursor and root folding](samples/cursor-folding.txt)
 - [manual folding of an active search hit](samples/folded-search.txt)
 - [recursively expanded provider JSON](samples/nested-expanded-json.txt)
@@ -44,7 +46,7 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 * 2 │   "content": "The field is missing."
 * 2 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
+h/j/k/l cursor • J/K siblings • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
 ```
 
 That fixture uses the default `Conversation` label and no subject. Supplying
@@ -262,7 +264,7 @@ opening another editor lifecycle. The standalone adapter uses `"keys"` for
 both physical key input and ordinary lines.
 
 The ordinary-line grammar accepts `g LINE`, `/ QUERY`,
-`// QUERY`, `h/j/k/l`, `fold`, `down`, `up`, `pgdn`, `pgup`, `n`, `N`, `m`,
+`// QUERY`, `h/j/k/l`, `J`/`K`, `fold`, `down`, `up`, `pgdn`, `pgup`, `n`, `N`, `m`,
 `?`/`help`, `c`/`clear`, `q`/`quit`, and `esc`. The entire trimmed text
 after the search prefix is the full-text query, including spaces. A separating
 space after `/` or `//` is required before a query in this mode. Textual
@@ -291,6 +293,28 @@ owns application focus and restores the surrounding view from `close_view()`;
 the standalone adapter owns and restores its alternate-screen, hardware cursor
 visibility, and terminal mode. The printable draft cursor provides a non-color
 focus cue without transferring terminal ownership to the engine.
+
+## Cursor blinking and sibling keys
+
+Version 0.5.0 adds `J`/`K` in main-view key and ordinary-line input, with semantic
+`next_sibling`/`previous_sibling` equivalents. The destination is the first
+character inside an adjacent sibling key's quotes (opening quote if empty).
+Navigation uses the nearest containing object's displayed order and scrolls or
+reveals clipping when necessary. Existing folds, search occurrence selection and
+counts, and mode remain unchanged. Endpoints clamp; navigation never crosses a
+record. Unfolded root object delimiters enter the first/last property; folded or
+empty roots have no reachable keys. Other container
+delimiters and array content navigate their nearest owning property. Encoded JSON
+participates in the same structural navigation. Prompt input remains literal.
+
+Interactive hosts emit `idle` at 500 ms intervals without input. Cursor emphasis
+alternates without hiding JSON text or blinking the matching-container pair.
+An overlapping bracket cursor blinks its distinguishing underline. Input resets
+the visible phase, and help/prompts suspend blinking. The NO_COLOR caret's blank
+phase retains exactly the same row and geometry. Line-mode and legacy hosts stay
+static. Cached frame phases avoid repeating bounded JSON projection on idle;
+resizes refresh geometry and clamp focus. No hardware blink controls or additional
+host methods are used.
 
 ## Character cursor and folding
 

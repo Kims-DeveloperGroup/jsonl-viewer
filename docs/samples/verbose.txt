@@ -15,4 +15,4 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
   2 │   "latency_ms": 23
   2 │ }
 Switched to Verbose mode.
-h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? hel…
+? help • q close

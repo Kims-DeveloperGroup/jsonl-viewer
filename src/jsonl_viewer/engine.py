@@ -42,7 +42,7 @@ def _line_action(value: str) -> str:
         "q": "close", "quit": "close", "j": "cursor_down", "down": "down",
         "k": "cursor_up", "up": "up", "pgdn": "page_down", "pgup": "page_up",
         "n": "next_match", "N": "previous_match", "m": "toggle_mode",
-        "h": "cursor_left", "l": "cursor_right", "?": "help", "help": "help", "fold": "toggle_fold", "esc": "cancel",
+        "h": "cursor_left", "l": "cursor_right", "J": "next_sibling", "K": "previous_sibling", "?": "help", "help": "help", "fold": "toggle_fold", "esc": "cancel",
         "c": "clear_search", "clear": "clear_search",
     }
     if command in mapping:
@@ -165,13 +165,13 @@ def _transition(
 
     def projection_key(current: ViewState) -> tuple:
         return (current.selected_index, current.record_line_offset, current.mode,
-                current.search, current.folds, current.help_visible, current.focus_container)
+                current.search, current.folds, current.help_visible, current.focus_container, current.focus_property)
 
     def action(current: ViewState, value: str | None) -> tuple[ViewState, bool]:
         nonlocal rendered, rendered_state
         if (rendered is not None and value in {
                 "cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold",
-                "page_up", "page_down",
+                "page_up", "page_down", "next_sibling", "previous_sibling",
             } and projection_key(current) != projection_key(rendered_state)):
             # A text envelope may combine mode/fold/navigation and movement.
             # Refresh its structural positions before consuming another cursor key.
@@ -210,7 +210,7 @@ def _transition(
             bindings = {
                 "q": "close", "j": "cursor_down", "k": "cursor_up", " ": "page_down",
                 "b": "page_up", "n": "next_match", "N": "previous_match",
-                "m": "toggle_mode", "h": "cursor_left", "l": "cursor_right", "?": "help",
+                "m": "toggle_mode", "h": "cursor_left", "l": "cursor_right", "J": "next_sibling", "K": "previous_sibling", "?": "help",
                 "c": "clear_search", "/": "begin_search", "g": "begin_goto",
             }
             for index, character in enumerate(payload):
@@ -267,7 +267,7 @@ def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | No
             return state
         folds = state.folds.symmetric_difference((container.identity,))
         return replace(state, folds=folds, cursor=None, preferred_column=None,
-                       focus_container=container.identity, reveal_match=False,
+                       focus_container=container.identity, focus_property=None, reveal_match=False,
                        message=None, message_is_error=False)
     rows = sorted({cell.screen_row for cell in characters})
     preferred = current.position.column if state.preferred_column is None else state.preferred_column
@@ -283,6 +283,33 @@ def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | No
         destination = min(row, key=lambda cell: (abs(cell.position.column - preferred), cell.position.column))
     return replace(state, cursor=destination.position, preferred_column=preferred,
                    focus_container=None, reveal_match=False, message=None, message_is_error=False)
+
+
+def _sibling_transition(state: ViewState, event: str, rendered: RenderResult | None) -> ViewState:
+    if rendered is None:
+        return state
+    cell = next((cell for cell in rendered.characters if cell.position == state.cursor), None)
+    if cell is None:
+        return state
+    owner = next((item for item in rendered.properties if item.identity == cell.property), None)
+    root_entry = cell.property is None and cell.container == FoldIdentity(cell.position.record_index, ()) and cell.delimiter is not None
+    if owner is None and not root_entry:
+        return state
+    siblings = [item for item in rendered.properties
+                if item.identity.record_index == cell.position.record_index
+                and item.parent == (() if owner is None else owner.parent)]
+    if not siblings:
+        return state
+    if owner is None:
+        target = siblings[0 if event == "next_sibling" else -1]
+    else:
+        index = siblings.index(owner) + (1 if event == "next_sibling" else -1)
+        if not 0 <= index < len(siblings):
+            return state
+        target = siblings[index]
+    return replace(state, selected_index=target.identity.record_index,
+                   cursor=None, preferred_column=None, focus_container=None,
+                   focus_property=target.identity, reveal_match=False)
 
 
 def _unfold_match(state: ViewState, search: SearchState) -> frozenset[FoldIdentity]:
@@ -306,6 +333,8 @@ def _semantic_transition(
     malformed: bool = False,
     rendered: RenderResult | None = None,
 ) -> tuple[ViewState, bool]:
+    if event == "idle":
+        return state, False
     if event is None or event == "close":
         return state, True
     if malformed and event not in {"help", "cancel"}:
@@ -334,6 +363,8 @@ def _semantic_transition(
     if event == "clear_search":
         return replace(state, search=None, message="Search cleared."), False
 
+    if event in {"next_sibling", "previous_sibling"}:
+        return _sibling_transition(state, event, rendered), False
     if not snapshot.records:
         return _message(state, "The immutable snapshot has no records."), False
 
@@ -356,7 +387,7 @@ def _semantic_transition(
             state,
             selected_index=selected,
             record_line_offset=0,
-            cursor=None, preferred_column=None, focus_container=None,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
             message=None,
         ), False
 
@@ -366,13 +397,13 @@ def _semantic_transition(
         if event == "page_up":
             if state.record_line_offset > 0:
                 offset = max(0, state.record_line_offset - step)
-                return replace(state, record_line_offset=offset, cursor=None, preferred_column=None, focus_container=None, message=None), False
+                return replace(state, record_line_offset=offset, cursor=None, preferred_column=None, focus_container=None, focus_property=None, message=None), False
             if state.selected_index > 0:
                 return replace(
                     state,
                     selected_index=state.selected_index - 1,
                     record_line_offset=0,
-                    cursor=None, preferred_column=None, focus_container=None,
+                    cursor=None, preferred_column=None, focus_container=None, focus_property=None,
                     message=None,
                 ), False
             return _clear_message(state), False
@@ -380,7 +411,7 @@ def _semantic_transition(
             return replace(
                 state,
                 record_line_offset=state.record_line_offset + step,
-                cursor=None, preferred_column=None, focus_container=None,
+                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
                 message=None,
             ), False
         if state.selected_index + 1 < len(snapshot.records):
@@ -388,7 +419,7 @@ def _semantic_transition(
                 state,
                 selected_index=state.selected_index + 1,
                 record_line_offset=0,
-                cursor=None, preferred_column=None, focus_container=None,
+                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
                 message=None,
             ), False
         return _clear_message(state), False
@@ -411,7 +442,7 @@ def _semantic_transition(
             state,
             mode=mode,
             record_line_offset=0,
-            cursor=None, preferred_column=None, focus_container=None,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
             reveal_match=False,
             message=f"Switched to {mode.value} mode.",
         ), False
@@ -432,7 +463,7 @@ def _semantic_transition(
             state,
             selected_index=selected,
             record_line_offset=0,
-            cursor=None, preferred_column=None, focus_container=None,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
             mode=ViewMode.VERBOSE if promote else state.mode,
             search=search,
             reveal_match=True, folds=_unfold_match(state, search),
@@ -460,7 +491,7 @@ def _semantic_transition(
                     state,
                     selected_index=index,
                     record_line_offset=0,
-                    cursor=None, preferred_column=None, focus_container=None,
+                    cursor=None, preferred_column=None, focus_container=None, focus_property=None,
                     reveal_match=False,
                     message=f"Moved to source line {source_line}.",
                 ), False
@@ -507,7 +538,7 @@ def _semantic_transition(
             state,
             selected_index=selected,
             record_line_offset=0,
-            cursor=None, preferred_column=None, focus_container=None,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
             mode=mode,
             search=search,
             reveal_match=True, folds=_unfold_match(state, search),
@@ -550,30 +581,44 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
             diagnostic = exc.diagnostic
 
         state = ViewState()
+        rendered = None
+        geometry = None
+        cursor_visible = True
+        present_needed = True
         while not closed:
-            columns, rows = host.terminal_size()
-            rendered = render_frame(
-                spec,
-                state,
-                snapshot=snapshot,
-                diagnostic=diagnostic,
-                columns=columns,
-                rows=rows,
-                color=bool(host.color_enabled()),
-            )
-            host.present(rendered.text)
-            state = replace(state, record_line_offset=rendered.record_line_offset,
-                            cursor=rendered.cursor if rendered.characters else state.cursor,
-                            focus_container=None)
+            current_geometry = (*host.terminal_size(), bool(host.color_enabled()))
+            if rendered is None or current_geometry != geometry:
+                columns, rows, color = current_geometry
+                rendered = render_frame(spec, state, snapshot=snapshot, diagnostic=diagnostic,
+                                        columns=columns, rows=rows, color=color)
+                geometry = current_geometry
+                present_needed = True
+                state = replace(state, record_line_offset=rendered.record_line_offset,
+                                cursor=rendered.cursor if rendered.characters else state.cursor,
+                                focus_container=None)
+            if present_needed:
+                host.present(rendered.text if cursor_visible else (rendered.idle_text or rendered.text))
             event = host.read_event()
+            if event == "idle":
+                present_needed = False
+                if state.prompt is None and not state.help_visible and rendered.characters:
+                    cursor_visible = not cursor_visible
+                    present_needed = True
+                continue
+            cursor_visible = True
+            present_needed = True
+            previous = state
             state, closed = _transition(
-                state,
-                event,
-                snapshot,
-                spec,
-                page_size=rendered.body_rows,
+                state, event, snapshot, spec, page_size=rendered.body_rows,
                 selected_line_count=rendered.selected_line_count,
                 malformed=diagnostic is not None, rendered=rendered,
             )
+            if state.focus_property == previous.focus_property and (
+                state.selected_index != previous.selected_index
+                or state.record_line_offset != previous.record_line_offset
+                or state.mode != previous.mode or state.search != previous.search
+                or state.reveal_match):
+                state = replace(state, focus_property=None)
+            rendered = None
     finally:
         host.close_view()

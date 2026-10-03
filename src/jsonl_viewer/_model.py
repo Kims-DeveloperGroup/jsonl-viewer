@@ -108,6 +108,13 @@ class VisibleCharacter:
     container: FoldIdentity | None = None
     delimiter: str | None = None
     search_focus: bool = False
+    property: FoldIdentity | None = None
+    key_anchor: bool = False
+
+@dataclass(frozen=True, slots=True)
+class PropertyMetadata:
+    identity: FoldIdentity
+    parent: JSONPath
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +139,7 @@ class ViewState:
     preferred_column: int | None = None
     folds: frozenset[FoldIdentity] = frozenset()
     focus_container: FoldIdentity | None = None
+    focus_property: FoldIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,3 +154,5 @@ class RenderResult:
     columns: int = 80
     rows: int = 24
     color: bool = False
+    properties: tuple[PropertyMetadata, ...] = ()
+    idle_text: str | None = None

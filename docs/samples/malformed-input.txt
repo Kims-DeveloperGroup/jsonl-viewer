@@ -4,4 +4,4 @@ Session: session-01 • Conversation: conversation-01 • Agent: agent-01
 Source line 1 contains malformed JSON.
 Source bytes are unchanged. Press ? for help or q to close.
 Immutable snapshot • no persistent viewer state
-h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N …
+? help • q close
