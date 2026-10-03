@@ -301,8 +301,12 @@ Version 0.5.0 adds `J`/`K` in main-view key and ordinary-line input, with semant
 character inside an adjacent sibling key's quotes (opening quote if empty).
 Navigation uses the nearest containing object's displayed order and scrolls or
 reveals clipping when necessary. Existing folds, search occurrence selection and
-counts, and mode remain unchanged. Endpoints clamp; navigation never crosses a
-record. Unfolded root object delimiters enter the first/last property; folded or
+counts, and mode remain unchanged. Since 0.5.1, endpoints wrap within the same
+sibling group: `J` moves last to first and `K` first to last, never crossing a
+record. Arrival at either endpoint shows `First sibling.` or `Last sibling.`;
+a single-property group shows `Only sibling.`. These non-error footer notices
+survive idle and redraw, clear on interior sibling or ordinary cursor movement,
+and Escape dismisses them before clearing an active search. Unfolded root object delimiters enter the first/last property; folded or
 empty roots have no reachable keys. Other container
 delimiters and array content navigate their nearest owning property. Encoded JSON
 participates in the same structural navigation. Prompt input remains literal.
