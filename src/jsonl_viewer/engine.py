@@ -359,7 +359,10 @@ def _semantic_transition(
     if event == "help":
         return replace(state, help_visible=True, message=None), False
     if event == "cancel":
-        if state.message in {"First sibling.", "Last sibling.", "Only sibling."}:
+        if state.message in {
+            "First sibling.", "Last sibling.", "Only sibling.",
+            "First record.", "Last record.", "Only record.",
+        }:
             return _clear_message(state), False
         if state.search is not None:
             return replace(state, search=None, message="Search cleared."), False
@@ -380,55 +383,39 @@ def _semantic_transition(
 
     if event in {"cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold"}:
         return _cursor_transition(state, event, rendered), False
+    if event in {"page_up", "page_down"}:
+        state = replace(state, reveal_match=False)
+        step = max(1, page_size - 1)
+        offset = None
+        if event == "page_up" and state.record_line_offset > 0:
+            offset = max(0, state.record_line_offset - step)
+        elif event == "page_down" and state.record_line_offset + step < selected_line_count:
+            offset = state.record_line_offset + step
+        if offset is not None:
+            return replace(
+                state, record_line_offset=offset,
+                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+                message=None, message_is_error=False,
+            ), False
+        event = "up" if event == "page_up" else "down"
+
     if event in {"up", "down"}:
         state = replace(state, reveal_match=False)
         direction = -1 if event == "up" else 1
-        selected = min(
-            len(snapshot.records) - 1,
-            max(0, state.selected_index + direction),
+        count = len(snapshot.records)
+        selected = (state.selected_index + direction) % count
+        message = (
+            "Only record." if count == 1 else
+            "First record." if selected == 0 else
+            "Last record." if selected == count - 1 else None
         )
-        if selected == state.selected_index:
-            return _clear_message(state), False
         return replace(
             state,
             selected_index=selected,
             record_line_offset=0,
             cursor=None, preferred_column=None, focus_container=None, focus_property=None,
-            message=None,
+            message=message, message_is_error=False,
         ), False
-
-    if event in {"page_up", "page_down"}:
-        state = replace(state, reveal_match=False)
-        step = max(1, page_size - 1)
-        if event == "page_up":
-            if state.record_line_offset > 0:
-                offset = max(0, state.record_line_offset - step)
-                return replace(state, record_line_offset=offset, cursor=None, preferred_column=None, focus_container=None, focus_property=None, message=None), False
-            if state.selected_index > 0:
-                return replace(
-                    state,
-                    selected_index=state.selected_index - 1,
-                    record_line_offset=0,
-                    cursor=None, preferred_column=None, focus_container=None, focus_property=None,
-                    message=None,
-                ), False
-            return _clear_message(state), False
-        if state.record_line_offset + step < selected_line_count:
-            return replace(
-                state,
-                record_line_offset=state.record_line_offset + step,
-                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
-                message=None,
-            ), False
-        if state.selected_index + 1 < len(snapshot.records):
-            return replace(
-                state,
-                selected_index=state.selected_index + 1,
-                record_line_offset=0,
-                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
-                message=None,
-            ), False
-        return _clear_message(state), False
 
     if event == "toggle_mode":
         if (

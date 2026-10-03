@@ -270,7 +270,9 @@ unit imports Story or any third-party runtime package.
 - **State/resources:** Main-view character movement, record/page navigation,
   structural folding, sibling-property navigation, search and prompt editing stay
   engine-owned. `J/K` cycle sibling identities in rendered property order, focus the key,
-  and report endpoint notices; folds and occurrence counts remain unchanged. Hidden
+  and report endpoint notices; folds and occurrence counts remain unchanged.
+  Up/Down cycle source records, reset viewport/cursor, and report first/last/only
+  record notices; paging scrolls within a record before using that transition. Hidden
   folded descendants and Simple-mode exclusions are not navigation targets.
 - **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
   cached frame variants without rebuilding projections. Real input restores the

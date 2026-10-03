@@ -488,7 +488,7 @@ class StandaloneTests(unittest.TestCase):
                 moved, moved_end = self._pty_frame_containing(
                     master,
                     output,
-                    b"Record 2/2",
+                    b"Last record.",
                     start=restored_end,
                 )
                 self.assertIn("READ ONLY • VERBOSE".encode(), moved)
@@ -971,7 +971,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.5.1")
+        self.assertEqual(project["version"], "0.5.2")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
