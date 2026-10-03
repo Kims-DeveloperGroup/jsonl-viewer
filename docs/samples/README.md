@@ -6,7 +6,7 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `verbose.txt`
 - `search-matches.txt` — one focused keyword occurrence, other matching record
   markers, and an occurrence count that includes keys and values
-- `sibling-navigation.txt` — key focus after a structural sibling jump
+- `sibling-navigation.txt` — key focus and endpoint notice after a circular sibling jump
 - `cursor-idle.txt` — hidden caret phase with unchanged reserved row
 - `cursor-folding.txt` — focused opening delimiter and a folded record object
 - `folded-search.txt` — manual folding hides the active hit while retaining its occurrence count

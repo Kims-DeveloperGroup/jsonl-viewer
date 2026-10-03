@@ -269,8 +269,8 @@ unit imports Story or any third-party runtime package.
   `contracts`.
 - **State/resources:** Main-view character movement, record/page navigation,
   structural folding, sibling-property navigation, search and prompt editing stay
-  engine-owned. `J/K` resolve sibling identities in rendered property order and
-  focus the target key; folds and occurrence counts remain unchanged. Hidden
+  engine-owned. `J/K` cycle sibling identities in rendered property order, focus the key,
+  and report endpoint notices; folds and occurrence counts remain unchanged. Hidden
   folded descendants and Simple-mode exclusions are not navigation targets.
 - **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
   cached frame variants without rebuilding projections. Real input restores the
