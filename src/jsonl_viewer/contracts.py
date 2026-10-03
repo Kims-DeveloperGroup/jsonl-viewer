@@ -129,7 +129,11 @@ class ViewerHost(Protocol):
     an active prompt draft; main-view Escape retains semantic cancel behavior.
     Main-view character cursors and container folds are transient. Hosts may send
     ``cursor_left``, ``cursor_right``, ``cursor_up``, ``cursor_down``, and
-    ``toggle_fold`` semantic events. Plain frames reserve a caret row; ANSI frames
+    ``toggle_fold``, ``next_sibling``, and ``previous_sibling`` semantic events.
+    Interactive hosts may return ``idle`` after 500 ms without input; the engine
+    alternates cached cursor emphasis while leaving prompt/help frames steady.
+    Hosts that never return ``idle`` retain a steady cursor. Partial UTF-8 input
+    must remain buffered across idle timeouts. Plain frames reserve a caret row; ANSI frames
     use a readable inverse-video character cell.
     Prompts and their logical cursors are rendered in ordinary complete frames;
     hosts never acquire a second input lifecycle or edit a prompt buffer.

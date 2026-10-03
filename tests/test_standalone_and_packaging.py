@@ -87,6 +87,10 @@ class _RawScript:
     ) -> tuple[list[int], list[int], list[int]]:
         if read != [17] or write or error:
             raise AssertionError("unexpected select arguments")
+        if timeout > 0.02:
+            if timeout != 0.5:
+                raise AssertionError(f"unexpected idle timeout {timeout}")
+            return ([17], [], [])
         self.select_timeouts.append(timeout)
         if not self.readiness:
             raise AssertionError("unexpected escape-sequence select")
@@ -876,6 +880,81 @@ class StandaloneTests(unittest.TestCase):
         self.assertIn("FileNotFoundError", completed.stderr)
 
 
+    def test_idle_poll_preserves_partial_utf8_and_distinguishes_eof(self):
+        host = _TerminalHost(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
+        host._interactive = True
+        host._descriptor = 17
+        encoded = "界".encode()
+        ready = ([17], [], [])
+        idle = ([], [], [])
+        with mock.patch.object(_standalone.time, "monotonic", return_value=100.0), \
+             mock.patch.object(_standalone.select, "select", side_effect=[
+            idle, ready, idle, ready, ready, ready,
+        ]) as poll, mock.patch.object(_standalone.os, "read", side_effect=[
+            encoded[:1], encoded[1:2], encoded[2:], b"",
+        ]) as read:
+            self.assertEqual(host.read_event(), "idle")
+            self.assertEqual(host.read_event(), "idle")
+            self.assertEqual(host.read_event(), "text\t界")
+            self.assertIsNone(host.read_event())
+        self.assertEqual(read.call_count, 4)
+        self.assertTrue(all(call.args == ([17], [], [], 0.5) for call in poll.call_args_list))
+
+    def test_idle_deadline_is_not_restarted_by_partial_utf8(self):
+        host = _TerminalHost(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
+        host._interactive = True
+        host._descriptor = 17
+        ready = ([17], [], [])
+        with mock.patch.object(_standalone.time, "monotonic", side_effect=[100.0, 100.1, 100.4]), \
+             mock.patch.object(_standalone.select, "select", side_effect=[ready, ([], [], [])]) as poll, \
+             mock.patch.object(_standalone.os, "read", return_value=b"\xe7"):
+            self.assertEqual(host.read_event(), "idle")
+        self.assertAlmostEqual(poll.call_args_list[0].args[3], 0.4)
+        self.assertAlmostEqual(poll.call_args_list[1].args[3], 0.1)
+
+    def test_ordinary_line_host_does_not_poll_or_emit_idle(self):
+        host = _TerminalHost(io.StringIO("J\nK\n"), io.StringIO(), no_color=True)
+        with mock.patch.object(_standalone.select, "select") as poll:
+            self.assertEqual(host.read_event(), "line\tJ")
+            self.assertEqual(host.read_event(), "line\tK")
+            self.assertIsNone(host.read_event())
+        poll.assert_not_called()
+
+    def test_raw_pty_idle_blink_split_utf8_and_terminal_restoration(self):
+        source = '{"content":{"first":"界","second":2}}\n'.encode()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "records.jsonl"
+            path.write_bytes(source)
+            process, master = self._start_pty(path)
+            import termios as system_termios
+            output = bytearray()
+            try:
+                first, end = self._pty_frame_containing(master, output, b"Record 1/1", start=0)
+                hidden, end = self._pty_frame_containing(master, output, b"Record 1/1", start=end)
+                self.assertIn(b"^", first)
+                self.assertNotIn(b"^", hidden)
+                self._pty_write(master, b"/")
+                end = self._pty_read_until(master, output, b"Search query: ", start=end)
+                encoded = "界".encode()
+                self._pty_write(master, encoded[:1])
+                # Let the raw poll expire between UTF-8 bytes while a prompt is open.
+                time.sleep(0.6)
+                self._pty_write(master, encoded[1:])
+                end = self._pty_read_until(master, output, b"Search query: " + encoded, start=end)
+                self._pty_write(master, b"\r")
+                _, end = self._pty_frame_containing(master, output, b"1/1 occurrences", start=end)
+                self._pty_write(master, b"\x04")
+                self._pty_read_until(master, output, b"\x1b[?1049l", start=end)
+                self._pty_finish(process, master, output)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(system_termios.tcgetattr(master), self._pty_original_attributes)
+                self.assertEqual(output.count(b"\x1b[?1049h"), 1)
+                self.assertEqual(output.count(b"\x1b[?1049l"), 1)
+                self.assertEqual(path.read_bytes(), source)
+            finally:
+                self._pty_cleanup(process, master)
+
+
 class PackagingBoundaryTests(unittest.TestCase):
     def _modules(self) -> dict[str, Path]:
         package = ROOT / "src" / "jsonl_viewer"
@@ -892,7 +971,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.4.2")
+        self.assertEqual(project["version"], "0.5.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")

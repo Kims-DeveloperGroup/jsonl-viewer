@@ -120,6 +120,16 @@ def sample_frames() -> dict[str, str]:
             ("cursor_down", "cursor_down", "cursor_down", "toggle_fold", "close"),
             (100, 24),
         ),
+        "sibling-navigation.txt": (
+            _nested_json_source(),
+            ("next_sibling", "close"),
+            (100, 24),
+        ),
+        "cursor-idle.txt": (
+            _nested_json_source(),
+            ("idle", "close"),
+            (100, 24),
+        ),
         "folded-search.txt": (
             _nested_json_source(),
             ("search\tcorrelation token mismatch", "toggle_fold", "close"),

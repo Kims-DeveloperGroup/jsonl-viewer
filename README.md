@@ -24,7 +24,7 @@ or terminal-driver implementations.
 - literal, case-insensitive full-text search, including decoded nested JSON,
   with `n`/`N` moving between individual keyword occurrences, visible keyword
   focus, current/total counts, and hidden-hit Verbose promotion;
-- character navigation and structural folding with readable ANSI focus or a plain caret;
+- blinking character focus, structural sibling-key navigation, and container folding;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
@@ -56,7 +56,7 @@ Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnosti
 * 2 │   "content": "The field is missing."
 * 2 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-h/j/k/l cursor • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
+h/j/k/l cursor • J/K siblings • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
 ```
 
 An encoded provider response is expanded as a derived, read-only display. The
@@ -80,7 +80,7 @@ Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
 ```
 
 The [design system](docs/design-system.md) defines every visual role and user
-state. Eleven [deterministic full-frame samples](docs/samples/README.md) cover
+state. Thirteen [deterministic full-frame samples](docs/samples/README.md) cover
 Simple, Verbose, search, nested expansion, leaf truncation, malformed input,
 cursor folding, search through folds, tiny terminals, and plain / `NO_COLOR` output.
 
@@ -209,6 +209,37 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
+### New in 0.5.0
+
+The main-view cursor blinks every 500 ms while idle in the standalone terminal
+and updated interactive hosts. JSON characters remain readable; the cursor's
+emphasis alternates, while matching-container emphasis stays steady. On a
+highlighted delimiter, its distinguishing underline blinks. Any input makes the
+cursor visible immediately. Help and prompt editing pause blinking. Interactive
+plain/NO_COLOR output blinks the caret without removing its reserved row;
+ordinary-line output and hosts without idle support retain a steady cursor.
+
+Press `J` or `K` to jump to the next or previous sibling property's key, from
+anywhere in that property's key or value. Navigation uses the nearest object and
+its displayed key order, including expanded encoded JSON. It scrolls to offscreen
+keys and reveals clipped key starts without opening folded values, changing
+search counts, or promoting Simple mode. The destination is the first displayed
+character inside the key's quotes, or the opening quote for an empty key.
+
+Sibling movement stops at either end and never crosses records. A container's
+braces/brackets belong to its owning property; array contents use the nearest
+owning property. At a root object's delimiters, `J` selects its first key and `K`
+its last. A folded or empty root has no reachable keys, so these jumps do nothing.
+Other positions without a property do nothing. Ordinary-line mode also
+accepts `J` and `K`; within prompts they remain literal characters.
+
+Semantic hosts can send `next_sibling`, `previous_sibling`, and `idle`. An
+interactive host can return `idle` after 500 ms without input, preserving partial
+UTF-8 and buffered input. `None` still means EOF. Hosts keep the existing five
+methods and own polling, terminal state, and restoration. The engine reuses
+cursor-on/off frame variants during idle rather than parsing/projecting JSON
+again; geometry or state changes invalidate those variants.
+
 ### Migrating to 0.4.x
 
 Main-view `h` now moves left, and `j`/`k` move down/up within visible JSON.
@@ -303,6 +334,7 @@ vocabulary is:
 up | down | page_up | page_down | next_match | previous_match
 toggle_mode | help | cancel | clear_search | close
 cursor_left | cursor_right | cursor_up | cursor_down | toggle_fold
+next_sibling | previous_sibling | idle
 goto<TAB>POSITIVE_SOURCE_LINE
 search<TAB>NONEMPTY_QUERY
 ```

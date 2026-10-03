@@ -89,33 +89,18 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer._model`
 
-- **Cursor/fold values:** Frozen `CursorPosition`, `FoldIdentity`,
-  `VisibleCharacter`, and `ContainerMetadata` link visible display cells to
-  source-record identity, structural paths, and parsed container delimiters.
-  `ViewState` owns immutable session folds, cursor/preferred column, and a transient
-  container-focus request. `RenderResult` carries effective cursor, visible cells,
-  container facts, and geometry for subsequent context-sensitive input.
-
 - **Source:** `src/jsonl_viewer/_model.py`
-- **Responsibility:** Define immutable private snapshot and transient view-state
-  values.
-- **Supported surface:** No supported consumer API. The parser, engine, search,
-  JSON expansion, and renderer share JSON value types and frozen record,
-  snapshot, diagnostic, mode, search, prompt, view, and render-result values.
-  Immutable `JSONPath` tuples distinguish string keys from integer array
-  indices. Frozen `Occurrence` values retain record index, path, key/value or
-  fallback kind, original-codepoint span, and matching text. `SearchState`
-  holds ordered occurrences and the active index, with binary-search record
-  membership/path access. Prompt values hold an uncommitted query or goto
-  buffer, code-point cursor, and local validation error. `ViewState.reveal_match`
-  requests focus positioning; `RenderResult.record_line_offset` reports the
-  effective viewport offset for the engine to retain.
+- **Responsibility:** Immutable private snapshot, search, prompt, and view values.
+- **Supported surface:** Internal only. Record/path identities distinguish object
+  keys and array indices. Container/property metadata associates visible grapheme
+  cells and key anchors with parsed structure, never string-delimiter heuristics.
 - **Direct internal dependencies:** None.
-- **State, resources, and side effects:** Defines values only; it owns no module
-  state, lifecycle, or I/O.
-- **Primary verification/documentation:** exercised through all engine, input,
-  rendering, sample, and standalone tests; state behavior is documented in
-  `docs/design-system.md`.
+- **State/resources:** `ViewState` owns session folds, cursor/preferred column,
+  container focus, retained property-key reveal, and search/prompt state.
+  `RenderResult` owns bounded visible geometry, sibling metadata, and deterministic
+  visible/idle frame text. No module state, I/O, or lifecycle ownership.
+- **Verification:** Engine, cursor/folding, rendering, search, and sample tests;
+  `docs/design-system.md` describes the behavior.
 
 ### `jsonl_viewer._json`
 
@@ -141,6 +126,10 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer._render`
 
+- **Sibling/blink projection:** Immutable property ownership and first-key-cell
+  anchors survive clipping and encoded-JSON expansion. Complete bounded record
+  projections provide siblings beyond the viewport. Each render paints visible
+  and idle variants from the same projection; matching delimiters remain steady.
 - **Cursor/folding projection:** Parsed container membership travels with JSON
   token segments through bounded expansion, search windows, and cell clipping.
   Nonempty folded containers retain opener/closer, keys, commas, and expansion
@@ -219,6 +208,10 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer._standalone`
 
+- **Idle transport:** Raw input polls every 500 ms, returning semantic `idle`
+  without finalizing the incremental UTF-8 decoder. Ordinary-line transport
+  remains blocking/static; bounded escape parsing keeps its separate deadline.
+
 - **Source:** `src/jsonl_viewer/_standalone.py`
 - **Responsibility:** Adapt the generic viewer to one standalone CLI-owned
   terminal lifecycle.
@@ -268,52 +261,26 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer.engine`
 
-- **Cursor/fold transitions:** Main-view `h/l` move visible character cells and
-  wrap across adjacent data rows, clamping only at viewport ends;
-  `j/k` preserve a preferred display column across visible data rows, and Enter
-  toggles the innermost nonempty container. Arrow/semantic record navigation and
-  paging retain their responsibilities. Successful viewport/mode changes reset
-  focus; geometry changes clamp it. Folds are immutable record/path identities
-  retained for this call, including nested folds beneath a folded parent. Search
-  selection unfolds only containers hiding the hit and focuses its first display
-  cell; later manual folding remains effective until search navigation. Batched
-  text input refreshes structural geometry before subsequent cursor actions.
-
 - **Source:** `src/jsonl_viewer/engine.py`
-- **Responsibility:** Coordinate one transient read-only view through an
-  injected host.
-- **Supported surface:** Package-supported `view_jsonl(source, spec, host)`
-  through the root facade. Its exact source is immutable `bytes`; it returns
-  `None` and persists no view state.
+- **Responsibility:** Coordinate one transient read-only view through the host.
+- **Supported surface:** Root-facade `view_jsonl(source, spec, host)` accepts exact
+  immutable bytes, returns None, and persists no view state.
 - **Direct internal dependencies:** `_input`, `_model`, `_render`, `_search`,
-  and `contracts`.
-- **State, resources, and side effects:** Owns navigation, within-record paging,
-  Simple/Verbose, committed full-text search, active occurrence, help, and
-  transient message state only for one call. It delegates matching to `_search`,
-  retaining prior committed search on an occurrence-limit failure. Next/previous
-  wraps through individual occurrences and requests viewport focus positioning;
-  manual record/page navigation disables automatic reveal. The effective
-  renderer offset is retained in immutable view state. The active occurrence's
-  hidden top-level path triggers Verbose promotion on initial search or
-  next/previous selection; renderer visibility never limits matching.
-  In `keys` mode it additionally owns all
-  navigation bindings, ordinary-line command grammar, and search/goto prompt
-  drafts, text editing, validation, and cancellation. Search opens one query
-  draft; semantic `search<TAB>QUERY`, line `/ QUERY`, and alias `// QUERY`
-  reach the same full-text action, preserving an entire multiword phrase.
-  Field-bearing semantic search events are rejected. Event payloads are bounded
-  independently of envelope prefixes at 8,192 characters; goto drafts
-  are limited to 128 and query drafts to 1,024 code points. Raw controls cannot
-  enter a draft. Logical cursor edits include arrows, Home/End, Backspace,
-  Delete, Ctrl+A/E, prefix deletion with Ctrl+U, suffix deletion with Ctrl+K,
-  and previous-word deletion with Ctrl+W. Prompt Escape discards only the draft
-  and preserves committed view state, including prior messages and search
-  position. EOF closes; interrupt closes an active prompt's view and otherwise
-  follows main-view cancel precedence. Help and malformed/empty snapshots
-  cannot begin prompts. Supported semantic events remain accepted in both input
-  modes. It presents Loading before parsing, renders bounded snapshot/error
-  states, and calls `host.close_view()` in `finally`. It performs no file,
-  terminal-driver, network, persistence, replay, retry, or live-tail operation.
-- **Primary verification/documentation:** `tests/test_public_api_and_engine.py`,
-  `tests/test_input_and_render.py`, `tests/test_unrestricted_search.py`,
-  `tests/test_documented_samples.py`, `README.md`, and `docs/design-system.md`.
+  `contracts`.
+- **State/resources:** Main-view character movement, record/page navigation,
+  structural folding, sibling-property navigation, search and prompt editing stay
+  engine-owned. `J/K` resolve sibling identities in rendered property order and
+  focus the target key; folds and occurrence counts remain unchanged. Hidden
+  folded descendants and Simple-mode exclusions are not navigation targets.
+- **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
+  cached frame variants without rebuilding projections. Real input restores the
+  cursor; geometry/color changes invalidate the cache. Prompt/help views remain
+  steady. Hosts without idle events retain static emphasis.
+- **Compatibility:** Three public exports and five host signatures stay stable.
+  Existing semantic events, prompt literal input, bounded transport validation,
+  search-driven ancestor unfolding, and immutable source handling remain intact.
+  Batched text refreshes structural geometry before subsequent navigation.
+- **Lifecycle:** Loading precedes parsing; host closure is guaranteed in finally.
+  No terminal driver, filesystem, thread, network, replay, or live-tail ownership.
+- **Verification:** Public API/engine, cursor/folding, search, deterministic sample,
+  and standalone integration tests; README and design-system behavior contract.
