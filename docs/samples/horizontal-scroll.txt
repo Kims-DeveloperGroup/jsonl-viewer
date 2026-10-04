@@ -1,0 +1,8 @@
+JSONL VIEWER • READ ONLY • SIMPLE
+Session: session-01 • Conversation: conversation-01 • Agent: agent-01
+> 1 │ 
+> 1 │ tuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789abcdefghijkl…
+      ^
+> 1 │ 
+x 33 ←→ • Record 1/1 • source line 1 • width clipped
+←/→ pan • ? help • q close

@@ -99,6 +99,9 @@ def sample_frames() -> dict[str, str]:
         + b"\n"
     )
     cases = {
+        "horizontal-scroll.txt": (
+            json.dumps({"content": "abcdefghijklmnopqrstuvwxyz0123456789" * 4}).encode() + b"\n",
+            ("scroll_right", "close"), (72, 10)),
         "cursor-paging.txt": (
             json.dumps({"content": list(range(12))}).encode() + b"\n",
             ("page_down", "page_up", "close"), (88, 10)),

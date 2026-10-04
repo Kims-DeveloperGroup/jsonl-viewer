@@ -25,6 +25,7 @@ or terminal-driver implementations.
   with `n`/`N` moving between individual keyword occurrences, visible keyword
   focus, current/total counts, and hidden-hit Verbose promotion;
 - blinking character focus, structural sibling-key navigation, and container folding;
+- horizontal body scrolling with fixed source gutters and automatic cursor reveal;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
@@ -149,9 +150,10 @@ The viewer brings the selected occurrence into view vertically and shows a
 bounded text window around it, even beyond a long value's normal preview.
 Hidden-field hits promote the view to Verbose. Manual paging remains available;
 `n` or `N` brings the next selected occurrence back into view. Resizing
-recomputes the window at the current geometry. At very narrow widths, the
-active keyword takes priority over context and its repeated gutter. Long
-keywords can still be clipped to the available cells. Press `c` to clear
+recomputes the window at the current geometry. At very narrow widths, the active keyword takes priority over context and
+display brackets. The source gutter stays fixed; a readable bare keyword uses
+ANSI focus or the plain caret when its brackets cannot fit. Long keywords can
+still be clipped to the available body cells. Press `c` to clear
 search; Escape follows the cancellation rules above.
 
 ### Search in ordinary-line mode
@@ -208,6 +210,33 @@ view_jsonl(snapshot_bytes, spec, host)
 The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
+
+### New in 0.5.4
+
+Left/Right arrows pan the JSON body by half its visible width, rounded down
+with a minimum of one display column. Header, source-line gutters, and footer
+stay fixed. The footer shows `x OFFSET` and `←`/`→` for content available on
+either side. Scroll stops at the beginning and end of the visible rows' full
+projected content; shorter rows can be blank at a shared offset.
+
+`h`/`l` moves through the full projected row and scrolls to reveal the next
+character. Row wrapping happens at the actual row boundary, rather than the
+clipped screen edge. Existing vertical cursor paging and record cycling stay
+available. Wide characters and combining marks remain intact.
+
+Record changes, go-to-line, and mode changes reset horizontal position.
+Paging within a record and resizing retain it when possible and clamp it otherwise.
+Page commands focus the first visible JSON character on their target row;
+if that row has no visible characters, they reveal its logical first character.
+Search, sibling jumps, and folding reveal their target when needed. Manual
+arrow panning keeps a visible cursor or moves it to the nearest visible JSON
+character without undoing the requested scroll. Prompt arrows continue editing
+the draft, and Help does not pan.
+
+Semantic hosts can send `scroll_left` and `scroll_right`; ordinary-line mode
+accepts `left` and `right`. The three public exports and the host/spec signatures
+remain unchanged. Scrolling reveals the retained display preview: it does not
+increase the 4 KiB/64 KiB string-preview bounds or recover omitted source text.
 
 ### New in 0.5.3
 
@@ -296,6 +325,8 @@ unchanged.
 From 0.4.1, `l` at a row’s end moves to the next JSON row’s first
 character; `h` at its start moves to the previous row’s last character.
 Since 0.5.3, all character keys reveal adjacent pages at viewport edges.
+Since 0.5.4, horizontal movement reveals clipped characters before wrapping
+at the full projected row's end.
 Gutters, display annotations, caret rows, and record separators are skipped.
 
 The cursor starts at the first JSON character of the top visible data row.
@@ -376,6 +407,7 @@ vocabulary is:
 up | down | page_up | page_down | next_match | previous_match
 toggle_mode | help | cancel | clear_search | close
 cursor_left | cursor_right | cursor_up | cursor_down | toggle_fold
+scroll_left | scroll_right
 next_sibling | previous_sibling | idle
 goto<TAB>POSITIVE_SOURCE_LINE
 search<TAB>NONEMPTY_QUERY

@@ -17,7 +17,8 @@ from jsonl_viewer._model import Occurrence, Record, SearchState, Snapshot, ViewS
 from jsonl_viewer._render import _text_cells, render_frame, strip_ansi
 from jsonl_viewer._search import SearchLimitError, find_matches
 
-from tests.support import FakeHost, without_caret
+from tests.support import FakeHost, styled_text, without_caret
+from tests.test_cursor_and_folding import _View
 
 
 def _source(*records: object) -> bytes:
@@ -192,9 +193,23 @@ class FullTextOccurrenceTests(unittest.TestCase):
 
     def test_twelve_columns_and_five_digit_gutter_keep_visible_wide_keyword(self):
         source = b'{"content":"x"}\n' * 9999 + _source({"content": "x" * 100 + "개"})
-        host = self._view(source, "search\t개", size=(12, 5))
-        self.assertIn("⟦개⟧", _body(host.frames[-1]))
-        self.assertTrue(all(_text_cells(line) <= 12 for line in host.frames[-1].splitlines()))
+        for color in (False, True):
+            with self.subTest(color=color):
+                view = _View(source, size=(12, 5), color=color)
+                result = view.step("search\t개")
+                plain = strip_ansi(result.text)
+                focused = next(cell for cell in result.characters if cell.position == result.cursor)
+                self.assertEqual(focused.text, "개")
+                self.assertTrue(focused.search_focus)
+                self.assertIn('@ 10000 │ 개', plain)
+                self.assertEqual(len(view.state.search.occurrences), 1)
+                self.assertEqual(view.state.search.current_index, 0)
+                if color:
+                    self.assertIn("개", styled_text(result.text, "7"))
+                else:
+                    self.assertEqual(plain.splitlines()[focused.screen_row + 1],
+                                     " " * focused.screen_column + "^")
+                self.assertTrue(all(_text_cells(line) <= 12 for line in plain.splitlines()))
 
     def test_escaped_quotes_backslashes_and_unsafe_characters_focus_original_span(self):
         for value, query, visible in ((r'a "quote" b', '"quote"', r'\"quote\"'),

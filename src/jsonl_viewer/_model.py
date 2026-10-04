@@ -110,6 +110,7 @@ class VisibleCharacter:
     search_focus: bool = False
     property: FoldIdentity | None = None
     key_anchor: bool = False
+    screen_column: int = 0
 
 @dataclass(frozen=True, slots=True)
 class PropertyMetadata:
@@ -140,6 +141,8 @@ class ViewState:
     folds: frozenset[FoldIdentity] = frozenset()
     focus_container: FoldIdentity | None = None
     focus_property: FoldIdentity | None = None
+    horizontal_offset: int = 0
+    reveal_cursor: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,3 +160,7 @@ class RenderResult:
     properties: tuple[PropertyMetadata, ...] = ()
     idle_text: str | None = None
     navigable_rows: tuple[tuple[int, tuple[int, ...]], ...] = ()
+    logical_characters: tuple[VisibleCharacter, ...] = ()
+    horizontal_offset: int = 0
+    max_horizontal_offset: int = 0
+    body_width: int = 74

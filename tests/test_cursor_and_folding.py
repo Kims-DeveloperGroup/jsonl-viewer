@@ -35,7 +35,8 @@ class _View:
                               color=self.color)
         self.state = replace(self.state, cursor=result.cursor if result.characters else self.state.cursor,
                              record_line_offset=result.record_line_offset,
-                             focus_container=None)
+                             horizontal_offset=result.horizontal_offset,
+                             reveal_cursor=False, focus_container=None)
         return result
 
     def step(self, event):
@@ -50,7 +51,7 @@ class _View:
 
     def focus(self, character):
         self.state = replace(self.state, cursor=character.position, preferred_column=None,
-                             reveal_match=False, focus_container=None)
+                             reveal_match=False, reveal_cursor=True, focus_container=None)
         return self.render()
 
     def opener(self, path=(), record=0):
@@ -79,7 +80,7 @@ class CursorTests(unittest.TestCase):
                 self.assertEqual(styled_text(result.text, "4"), "{")
                 self.assertNotIn("^", strip_ansi(result.text))
             else:
-                self.assertEqual(lines[cell.screen_row + 1], " " * cell.position.column + "^")
+                self.assertEqual(lines[cell.screen_row + 1], " " * cell.screen_column + "^")
                 self.assertNotIn("\x1b", result.text)
             frames.append(without_caret(strip_ansi(result.text)))
         self.assertEqual(*frames)
@@ -115,17 +116,25 @@ class CursorTests(unittest.TestCase):
                         view.toggle(("content", "items"))
                     view.size = size
                     result = view.render()
-                    positions = tuple(cell.position for cell in result.characters)
+                    reference = _View(source, size=(240, 200), color=color)
+                    reference.state = replace(view.state, horizontal_offset=0, cursor=None,
+                                              record_line_offset=0)
+                    projected = reference.render().characters
                     before = (view.state.selected_index, view.state.record_line_offset, view.state.folds)
                     for left, right in zip(result.characters, result.characters[1:]):
                         if left.screen_row == right.screen_row:
                             continue
+                        left = [cell for cell in projected if
+                                (cell.position.record_index, cell.position.line_index) ==
+                                (left.position.record_index, left.position.line_index)][-1]
+                        right = next(cell for cell in projected if
+                                     (cell.position.record_index, cell.position.line_index) ==
+                                     (right.position.record_index, right.position.line_index))
                         view.focus(left)
                         self.assertEqual(view.step("cursor_right").cursor, right.position)
                         self.assertEqual(view.state.preferred_column, right.position.column)
                         self.assertEqual(view.step("cursor_left").cursor, left.position)
                         self.assertEqual(view.state.preferred_column, left.position.column)
-                    self.assertEqual(tuple(cell.position for cell in view.render().characters), positions)
                     self.assertEqual((view.state.selected_index, view.state.record_line_offset, view.state.folds), before)
                     self.assertEqual(view.snapshot, parse_jsonl(source))
 
@@ -190,7 +199,7 @@ class CursorTests(unittest.TestCase):
                     self.assertTrue(all(_text_cells(line) <= size[0] for line in lines))
                     if not color:
                         cell = next(cell for cell in result.characters if cell.position == result.cursor)
-                        self.assertEqual(lines[cell.screen_row + 1], " " * cell.position.column + "^")
+                        self.assertEqual(lines[cell.screen_row + 1], " " * cell.screen_column + "^")
                         self.assertEqual(sum(line.strip() == "^" for line in lines), 1)
                         if size == (12, 4):
                             self.assertEqual(len(lines), 4)
@@ -276,7 +285,7 @@ class FoldingTests(unittest.TestCase):
                         cell = next(cell for cell in result.characters
                                     if cell.position == result.cursor)
                         self.assertEqual(result.text.splitlines()[cell.screen_row + 1],
-                                         " " * cell.position.column + "^")
+                                         " " * cell.screen_column + "^")
                     self.assertEqual(view.step("cursor_left").cursor, opening)
                     for size in ((12, 4), (16, 8), (24, 12), (80, 24)):
                         view.size = size
@@ -358,7 +367,8 @@ class CursorSearchAndInputTests(unittest.TestCase):
                 # Exclude the footer: it already documents these commands and
                 # must not hide stale instructions in the actual help body.
                 body = "\n".join(strip_ansi(result.text).splitlines()[1:-2])
-                self.assertRegex(body, r"h/l[^\n]*cursor[^\n]*left/right[^\n]*wrap")
+                self.assertRegex(body, r"h/l[^\n]*cursor[^\n]*left/right[^\n]*reveal full rows")
+                self.assertRegex(body, r"←/→[^\n]*pan[^\n]*half[^\n]*left/right")
                 self.assertRegex(body, r"j/k[^\n]*cursor[^\n]*down/up")
                 self.assertRegex(body, r"Enter[^\n]*(?:fold|collapse|expand)")
                 self.assertRegex(body, r"↑/↓[^\n]*record")
@@ -465,7 +475,7 @@ class CursorSearchAndInputTests(unittest.TestCase):
                         self.assertIn(escaped, styled_text(result.text, "43"))
                     else:
                         self.assertEqual(plain.splitlines()[focused.screen_row + 1],
-                                         " " * focused.position.column + "^")
+                                         " " * focused.screen_column + "^")
                     self.assertEqual(view.snapshot.records[0].value, value)
                     self.assertEqual(hashlib.sha256(source).digest(), digest)
 
