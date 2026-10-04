@@ -8,16 +8,18 @@ import unittest
 
 from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer._render import _text_cells, strip_ansi
+from tests.support import styled_text
 from tests.test_blink_and_siblings import _ObservedHost
 from tests.test_cursor_and_folding import _View, _source
 
 
 def _reference(view):
-    reference = _View(b'', size=(view.size[0], 200), color=view.color)
+    reference = _View(b'', size=(240, 200), color=view.color)
     reference.snapshot = view.snapshot
     reference.state = replace(view.state, selected_index=0, record_line_offset=0,
                               cursor=None, preferred_column=None, reveal_match=False,
-                              focus_container=None, focus_property=None)
+                              focus_container=None, focus_property=None,
+                              horizontal_offset=0, reveal_cursor=False)
     return reference.render().characters
 
 
@@ -143,7 +145,13 @@ class CursorPageCrossingTests(unittest.TestCase):
                 ):
                     for position in positions:
                         result = view.step(event)
-                        self.assertEqual(result.cursor, position)
+                        self.assertEqual((result.cursor.record_index, result.cursor.line_index),
+                                         (position.record_index, position.line_index))
+                        target_row = [cell for cell in result.characters if
+                                      (cell.position.record_index, cell.position.line_index) ==
+                                      (position.record_index, position.line_index)]
+                        self.assertTrue(target_row)
+                        self.assertEqual(result.cursor, target_row[0].position)
                         self.assertIsNone(view.state.preferred_column)
 
     def test_visible_record_neighbors_do_not_move_viewport_or_emit_notice(self):
@@ -185,14 +193,24 @@ class CursorPageCrossingTests(unittest.TestCase):
         view = _View(source, size=(12, 4), color=True)
         events = ('search\tfirstkey', 'next_sibling', 'cursor_down', 'cursor_up')
         expected = [view.render().text]
-        expected.extend(view.step(event).text for event in events)
+        positions = []
+        offsets = []
+        for event in events:
+            result = view.step(event)
+            expected.append(result.text)
+            positions.append(result.cursor)
+            offsets.append(result.horizontal_offset)
         host = _ObservedHost((*events, 'close'), size=view.size, color=True)
         view_jsonl(source, view.spec, host)
         self.assertEqual(host.observed, expected)
         before = host.observed[2].splitlines()[1]
         after = host.observed[4].splitlines()[1]
-        self.assertEqual(before, after)
-        self.assertIn('⟦t⟧', strip_ansi(before))
+        self.assertEqual(positions[1], positions[3])
+        self.assertLess(offsets[2], offsets[1])
+        self.assertTrue(all('t' in styled_text(line, '7') for line in (before, after)))
+        self.assertTrue(all(strip_ansi(line).startswith('@ 1 │ ') for line in (before, after)))
+        self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(host.observed[-1]).splitlines()))
+        self.assertEqual(len(view.state.search.occurrences), 1)
         self.assertEqual(host.close_calls, 1)
 
     def test_expansion_limit_root_keeps_a_navigable_cell_between_records(self):
@@ -209,10 +227,15 @@ class CursorPageCrossingTests(unittest.TestCase):
                 self.assertTrue(result.characters)
                 self.assertEqual(result.cursor.record_index, expected)
                 self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(result.text).splitlines()))
-            for _ in range(50):
-                result = view.step('cursor_right')
-                if result.cursor.record_index == 2:
-                    break
-            else:
-                self.fail('horizontal cursor stalled at expansion-limit record')
+            view.step('cursor_down')
+            first = view.render().cursor
+            self.assertEqual(first.record_index, 1)
+            result = view.step('cursor_right')
+            self.assertEqual(result.cursor.record_index, 1)
+            self.assertEqual(result.cursor.column, first.column + 1)
+            view.step('cursor_down')
+            result = view.step('cursor_left')
+            self.assertEqual(result.cursor.record_index, 1)
+            self.assertGreater(result.horizontal_offset, 50)
+            self.assertEqual(view.step('cursor_right').cursor.record_index, 2)
             self.assertEqual(view.snapshot.records[1].value, encoded)

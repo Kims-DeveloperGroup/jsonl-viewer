@@ -12,4 +12,4 @@ JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conv
 @ 1 │   }
 @ 1 │ }
 1/1 occurrences • Search all text='correlation token mismatch' • ⟦active⟧ • n/N • JSON display 2 ex…
-h/j/k/l • J/K siblings • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close
+←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close

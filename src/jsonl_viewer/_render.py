@@ -66,6 +66,7 @@ class _Segment:
     folded: bool = False
     property: JSONPath | None = None
     key_anchor: bool = False
+    logical_column: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,7 +553,8 @@ def _header_lines(
 def _help_body(width: int) -> list[tuple[str, str]]:
     values = (
         ("Help — immutable snapshot; commands never edit, replay, or retry.", "chrome"),
-        ("h/l         move cursor left/right; wrap visible rows", "plain"),
+        ("h/l         move cursor left/right; reveal full rows; wrap actual ends", "plain"),
+        ("←/→         pan JSON by half its width; left/right commands", "plain"),
         ("j/k         move cursor down/up within visible JSON", "plain"),
         ("J/K next/previous sibling property key", "plain"),
         ("Cursor blinks every 500 ms while idle", "plain"),
@@ -608,44 +610,12 @@ def _record_marker(index: int, state: ViewState, *, matched: bool) -> tuple[str,
     return " ", "gutter"
 
 
-def _reveal_segments(segments: tuple[_Segment, ...], width: int, *, key: bool = False) -> tuple[_Segment, ...]:
-    """Keep the active character visible even beyond indentation or long keys."""
-    focus = next((i for i, segment in enumerate(segments)
-                  if (segment.key_anchor if key else segment.role == "match_current")), None)
-    if focus is None:
-        return segments
-    if width < 24:
-        # Tiny rows spend their cells on the active token, not context or a
-        # trailing clipping ellipsis. The compact gutter below ensures room
-        # for both brackets and even a ten-cell neutralized Unicode escape.
-        token, _, _ = _take_cells(segments[focus].text, max(0, width - 2))
-        return (
-            _Segment("⟦", "current"),
-            replace(segments[focus], text=token),
-            _Segment("⟧", "current"),
-        )
-    before = segments[:focus]
-    # Reserve most of the row for the focused occurrence, including tiny views.
-    budget = max(2, width // 4)
-    if sum(_text_cells(segment.text) for segment in before) <= budget:
-        return segments
-    tail: list[_Segment] = []
-    remaining = max(0, budget - 1)
-    for segment in reversed(before):
-        piece, used, _ = _take_cells(segment.text[::-1], remaining)
-        if piece:
-            tail.append(replace(segment, text=piece[::-1]))
-        remaining -= used
-        if remaining <= 0:
-            break
-    return (_Segment("…", "muted"),) + tuple(reversed(tail)) + segments[focus:]
-
-
 @dataclass(frozen=True, slots=True)
 class _RecordLine:
     segments: tuple[_Segment, ...]
     record_index: int
     line_index: int
+    gutter_columns: int = 0
 
 
 def _record_lines(
@@ -683,33 +653,10 @@ def _record_lines(
             _Segment(str(record.source_line).rjust(gutter_width), "gutter"),
             _Segment(" │ ", "gutter"),
         )
-        line_width = body_width
-        if focused and body_width < 12:
-            gutter = ()
-            line_width += gutter_width + 5
-        value_segments = _reveal_segments(line.segments, line_width, key=key_focused)
-        opener = next((i for i, segment in enumerate(line.segments)
-                       if segment.delimiter == "open" and segment.nonempty), None)
-        if not focused and opener is not None and sum(
-                _text_cells(segment.text) for segment in line.segments[:opener + 1]) > line_width:
-            # Retain a clipped key/cue prefix and the structural token. Otherwise
-            # folding a visible child behind a long key could hide its opener
-            # again on the next frame, leaving no stable cursor cell.
-            suffix = line.segments[opener:]
-            suffix_width = sum(_text_cells(segment.text) for segment in suffix)
-            prefix, _ = _clip_segments(line.segments[:opener], max(0, line_width - suffix_width))
-            value_segments = prefix + suffix
-        clipped, width_clip = _clip_segments(value_segments, line_width)
-        if row == 0 and not any(segment.navigable and _text_cells(segment.text)
-                                for segment in clipped):
-            # Root annotations must not hide every JSON cell in a narrow view.
-            start = next((i for i, segment in enumerate(value_segments)
-                          if segment.navigable and _text_cells(segment.text)), None)
-            if start is not None:
-                clipped, _ = _clip_segments(value_segments[start:], line_width)
-                width_clip = True
-        any_width_clip = any_width_clip or width_clip or value_segments != line.segments
-        result.append(_RecordLine(gutter + clipped, index, row))
+        # Retain the complete projected row until its vertical viewport is known.
+        # Character metadata is materialized only for those visible rows below.
+        any_width_clip |= sum(_text_cells(segment.text) for segment in line.segments) > body_width
+        result.append(_RecordLine(gutter + line.segments, index, row, gutter_width + 5))
     return result, any_width_clip, len(logical), facts, focus_row, tuple(containers)
 
 
@@ -727,23 +674,121 @@ def _clusters(text: str) -> Iterable[str]:
         yield cluster
 
 
-def _visible_characters(line: _RecordLine, screen_row: int) -> tuple[VisibleCharacter, ...]:
-    result: list[VisibleCharacter] = []
-    column = 0
+def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
+                 focus_span: tuple[int, int] | None = None) -> _RecordLine:
+    """Slice body cells without splitting clusters or changing fixed gutters."""
+    gutter, segments = line.segments[:4], line.segments[4:]
+    total = sum(_text_cells(segment.text) for segment in segments)
+    right_clipped = overflow_cue and total > offset + width
+    if (focus_span is not None and offset <= focus_span[0]
+            and focus_span[1] <= offset + width
+            and focus_span[1] > offset + width - 1):
+        # A focused cluster gets the final cell before an overflow annotation.
+        # Apply this on every frame, not just on the transition that revealed it.
+        right_clipped = False
+    end = offset + max(0, width - int(right_clipped))
+    result: list[_Segment] = list(gutter)
+    logical = 0
+    painted = 0
+    for segment in segments:
+        piece: list[str] = []
+        piece_start = 0
+        for cluster in _clusters(segment.text):
+            cells = _text_cells(cluster)
+            start = logical
+            logical += cells
+            if start < offset or logical > end or not cells:
+                continue
+            if not piece:
+                piece_start = start
+                gap = start - offset - painted
+                if gap > 0:
+                    result.append(_Segment(" " * gap))
+                    painted += gap
+            piece.append(cluster)
+            painted += cells
+        if piece:
+            result.append(replace(segment, text="".join(piece),
+                                  logical_column=line.gutter_columns + piece_start))
+        if logical >= end:
+            break
+    if right_clipped:
+        result.append(_Segment("…", "muted"))
+    return replace(line, segments=tuple(result))
+
+
+def _focus_prefix_window(line: _RecordLine, offset: int, width: int,
+                         first_cluster_cells: int) -> _RecordLine:
+    """Keep a bounded marked keyword prefix with at least one intact cluster."""
+    window = _window_line(line, offset, width - 1,
+                          overflow_cue=width >= first_cluster_cells + 3)
+    return replace(window, segments=window.segments + (_Segment("⟧", "current"),))
+
+
+def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCharacter]:
+    column = screen_column = 0
     for segment in line.segments:
+        if segment.logical_column is not None:
+            column = segment.logical_column
         for cluster in _clusters(segment.text):
             width = _text_cells(cluster)
             if segment.navigable and width:
-                result.append(VisibleCharacter(
+                yield VisibleCharacter(
                     CursorPosition(line.record_index, line.line_index, column),
                     screen_row, cluster,
                     None if segment.container is None else FoldIdentity(line.record_index, segment.container),
                     segment.delimiter, segment.role == "match_current",
                     None if segment.property is None else FoldIdentity(line.record_index, segment.property),
-                    segment.key_anchor,
-                ))
+                    segment.key_anchor, screen_column,
+                )
             column += width
-    return tuple(result)
+            screen_column += width
+
+
+def _visible_characters(line: _RecordLine, screen_row: int) -> tuple[VisibleCharacter, ...]:
+    return tuple(_character_stream(line, screen_row))
+
+
+def _logical_characters(line: _RecordLine, screen_row: int, state: ViewState,
+                        body_width: int) -> tuple[VisibleCharacter, ...]:
+    """Keep navigation candidates, never a complete long-row character map."""
+    retained: dict[int, VisibleCharacter] = {}
+    first = previous = closest = None
+    preferred = state.preferred_column
+    if preferred is None and state.cursor is not None:
+        preferred = state.cursor.column
+    cursor_row = state.cursor is not None and (state.cursor.record_index, state.cursor.line_index) == (line.record_index, line.line_index)
+    following_cursor = False
+    first_match = True
+    left = line.gutter_columns + state.horizontal_offset
+    right = left + body_width
+    for cell in _character_stream(line, screen_row):
+        column = cell.position.column
+        if first is None:
+            first = cell
+            retained[column] = cell
+            following_cursor = True  # The initial cursor also needs its neighbor.
+        elif following_cursor:
+            retained[column] = cell
+            following_cursor = False
+        if left - 2 <= column <= right + 2 or cell.key_anchor or cell.delimiter is not None:
+            retained[column] = cell
+        if cell.search_focus and first_match:
+            retained[column] = cell
+            first_match = False
+        if cursor_row and column == state.cursor.column:
+            retained[column] = cell
+            if previous is not None:
+                retained[previous.position.column] = previous
+            following_cursor = True
+        if preferred is not None and (closest is None or abs(column - preferred) < abs(closest.position.column - preferred)):
+            closest = cell
+        previous = cell
+    if previous is not None:
+        retained[previous.position.column] = previous
+    if closest is not None:
+        retained[closest.position.column] = closest
+    return tuple(retained[column] for column in sorted(retained))
 
 
 def _resolve_cursor(state: ViewState, characters: tuple[VisibleCharacter, ...]) -> CursorPosition | None:
@@ -785,6 +830,8 @@ def _paint_record_line(
     result: list[str] = []
     column = 0
     for segment in line.segments:
+        if segment.logical_column is not None:
+            column = segment.logical_column
         for cluster in _clusters(segment.text):
             position = CursorPosition(line.record_index, line.line_index, column)
             matching = (segment.delimiter is not None and container is not None
@@ -829,6 +876,8 @@ def _footer_lines(
     width: int,
     width_clipped: bool,
     projection_facts: _ProjectionFacts | None,
+    horizontal_offset: int = 0,
+    max_horizontal_offset: int = 0,
 ) -> list[tuple[str, str]]:
     if state.prompt is not None:
         return _prompt_lines(state.prompt, width=width)
@@ -884,10 +933,14 @@ def _footer_lines(
         role = "muted" if projection_status or width_clipped else "footer"
     if not status:
         status = "Immutable snapshot • no persistent viewer state"
+    if horizontal_offset or max_horizontal_offset:
+        cues = ("←" if horizontal_offset else "") + ("→" if horizontal_offset < max_horizontal_offset else "")
+        horizontal = f"x {horizontal_offset} {cues}"
+        status = f"{horizontal} • {status}"
     help_text = (
-        "? help • q close"
-        if width < 91
-        else "h/j/k/l • J/K siblings • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close"
+        ("←/→ pan • ? help • q close" if horizontal_offset or max_horizontal_offset else "? help • q close")
+        if width < 100
+        else "←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close"
     )
     return [
         (_clip_text(_neutralize_text(status), width), role),
@@ -965,6 +1018,9 @@ def render_frame(
     width_clipped = False
     selected_line_count = 0
     effective_offset = state.record_line_offset
+    horizontal_offset = state.horizontal_offset
+    max_horizontal_offset = 0
+    body_width = width
     selected_projection_facts: _ProjectionFacts | None = None
     containers: list[ContainerMetadata] = []
     properties: list[PropertyMetadata] = []
@@ -1025,18 +1081,90 @@ def render_frame(
                     remaining -= 1
                     if remaining <= 0:
                         break
+    logical_characters = tuple(
+        cell for row, line in enumerate(body, start=len(header))
+        if isinstance(line, _RecordLine) for cell in _logical_characters(line, row, state, body_width)
+    )
+    projected_width = max((sum(_text_cells(segment.text) for segment in line.segments)
+                           - line.gutter_columns for line in body if isinstance(line, _RecordLine)), default=0)
+    max_horizontal_offset = max(0, projected_width - body_width)
+    if has_data:
+        horizontal_offset = min(max(0, horizontal_offset), max_horizontal_offset)
+    projected_body = tuple(body)
+    focus_line: tuple[int, int] | None = None
+    focus_prefix = False
+    first_focus_cells = 0
+    target = _resolve_cursor(state, logical_characters)
+    target_cell = next((cell for cell in logical_characters if cell.position == target), None)
+    cursor_line: tuple[int, int] | None = None
+    cursor_span: tuple[int, int] | None = None
+    if target_cell is not None:
+        target_row = next(line for line in projected_body if isinstance(line, _RecordLine)
+                          and line.record_index == target.record_index and line.line_index == target.line_index)
+        start = target.column - target_row.gutter_columns
+        end = start + _text_cells(target_cell.text)
+        cursor_line = (target.record_index, target.line_index)
+        cursor_span = (start, end)
+        if state.reveal_cursor or state.reveal_match or state.focus_container is not None or state.cursor is None:
+            available = body_width
+            if state.reveal_match and target_cell.search_focus:
+                # Give the keyword priority over context, brackets, and ellipsis.
+                # The footer already reports overflow when all body cells are needed.
+                focus_line = (target.record_index, target.line_index)
+                column = 0
+                match_started = False
+                for segment in target_row.segments[4:]:
+                    cells = _text_cells(segment.text)
+                    if segment.role == "match_current":
+                        if not match_started:
+                            start = column
+                            match_started = True
+                        end = column + cells
+                    elif match_started:
+                        break
+                    column += cells
+                if end - start + 2 <= body_width:
+                    start, end = start - 1, end + 1
+                elif end - start > body_width:
+                    first_focus_cells = _text_cells(target_cell.text)
+                    focus_prefix = body_width >= first_focus_cells + 2
+                    if focus_prefix:
+                        start -= 1
+                    end = min(end, start + body_width)
+                    horizontal_offset = start
+                available = body_width
+            if start < horizontal_offset:
+                horizontal_offset = start
+            elif end > horizontal_offset + available:
+                horizontal_offset = max(0, end - available)
+            horizontal_offset = min(max_horizontal_offset, horizontal_offset)
+    body = [(_focus_prefix_window(line, horizontal_offset, body_width, first_focus_cells)
+             if focus_prefix and (line.record_index, line.line_index) == focus_line
+             else _window_line(line, horizontal_offset, body_width,
+                               overflow_cue=(line.record_index, line.line_index) != focus_line,
+                               focus_span=cursor_span if (line.record_index, line.line_index) == cursor_line else None))
+            if isinstance(line, _RecordLine) else line for line in body]
+    width_clipped = bool(horizontal_offset or max_horizontal_offset)
     characters = tuple(
         cell for row, line in enumerate(body, start=len(header))
         if isinstance(line, _RecordLine) for cell in _visible_characters(line, row)
     )
     cursor = _resolve_cursor(state, characters)
     focused = next((cell for cell in characters if cell.position == cursor), None)
+    navigation_state = replace(state, cursor=cursor, horizontal_offset=horizontal_offset)
+    logical_characters = tuple(
+        cell for row, line in enumerate(projected_body, start=len(header))
+        if isinstance(line, _RecordLine)
+        for cell in _logical_characters(line, row, navigation_state, body_width)
+    )
     if caret_rows and focused is not None:
         characters = tuple(replace(cell, screen_row=cell.screen_row + int(cell.screen_row > focused.screen_row))
                            for cell in characters)
     footer = _footer_lines(
         snapshot, state, spec=spec, width=width, width_clipped=width_clipped,
         projection_facts=selected_projection_facts,
+        horizontal_offset=horizontal_offset if has_data else 0,
+        max_horizontal_offset=max_horizontal_offset,
     )[:footer_budget]
     rendered_body: list[str] = []
     idle_body: list[str] = []
@@ -1057,7 +1185,7 @@ def render_frame(
             idle_body.append(rendered_body[-1])
         if caret_rows and focused is not None and row == focused.screen_row:
             idle_body.append("")
-            rendered_body.append(" " * focused.position.column + "^")
+            rendered_body.append(" " * focused.screen_column + "^")
     rendered_header = [_paint((_Segment(text, role),), color=color) for text, role in header]
     rendered_footer = [_paint((_Segment(text, role),), color=color) for text, role in footer]
     frame_lines = (rendered_header + rendered_body + rendered_footer)[:height]
@@ -1065,7 +1193,8 @@ def render_frame(
         text="\n".join(frame_lines), body_rows=max(1, available_body_rows),
         selected_line_count=selected_line_count, record_line_offset=effective_offset,
         cursor=cursor, characters=characters, containers=tuple(containers),
-        navigable_rows=tuple(navigable_rows),
+        navigable_rows=tuple(navigable_rows), logical_characters=logical_characters,
+        horizontal_offset=horizontal_offset, max_horizontal_offset=max_horizontal_offset, body_width=body_width,
         columns=width, rows=height, color=color,
         properties=tuple(properties),
         idle_text="\n".join((rendered_header + idle_body + rendered_footer)[:height]),

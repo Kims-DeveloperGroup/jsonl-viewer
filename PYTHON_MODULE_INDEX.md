@@ -95,10 +95,13 @@ unit imports Story or any third-party runtime package.
   keys and array indices. Container/property metadata associates visible grapheme
   cells and key anchors with parsed structure, never string-delimiter heuristics.
 - **Direct internal dependencies:** None.
-- **State/resources:** `ViewState` owns session folds, cursor/preferred column,
-  container focus, retained property-key reveal, and search/prompt state.
-  `RenderResult` owns bounded visible geometry, full-record navigable row indices, sibling metadata, and deterministic
-  visible/idle frame text. No module state, I/O, or lifecycle ownership.
+- **State/resources:** `ViewState` owns session folds, logical cursor/preferred
+  column, horizontal body offset, one-shot cursor reveal, container/property
+  focus, and search/prompt state. `VisibleCharacter` separates logical display
+  cells from painted screen columns. `RenderResult` owns bounded visible
+  geometry, compact logical navigation candidates for viewport rows,
+  full-record navigable row indices, horizontal bounds, sibling metadata, and
+  deterministic visible/idle frame text. No module state, I/O, or lifecycle ownership.
 - **Verification:** Engine, cursor/folding, rendering, search, and sample tests;
   `docs/design-system.md` describes the behavior.
 
@@ -127,12 +130,12 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer._render`
 
 - **Sibling/blink projection:** Immutable property ownership and first-key-cell
-  anchors survive clipping and encoded-JSON expansion. Complete bounded record
+  anchors survive horizontal slicing and encoded-JSON expansion. Complete bounded record
   projections provide siblings and navigable row indices beyond the viewport.
-  Narrow root annotations retain a visible JSON cell. Each render paints visible
+  Root annotations reveal a navigable JSON cell. Each render paints visible
   and idle variants from the same projection; matching delimiters remain steady.
 - **Cursor/folding projection:** Parsed container membership travels with JSON
-  token segments through bounded expansion, search windows, and cell clipping.
+  token segments through bounded expansion, search excerpts, and cell slicing.
   Nonempty folded containers retain opener/closer, keys, commas, and expansion
   cues; hidden children are still traversed to preserve expansion budgets and
   aggregate facts. Focus metadata excludes gutters, indentation, and display
@@ -160,7 +163,10 @@ unit imports Story or any third-party runtime package.
   indices; the active occurrence identifies the exact key/value span for SGR
   emphasis and printable `⟦…⟧` focus. Focused tokens use the original span plus
   at most 32 code points of context on either side, escaped after slicing;
-  horizontal segment windows prioritize focus before final cell clipping.
+  horizontal reveal brings the complete focused keyword into the body viewport
+  when it fits. Oversized focus retains a marked bounded prefix; panes too
+  narrow for brackets plus one cluster prioritize a readable glyph over those
+  annotations and a clipping ellipsis. Fixed gutters and footer overflow cues remain.
   Raw, normalized, or unavailable decoded occurrences receive labeled bounded
   excerpts when no corresponding token is rendered. Focus-row metadata lets
   rendering resolve requested vertical positioning without terminal controls.
@@ -170,8 +176,14 @@ unit imports Story or any third-party runtime package.
   skipped, and retained/full truncation facts without removing keys,
   containers, delimiters, or child presence. The same renderer formats
   multiline JSON, projects the supplied scope label, exact ID, and optional
-  subject into the header, neutralizes controls, computes Unicode cell
-  clipping, and emits optional SGR without cursor/lifecycle controls. Isolated
+  subject into the header and neutralizes controls. Complete Unicode clusters
+  survive horizontal slicing with their roles and structural metadata. One
+  horizontal offset spans all JSON bodies in the vertical pane and clamps to
+  its widest projected row; gutters and chrome stay fixed. Compact navigation
+  candidates retain row endpoints, cursor neighbors, preferred-column cells,
+  and focus anchors without allocating a whole-record character map. The footer
+  reports horizontal position and left/right overflow. It emits optional SGR
+  without cursor/lifecycle controls. Isolated
   surrogate leaves use visible escapes and a localized bounded preview fallback.
   Active
   search-query and goto editors occupy the two footer rows;
@@ -250,7 +262,8 @@ unit imports Story or any third-party runtime package.
   header values—including a separate scope label, exact scope ID, and optional
   subject—and configurable Simple-mode field identities. There is no
   `searchable_fields` constructor argument. `input_protocol` defaults
-  to `semantic`, whose search event is `search<TAB>QUERY`; `keys` additionally enables bounded
+  to `semantic`, whose search event is `search<TAB>QUERY` and whose
+  `scroll_left`/`scroll_right` events pan the body; `keys` additionally enables bounded
   text/key/literal-line envelopes without changing the three-name facade or
   host method signatures. `ViewerHost` owns size/color decisions,
   complete-frame presentation, closed event delivery, and close restoration.
@@ -272,7 +285,12 @@ unit imports Story or any third-party runtime package.
   `contracts`.
 - **State/resources:** Main-view character movement, record/page navigation,
   structural folding, sibling-property navigation, search and prompt editing stay
-  engine-owned. `J/K` cycle sibling identities in rendered property order, focus the key,
+  engine-owned. Left/Right pan by half the body width; `h/l` cross complete
+  projected rows and reveal logical destinations before crossing pages.
+  Record selection, goto, and mode reset horizontal position; within-record
+  paging and resize preserve/clamp it. Panning relocates an offscreen cursor
+  without reversing the pan, and search/key/fold navigation reveals its target.
+  `J/K` cycle sibling identities in rendered property order, focus the key,
   and report endpoint notices; folds and occurrence counts remain unchanged.
   Up/Down cycle source records, reset viewport/cursor, and report first/last/only
   record notices; paging scrolls within a record before using that transition. Hidden
@@ -284,7 +302,7 @@ unit imports Story or any third-party runtime package.
 - **Compatibility:** Three public exports and five host signatures stay stable.
   Existing semantic events, prompt literal input, bounded transport validation,
   search-driven ancestor unfolding, and immutable source handling remain intact.
-  Batched text refreshes structural geometry before subsequent navigation.
+  Batched text refreshes logical/horizontal geometry before subsequent navigation.
 - **Lifecycle:** Loading precedes parsing; host closure is guaranteed in finally.
   No terminal driver, filesystem, thread, network, replay, or live-tail ownership.
 - **Verification:** Public API/engine, cursor/folding, search, deterministic sample,

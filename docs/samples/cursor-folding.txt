@@ -2,4 +2,4 @@ JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conv
 > 1 │ {...}
       ^
 Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
-h/j/k/l • J/K siblings • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close
+←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close

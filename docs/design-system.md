@@ -163,8 +163,8 @@ host-supplied geometry cannot cause unbounded rendering.
 | Tier | Width | Header | Body/footer behavior |
 | --- | --- | --- | --- |
 | wide | 100–240 | one line with session, `LABEL: FULL_ID — subject`, and agent | full help, maximum JSON width |
-| compact | 48–99 | mode line plus the same identifier projection | full help clipped by cells |
-| narrow/tiny | 12–47 | `READ ONLY • MODE`; the second line starts `S:`, then the complete scope projection, then `A:`, with left-to-right cell clipping | reduced `? help • q close`; JSON remains guttered |
+| compact | 48–99 | mode line plus the same identifier projection | compact pan/help cues clipped by cells |
+| narrow/tiny | 12–47 | `READ ONLY • MODE`; the second line starts `S:`, then the complete scope projection, then `A:`, with left-to-right cell clipping | reduced pan/help cues; JSON remains guttered |
 
 Height uses these exact allocations:
 
@@ -190,7 +190,12 @@ through the selected record's pretty rows and then crosses to the next source
 record; Page Up reverses that behavior. JSON and chrome use Unicode cell width:
 combining marks consume zero cells and East Asian wide/fullwidth characters
 consume two. Clipped visual rows end with `…` and the footer reports `width
-clipped`; clipping never changes the snapshot.
+clipped`; clipping never changes the snapshot. In 0.5.4, the JSON body can
+scroll horizontally while chrome and source-line gutters stay fixed. The
+footer's `x OFFSET` gives the horizontal display-cell offset; `←` and `→`
+indicate content on the corresponding side. A shared offset is clamped to the
+widest full projected row in the current vertical pane, including rows from
+subsequent visible records. Shorter rows may be blank at that offset.
 
 ## States
 
@@ -246,7 +251,9 @@ physical controls and bounded Escape sequences and preserves literal command
 text. The engine owns bindings, actions, and line grammar. The exact key-name
 vocabulary is listed in the [embedding contract](../README.md#embed-without-transferring-terminal-ownership).
 
-The engine binds `h/j/k/l` to character movement, Up/Down arrows to records,
+The engine binds `h/j/k/l` to character movement, Left/Right arrows to body
+panning by half its visible width, rounded down with a minimum of one display
+column, Up/Down arrows to records,
 Page Up/Page Down or `b`/Space to paging, Enter to folding, and `g`, `/`,
 `n`, `N`, `m`, `?`, `c`, Escape, and `q`. In a draft, all printable
 characters, including navigation and close letters, insert literal text.
@@ -273,6 +280,7 @@ space after `/` or `//` is required before a query in this mode. Textual
 `esc` applies semantic `cancel`. Semantic events are accepted in either protocol:
 
 - `cursor_left` / `cursor_right`: move through JSON characters, wrapping across rows and revealing adjacent pages.
+- `scroll_left` / `scroll_right`: pan the JSON body by half the viewport width; ordinary-line aliases are `left` / `right`.
 - `cursor_up` / `cursor_down`: move across JSON rows and reveal adjacent pages, retaining the preferred display column.
 - `toggle_fold`: toggle the innermost nonempty container containing the cursor.
 - `up` / `down`: select adjacent source records and reset within-record paging.
@@ -324,6 +332,20 @@ host methods are used.
 
 ## Character cursor and folding
 
+Since 0.5.4, `h`/`l` traverses the full projected row before wrapping, revealing
+offscreen destinations automatically. Logical character identity survives
+panning; ANSI inverse focus and the plain caret map to the displayed cell.
+All body rows share a horizontal offset, while source gutters stay fixed.
+Arrow panning preserves a visible cursor or relocates it to the nearest visible
+navigable character without automatically restoring the previous viewport.
+
+Record changes, goto, and mode changes reset the offset. Paging within a record
+and resize preserve it where possible and clamp it otherwise. Folding, sibling
+jumps, and search reveal their target as needed. Help stays stationary; prompt
+Left/Right still edits the draft. Idle frames retain identical scrolled geometry.
+Horizontal slicing preserves wide characters, combining clusters, and semantic
+styles. String-preview and expansion accounting are independent of scrolling.
+
 Since 0.4.1, right at a row’s end wraps to the next data row’s first
 character; left at its start wraps to the previous row’s last character.
 Since 0.5.3, all four character keys reveal the adjacent page at viewport
@@ -336,7 +358,9 @@ The cursor starts on the first JSON character of the top visible data row
 and resets after successful record, goto, and mode changes. Page Down lands
 on the next page’s first JSON row; Page Up lands on its last JSON row and
 opens the previous record’s final page when crossing a record boundary.
-Page commands reset the column to the first character of the landing row.
+Page commands reset the column to the first visible character of the landing
+row, revealing its logical first character if that row is horizontally clipped
+out of view.
 Movement skips gutters, indentation, and annotations; resize still clamps
 safely. Horizontal moves set a new preferred display column; vertical moves
 retain it across shorter rows. Navigation uses bounded full-record row
@@ -414,12 +438,13 @@ are available. Manual paging can move away from it; the next `n`/`N`
 reveals the newly selected occurrence. Resize recomputes geometry and focus
 windows without changing search identity.
 
-Horizontal windows below 24 cells prioritize `⟦keyword⟧` over context and
-ellipsis. If the body after its gutter would have fewer than 12 cells, only
-the active row omits that repeated gutter and uses the full frame width;
-surrounding record rows retain their source gutters. Long keywords can still
-be clipped to fit. At minimum height the protected footer may leave no body
-row. These are printable focus cues, never hardware cursor movement.
+Horizontal windows prioritize the focused keyword over context. Source gutters
+remain fixed. When the keyword fits but its brackets do not, show the readable
+bare keyword with ANSI match styling or a plain caret, using footer overflow
+cues instead of spending its cells on an ellipsis. Longer keywords can still
+be clipped to the available body cells. At minimum height the protected footer
+may leave no body row. These are printable focus cues, never hardware cursor
+movement.
 
 `c` clears search. Cancellation follows the draft/main-view rules above;
 search and focus state are discarded on close.
