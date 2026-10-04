@@ -128,7 +128,8 @@ unit imports Story or any third-party runtime package.
 
 - **Sibling/blink projection:** Immutable property ownership and first-key-cell
   anchors survive clipping and encoded-JSON expansion. Complete bounded record
-  projections provide siblings beyond the viewport. Each render paints visible
+  projections provide siblings and navigable row indices beyond the viewport.
+  Narrow root annotations retain a visible JSON cell. Each render paints visible
   and idle variants from the same projection; matching delimiters remain steady.
 - **Cursor/folding projection:** Parsed container membership travels with JSON
   token segments through bounded expansion, search windows, and cell clipping.
@@ -262,7 +263,9 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer.engine`
 
 - **Source:** `src/jsonl_viewer/engine.py`
-- **Responsibility:** Coordinate one transient read-only view through the host. Reveal adjacent cursor pages using bounded row metadata and constant render probes; page commands land on the last/first row according to direction.
+- **Responsibility:** Coordinate one transient read-only view through the host.
+  Reveal adjacent cursor pages using bounded row metadata and constant render
+  probes; page commands land on the last/first row according to direction.
 - **Supported surface:** Root-facade `view_jsonl(source, spec, host)` accepts exact
   immutable bytes, returns None, and persists no view state.
 - **Direct internal dependencies:** `_input`, `_model`, `_render`, `_search`,
