@@ -14,6 +14,7 @@ renderer, not illustrative mockups:
 - [Verbose](samples/verbose.txt)
 - [current and non-current search matches](samples/search-matches.txt)
 - [record traversal](samples/record-navigation.txt)
+- [directional cursor paging](samples/cursor-paging.txt)
 - [sibling key navigation](samples/sibling-navigation.txt)
 - [idle cursor phase](samples/cursor-idle.txt)
 - [cursor and root folding](samples/cursor-folding.txt)
@@ -271,8 +272,8 @@ after the search prefix is the full-text query, including spaces. A separating
 space after `/` or `//` is required before a query in this mode. Textual
 `esc` applies semantic `cancel`. Semantic events are accepted in either protocol:
 
-- `cursor_left` / `cursor_right`: move through visible JSON characters, wrapping across adjacent visible data rows.
-- `cursor_up` / `cursor_down`: move across visible data rows, retaining the preferred display column.
+- `cursor_left` / `cursor_right`: move through JSON characters, wrapping across rows and revealing adjacent pages.
+- `cursor_up` / `cursor_down`: move across JSON rows and reveal adjacent pages, retaining the preferred display column.
 - `toggle_fold`: toggle the innermost nonempty container containing the cursor.
 - `up` / `down`: select adjacent source records and reset within-record paging.
 - `page_up` / `page_down`: page within a record, then cross record boundaries.
@@ -323,15 +324,23 @@ host methods are used.
 
 ## Character cursor and folding
 
-Since 0.4.1, right at a row's end wraps to the next visible data row's first
-character; left at its start wraps to the previous row's last character. Wrapping
-skips caret/separator rows and never scrolls or changes the selected record.
+Since 0.4.1, right at a row’s end wraps to the next data row’s first
+character; left at its start wraps to the previous row’s last character.
+Since 0.5.3, all four character keys reveal the adjacent page at viewport
+edges. Forward crossing enters its first JSON row; backward crossing enters
+its last JSON row. At record edges, traversal cycles through the immutable
+snapshot and shows the existing first/last/only-record notices. Moving
+between already visible records leaves the viewport and notices unchanged.
 
-The cursor starts on the first JSON character of the top visible data row and
-resets there after successful record, page, goto, or mode changes. It moves
-only within visible JSON content, skips gutters, indentation, and annotations,
-and clamps at viewport boundaries and after resize. Horizontal moves set a
-new preferred display column; vertical moves retain it across shorter rows.
+The cursor starts on the first JSON character of the top visible data row
+and resets after successful record, goto, and mode changes. Page Down lands
+on the next page’s first JSON row; Page Up lands on its last JSON row and
+opens the previous record’s final page when crossing a record boundary.
+Page commands reset the column to the first character of the landing row.
+Movement skips gutters, indentation, and annotations; resize still clamps
+safely. Horizontal moves set a new preferred display column; vertical moves
+retain it across shorter rows. Navigation uses bounded full-record row
+metadata and a constant number of render probes, never a probe per hidden row.
 Combining characters stay attached to their display cell, and wide characters
 occupy their full terminal width. Escaped controls remain visible safe text.
 
@@ -587,7 +596,7 @@ supplies generic inputs through the viewer's public contract:
 
 Since 0.5.2, Up/Down and semantic `up`/`down` cycle within the immutable source
 snapshot. Down wraps last to first; Up wraps first to last. Destination endpoints
-show `First record.` or `Last record.`; one record shows `Only record.`. Every
+show `First record.` or `Last record.`; one record shows `Only record.`. Up/Down
 traversal resets the viewport and cursor, including a one-record cycle. These
 non-error footer notices persist through idle/redraw, clear on ordinary cursor
 movement, and Escape dismisses them before clearing active search. Fold identities

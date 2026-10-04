@@ -8,6 +8,7 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
   markers, and an occurrence count that includes keys and values
 - `record-navigation.txt` — first-record notice after wrapping backward and forward
 - `sibling-navigation.txt` — key focus and endpoint notice after a circular sibling jump
+- `cursor-paging.txt` — Page Up lands on the previous page’s final JSON row
 - `cursor-idle.txt` — hidden caret phase with unchanged reserved row
 - `cursor-folding.txt` — focused opening delimiter and a folded record object
 - `folded-search.txt` — manual folding hides the active hit while retaining its occurrence count

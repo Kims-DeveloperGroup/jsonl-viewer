@@ -700,6 +700,14 @@ def _record_lines(
             prefix, _ = _clip_segments(line.segments[:opener], max(0, line_width - suffix_width))
             value_segments = prefix + suffix
         clipped, width_clip = _clip_segments(value_segments, line_width)
+        if row == 0 and not any(segment.navigable and _text_cells(segment.text)
+                                for segment in clipped):
+            # Root annotations must not hide every JSON cell in a narrow view.
+            start = next((i for i, segment in enumerate(value_segments)
+                          if segment.navigable and _text_cells(segment.text)), None)
+            if start is not None:
+                clipped, _ = _clip_segments(value_segments[start:], line_width)
+                width_clip = True
         any_width_clip = any_width_clip or width_clip or value_segments != line.segments
         result.append(_RecordLine(gutter + clipped, index, row))
     return result, any_width_clip, len(logical), facts, focus_row, tuple(containers)
@@ -960,6 +968,7 @@ def render_frame(
     selected_projection_facts: _ProjectionFacts | None = None
     containers: list[ContainerMetadata] = []
     properties: list[PropertyMetadata] = []
+    navigable_rows: list[tuple[int, tuple[int, ...]]] = []
     if state.help_visible:
         body.extend(_help_body(width)[:available_body_rows])
     else:
@@ -977,6 +986,11 @@ def render_frame(
                     gutter_width=gutter_width, body_width=body_width, color=color,
                 )
                 containers.extend(record_containers)
+                navigable_rows.append((index, tuple(
+                    line.line_index for line in record_lines
+                    if any(segment.navigable and _text_cells(segment.text)
+                           for segment in line.segments)
+                )))
                 properties.extend(PropertyMetadata(FoldIdentity(index, path), parent)
                                   for path, parent in facts.properties)
                 width_clipped = width_clipped or clipped
@@ -1051,6 +1065,7 @@ def render_frame(
         text="\n".join(frame_lines), body_rows=max(1, available_body_rows),
         selected_line_count=selected_line_count, record_line_offset=effective_offset,
         cursor=cursor, characters=characters, containers=tuple(containers),
+        navigable_rows=tuple(navigable_rows),
         columns=width, rows=height, color=color,
         properties=tuple(properties),
         idle_text="\n".join((rendered_header + idle_body + rendered_footer)[:height]),

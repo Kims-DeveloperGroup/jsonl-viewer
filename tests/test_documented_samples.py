@@ -99,6 +99,9 @@ def sample_frames() -> dict[str, str]:
         + b"\n"
     )
     cases = {
+        "cursor-paging.txt": (
+            json.dumps({"content": list(range(12))}).encode() + b"\n",
+            ("page_down", "page_up", "close"), (88, 10)),
         "simple.txt": (_ordinary_source(), ("close",), (88, 20)),
         "verbose.txt": (
             _ordinary_source(),

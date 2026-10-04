@@ -156,3 +156,4 @@ class RenderResult:
     color: bool = False
     properties: tuple[PropertyMetadata, ...] = ()
     idle_text: str | None = None
+    navigable_rows: tuple[tuple[int, tuple[int, ...]], ...] = ()

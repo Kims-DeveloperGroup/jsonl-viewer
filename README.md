@@ -80,7 +80,7 @@ Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
 ```
 
 The [design system](docs/design-system.md) defines every visual role and user
-state. Thirteen [deterministic full-frame samples](docs/samples/README.md) cover
+state. Fifteen [deterministic full-frame samples](docs/samples/README.md) cover
 Simple, Verbose, search, nested expansion, leaf truncation, malformed input,
 cursor folding, search through folds, tiny terminals, and plain / `NO_COLOR` output.
 
@@ -209,6 +209,24 @@ The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
 
+### New in 0.5.3
+
+All `h/j/k/l` keys reveal adjacent JSON content across page boundaries.
+Forward crossing places the cursor on the next page’s first JSON row;
+backward crossing places it on the previous page’s last JSON row.
+`l` chooses the first character and `h` the last; `j/k` retain the preferred column.
+At a record boundary, movement enters the next record’s first row or the
+previous record’s final row and cycles at the snapshot endpoints. Existing
+first/last/only-record footer notices apply when crossing a record boundary.
+Visible movement continues to skip gutters, annotations, and separators.
+
+Page Up/Down (`b`/Space) use the same directional row landing: Page Up
+focuses the previous page’s last JSON row, Page Down its first. Page Up
+crossing a record boundary opens the previous record’s final page. These
+page commands reset the column to the first JSON character of that row.
+Up/Down record navigation still resets to the first visible JSON character.
+Folds, search occurrence counts, and source bytes remain unchanged.
+
 ### New in 0.5.2
 
 Up/Down cycle through source records: Down wraps from the last record to the first,
@@ -275,13 +293,14 @@ Semantic hosts can send `cursor_left`, `cursor_right`, `cursor_up`,
 retain their meanings. The three public exports and five host methods remain
 unchanged.
 
-From 0.4.1, `l` at a row's end moves to the next visible JSON row's first
-character; `h` at a row's start moves to the previous row's last character. Both
-stop at the viewport boundaries without scrolling. Gutters, display annotations,
-caret rows, and record separators are skipped.
+From 0.4.1, `l` at a row’s end moves to the next JSON row’s first
+character; `h` at its start moves to the previous row’s last character.
+Since 0.5.3, all character keys reveal adjacent pages at viewport edges.
+Gutters, display annotations, caret rows, and record separators are skipped.
 
 The cursor starts at the first JSON character of the top visible data row.
-Successful record, page, go-to-line, and mode changes reset it there. Vertical
+Successful record, go-to-line, and mode changes reset it there. Page commands
+land on the first or last JSON row according to their direction. Vertical
 movement preserves its preferred display column and resizing clamps it to
 visible content. Gutters and display annotations are skipped. ANSI output uses
 a readable inverse-video cell and bold inverse-video matching delimiters;

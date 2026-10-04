@@ -29,11 +29,11 @@ class BlinkTests(unittest.TestCase):
     def test_idle_reuses_projection_and_input_restores_visible_cursor(self):
         for color in (False, True):
             with self.subTest(color=color):
-                host = _ObservedHost(('idle', 'idle', 'idle', 'cursor_left', 'close'),
+                host = _ObservedHost(('idle', 'idle', 'idle', 'toggle_fold', 'close'),
                                      color=color)
                 with mock.patch.object(engine, 'parse_jsonl', wraps=engine.parse_jsonl) as parse, \
                      mock.patch.object(engine, 'render_frame', wraps=engine.render_frame) as render:
-                    view_jsonl(_source({'content': [1, 2]}), ViewerSpec('s', 'c', 'a'), host)
+                    view_jsonl(_source({}), ViewerSpec('s', 'c', 'a'), host)
                 on, off, again, hidden, reset = host.observed
                 self.assertEqual(on, again)
                 self.assertEqual(off, hidden)
@@ -109,8 +109,8 @@ class BlinkTests(unittest.TestCase):
                 self.assertLessEqual(_text_cells(footer), width)
 
     def test_legacy_host_with_no_idle_keeps_static_visible_cursor(self):
-        host = _ObservedHost(('cursor_left', 'close'))
-        view_jsonl(_source({'content': 1}), ViewerSpec('s', 'c', 'a'), host)
+        host = _ObservedHost(('toggle_fold', 'close'))
+        view_jsonl(_source({}), ViewerSpec('s', 'c', 'a'), host)
         self.assertEqual(host.observed[0], host.observed[1])
         self.assertIn('^', host.observed[0])
 

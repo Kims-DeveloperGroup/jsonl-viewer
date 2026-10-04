@@ -125,10 +125,6 @@ class CursorTests(unittest.TestCase):
                         self.assertEqual(view.state.preferred_column, right.position.column)
                         self.assertEqual(view.step("cursor_left").cursor, left.position)
                         self.assertEqual(view.state.preferred_column, left.position.column)
-                    view.focus(result.characters[0])
-                    self.assertEqual(view.step("cursor_left").cursor, positions[0])
-                    view.focus(result.characters[-1])
-                    self.assertEqual(view.step("cursor_right").cursor, positions[-1])
                     self.assertEqual(tuple(cell.position for cell in view.render().characters), positions)
                     self.assertEqual((view.state.selected_index, view.state.record_line_offset, view.state.folds), before)
                     self.assertEqual(view.snapshot, parse_jsonl(source))
@@ -155,13 +151,14 @@ class CursorTests(unittest.TestCase):
         self.assertEqual(second.record_index, 1)
         self.assertEqual(view.state.selected_index, 0)
         self.assertEqual(view.step("cursor_up").cursor, first)
-        self.assertEqual(view.step("cursor_up").cursor, first)
-        view.step("cursor_down")
-        third = view.step("cursor_down").cursor
+        third = view.step("cursor_up").cursor
         self.assertEqual(third.record_index, 2)
+        self.assertEqual(view.step("cursor_down").cursor, first)
+        self.assertEqual(view.step("cursor_down").cursor, second)
         self.assertEqual(view.step("cursor_down").cursor, third)
+        self.assertEqual(view.step("cursor_down").cursor, first)
 
-    def test_successful_viewport_and_mode_changes_reset_to_first_visible_character(self):
+    def test_successful_viewport_and_mode_changes_reset_to_directional_visible_row(self):
         source = _source(*({"content": list(range(20)), "extra": index} for index in range(3)))
         for event, setup in (("page_down", ()), ("page_up", ("page_down",)),
                              ("down", ()), ("up", ("down",)),
@@ -172,7 +169,10 @@ class CursorTests(unittest.TestCase):
                     view.step(command)
                 view.focus(view.render().characters[-1])
                 result = view.step(event)
-                self.assertEqual(result.cursor, result.characters[0].position)
+                if event == "page_up":
+                    self.assertEqual(result.cursor.line_index, result.characters[-1].position.line_index)
+                else:
+                    self.assertEqual(result.cursor, result.characters[0].position)
                 self.assertIsNone(view.state.preferred_column)
 
     def test_resize_clamps_cursor_and_plain_caret_fits_smallest_viewport(self):
