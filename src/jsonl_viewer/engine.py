@@ -6,7 +6,7 @@ import unicodedata
 from dataclasses import replace
 
 from ._input import InputFailure, parse_jsonl
-from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState
+from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState, VisibleCharacter
 from ._render import render_frame, render_loading
 from ._search import SearchLimitError, find_matches
 from .contracts import ViewerHost, ViewerSpec
@@ -254,7 +254,108 @@ def _transition(
     return action(state, event)
 
 
-def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | None) -> ViewState:
+def _record_notice(index: int, count: int) -> str | None:
+    return ("Only record." if count == 1 else "First record." if index == 0 else
+            "Last record." if index == count - 1 else None)
+
+
+def _navigation_probe(state: ViewState, rendered: RenderResult,
+                      snapshot: Snapshot, spec: ViewerSpec,
+                      index: int, offset: int) -> tuple[ViewState, RenderResult]:
+    # Keep retained key reveal for character movement. A non-null cursor prevents
+    # it from changing the requested viewport offset during a probe.
+    probe = replace(state, selected_index=index, record_line_offset=offset,
+                    cursor=state.cursor or rendered.cursor, focus_container=None,
+                    reveal_match=False, message=None, message_is_error=False)
+    frame = render_frame(spec, probe, snapshot=snapshot, diagnostic=None,
+                         columns=rendered.columns, rows=rendered.rows, color=rendered.color)
+    return replace(probe, record_line_offset=frame.record_line_offset), frame
+
+
+def _row_destination(frame: RenderResult, index: int, row: int,
+                     event: str, preferred: int) -> VisibleCharacter | None:
+    cells = [cell for cell in frame.characters
+             if cell.position.record_index == index and cell.position.line_index == row]
+    if not cells:
+        return None
+    if event == "cursor_left":
+        return cells[-1]
+    if event == "cursor_right":
+        return cells[0]
+    return min(cells, key=lambda cell: (abs(cell.position.column - preferred),
+                                       cell.position.column))
+
+
+def _cursor_page(state: ViewState, event: str, current: VisibleCharacter,
+                 rendered: RenderResult, snapshot: Snapshot, spec: ViewerSpec,
+                 preferred: int) -> ViewState:
+    backward = event in {"cursor_left", "cursor_up"}
+    index = current.position.record_index
+    rows = dict(rendered.navigable_rows).get(index, ())
+    adjacent = [row for row in rows if (row < current.position.line_index if backward
+                                      else row > current.position.line_index)]
+    crossing = not adjacent
+    if crossing:
+        index = (index + (-1 if backward else 1)) % len(snapshot.records)
+        _, initial = _navigation_probe(state, rendered, snapshot, spec, index, 0)
+        rows = dict(initial.navigable_rows).get(index, ())
+        if not rows:
+            return state
+        target = rows[-1] if backward else rows[0]
+    else:
+        target = adjacent[-1] if backward else adjacent[0]
+    offset = max(0, target - rendered.body_rows + 1) if backward else target
+    probe, frame = _navigation_probe(state, rendered, snapshot, spec, index, offset)
+    destination = _row_destination(frame, index, target, event, preferred)
+    if destination is None:
+        return state
+    if event in {"cursor_left", "cursor_right"}:
+        preferred = destination.position.column
+    return replace(probe, cursor=destination.position, preferred_column=preferred,
+                   message=_record_notice(index, len(snapshot.records)) if crossing else None)
+
+
+def _page_transition(state: ViewState, event: str, rendered: RenderResult,
+                     snapshot: Snapshot, spec: ViewerSpec) -> ViewState:
+    backward = event == "page_up"
+    step = max(1, rendered.body_rows - 1)
+    index = state.selected_index
+    offset = state.record_line_offset + (-step if backward else step)
+    nav_rows = dict(rendered.navigable_rows).get(index, ())
+    crossing = (state.record_line_offset == 0 if backward else
+                offset >= rendered.selected_line_count or
+                bool(nav_rows) and offset > nav_rows[-1])
+    # Page commands retain their first-cell column reset and clear key reveal.
+    cleared = replace(state, focus_property=None, preferred_column=None)
+    if crossing:
+        index = (index + (-1 if backward else 1)) % len(snapshot.records)
+        _, initial = _navigation_probe(cleared, rendered, snapshot, spec, index, 0)
+        nav_rows = dict(initial.navigable_rows).get(index, ())
+        offset = max(0, nav_rows[-1] - rendered.body_rows + 1) if backward and nav_rows else 0
+    probe, frame = _navigation_probe(cleared, rendered, snapshot, spec, index, max(0, offset))
+    cells = [cell for cell in frame.characters if cell.position.record_index == index]
+    if not cells:
+        # A narrow viewport may contain only clipped indentation/annotations.
+        # Skip that gap using the already bounded projection, without row probes.
+        nav_rows = dict(frame.navigable_rows).get(index, ())
+        candidates = [row for row in nav_rows if (row < offset if backward else row >= offset)]
+        if not candidates:
+            return state
+        target = candidates[-1] if backward else candidates[0]
+        offset = max(0, target - rendered.body_rows + 1) if backward else target
+        probe, frame = _navigation_probe(cleared, rendered, snapshot, spec, index, offset)
+        cells = [cell for cell in frame.characters if cell.position.record_index == index]
+        if not cells:
+            return state
+    target = cells[-1].position.line_index if backward else cells[0].position.line_index
+    destination = next(cell for cell in cells if cell.position.line_index == target)
+    return replace(probe, cursor=destination.position,
+                   preferred_column=None,
+                   message=_record_notice(index, len(snapshot.records)) if crossing else None)
+
+
+def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | None,
+                       snapshot: Snapshot, spec: ViewerSpec) -> ViewState:
     if rendered is None or not rendered.characters:
         return state
     characters = rendered.characters
@@ -273,12 +374,16 @@ def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | No
     preferred = current.position.column if state.preferred_column is None else state.preferred_column
     if event in {"cursor_left", "cursor_right"}:
         index = characters.index(current)
-        index = max(0, min(len(characters) - 1, index + (-1 if event == "cursor_left" else 1)))
+        index += -1 if event == "cursor_left" else 1
+        if not 0 <= index < len(characters):
+            return _cursor_page(state, event, current, rendered, snapshot, spec, preferred)
         destination = characters[index]
         preferred = destination.position.column
     else:
         index = rows.index(current.screen_row)
-        index = max(0, min(len(rows) - 1, index + (-1 if event == "cursor_up" else 1)))
+        index += -1 if event == "cursor_up" else 1
+        if not 0 <= index < len(rows):
+            return _cursor_page(state, event, current, rendered, snapshot, spec, preferred)
         row = [cell for cell in characters if cell.screen_row == rows[index]]
         destination = min(row, key=lambda cell: (abs(cell.position.column - preferred), cell.position.column))
     return replace(state, cursor=destination.position, preferred_column=preferred,
@@ -382,8 +487,10 @@ def _semantic_transition(
         return replace(state, prompt=PromptState(kind)), False
 
     if event in {"cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold"}:
-        return _cursor_transition(state, event, rendered), False
+        return _cursor_transition(state, event, rendered, snapshot, spec), False
     if event in {"page_up", "page_down"}:
+        if rendered is not None:
+            return _page_transition(state, event, rendered, snapshot, spec), False
         state = replace(state, reveal_match=False)
         step = max(1, page_size - 1)
         offset = None
@@ -607,9 +714,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 malformed=diagnostic is not None, rendered=rendered,
             )
             if state.focus_property == previous.focus_property and (
-                state.selected_index != previous.selected_index
-                or state.record_line_offset != previous.record_line_offset
-                or state.mode != previous.mode or state.search != previous.search
+                state.mode != previous.mode or state.search != previous.search
                 or state.reveal_match):
                 state = replace(state, focus_property=None)
             rendered = None

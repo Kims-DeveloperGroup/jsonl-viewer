@@ -1,0 +1,10 @@
+JSONL VIEWER • READ ONLY • SIMPLE
+Session: session-01 • Conversation: conversation-01 • Agent: agent-01
+> 1 │ {
+> 1 │   "content": [
+> 1 │     0,
+> 1 │     1,
+> 1 │     2,
+          ^
+Record 1/1 • source line 1
+? help • q close

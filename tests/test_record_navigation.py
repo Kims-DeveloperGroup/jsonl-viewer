@@ -151,17 +151,22 @@ class RecordNavigationTests(unittest.TestCase):
                     break
             else:
                 self.fail('page-down did not reach record boundary')
-        view.step('page_up')
-        self.assertEqual((view.state.selected_index, view.state.record_line_offset), (1, 0))
-        self.assertEqual(view.state.message, 'Last record.')
-        view.step('page_down')
+        result = view.step('page_up')
+        self.assertEqual(view.state.selected_index, 1)
         self.assertGreater(view.state.record_line_offset, 0)
-        self.assertIsNone(view.state.message)
-        view.step('page_up')
-        self.assertEqual((view.state.selected_index, view.state.record_line_offset), (1, 0))
-        self.assertIsNone(view.state.message)
-        view.step('page_up')
+        self.assertEqual(result.cursor.line_index, result.characters[-1].position.line_index)
+        self.assertEqual(view.state.message, 'Last record.')
+        while view.state.record_line_offset:
+            offset = view.state.record_line_offset
+            result = view.step('page_up')
+            self.assertEqual(view.state.selected_index, 1)
+            self.assertLess(view.state.record_line_offset, offset)
+            self.assertEqual(result.cursor.line_index, result.characters[-1].position.line_index)
+            self.assertIsNone(view.state.message)
+        result = view.step('page_up')
         self.assertEqual(view.state.selected_index, 0)
+        self.assertGreater(view.state.record_line_offset, 0)
+        self.assertEqual(result.cursor.line_index, result.characters[-1].position.line_index)
         self.assertEqual(view.state.message, 'First record.')
 
     def test_page_aliases_cycle_short_records_and_singleton_boundary_resets(self):
@@ -187,9 +192,10 @@ class RecordNavigationTests(unittest.TestCase):
             self.fail('singleton last page did not wrap')
         self.assertEqual(view.state.record_line_offset, 0)
         self.assertEqual(view.state.cursor, view.render().characters[0].position)
-        view.step('page_up')
+        result = view.step('page_up')
         self.assertEqual(view.state.message, 'Only record.')
-        self.assertEqual(view.state.record_line_offset, 0)
+        self.assertGreater(view.state.record_line_offset, 0)
+        self.assertEqual(result.cursor.line_index, result.characters[-1].position.line_index)
 
     def test_page_boundary_preserves_folds_search_and_error_recovery(self):
         source = _source({'content': ['needle']}, {'content': ['needle']})

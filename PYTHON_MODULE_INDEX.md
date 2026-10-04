@@ -97,7 +97,7 @@ unit imports Story or any third-party runtime package.
 - **Direct internal dependencies:** None.
 - **State/resources:** `ViewState` owns session folds, cursor/preferred column,
   container focus, retained property-key reveal, and search/prompt state.
-  `RenderResult` owns bounded visible geometry, sibling metadata, and deterministic
+  `RenderResult` owns bounded visible geometry, full-record navigable row indices, sibling metadata, and deterministic
   visible/idle frame text. No module state, I/O, or lifecycle ownership.
 - **Verification:** Engine, cursor/folding, rendering, search, and sample tests;
   `docs/design-system.md` describes the behavior.
@@ -262,7 +262,7 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer.engine`
 
 - **Source:** `src/jsonl_viewer/engine.py`
-- **Responsibility:** Coordinate one transient read-only view through the host.
+- **Responsibility:** Coordinate one transient read-only view through the host. Reveal adjacent cursor pages using bounded row metadata and constant render probes; page commands land on the last/first row according to direction.
 - **Supported surface:** Root-facade `view_jsonl(source, spec, host)` accepts exact
   immutable bytes, returns None, and persists no view state.
 - **Direct internal dependencies:** `_input`, `_model`, `_render`, `_search`,
