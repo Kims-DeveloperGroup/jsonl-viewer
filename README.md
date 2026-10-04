@@ -214,7 +214,7 @@ priority and does not constrain search.
 All `h/j/k/l` keys reveal adjacent JSON content across page boundaries.
 Forward crossing places the cursor on the next page’s first JSON row;
 backward crossing places it on the previous page’s last JSON row.
-`h/l` choose the first/last character; `j/k` retain the preferred column.
+`l` chooses the first character and `h` the last; `j/k` retain the preferred column.
 At a record boundary, movement enters the next record’s first row or the
 previous record’s final row and cycles at the snapshot endpoints. Existing
 first/last/only-record footer notices apply when crossing a record boundary.
