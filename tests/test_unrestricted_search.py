@@ -31,6 +31,33 @@ def _body(frame: str) -> str:
 
 
 class FullTextOccurrenceTests(unittest.TestCase):
+    def test_public_loop_key_search_reveals_all_contiguous_anchor_segments(self):
+        source = _source({"need": 0})
+        for color in (False, True):
+            with self.subTest(color=color):
+                host = self._view(source, "search\tneed", size=(12, 8), color=color)
+                frame = host.frames[-1]
+                self.assertIn("@ 1 │ ⟦need⟧", strip_ansi(frame))
+                self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
+                if color:
+                    self.assertIn("n", styled_text(frame, "7"))
+                else:
+                    self.assertIn("^", frame)
+
+    def test_public_loop_search_keeps_whole_bare_keyword_when_only_brackets_overflow(self):
+        source = _source({"content": "x" * 100 + "needle" + "y" * 20})
+        for color in (False, True):
+            with self.subTest(color=color):
+                host = self._view(source, "search\tneedle", size=(12, 8), color=color)
+                frame = host.frames[-1]
+                self.assertIn("@ 1 │ needle", strip_ansi(frame))
+                self.assertNotIn("⟦", _body(strip_ansi(frame)))
+                self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
+                if color:
+                    self.assertIn("n", styled_text(frame, "7"))
+                else:
+                    self.assertIn("^", frame)
+
     def setUp(self) -> None:
         self.spec = ViewerSpec("session", "conversation", "agent")
 

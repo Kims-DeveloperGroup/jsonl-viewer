@@ -8,7 +8,7 @@ import unittest
 from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer._model import FoldIdentity
 from jsonl_viewer._render import _text_cells, strip_ansi
-from tests.support import FakeHost, without_caret
+from tests.support import FakeHost, styled_text, without_caret
 from tests.test_blink_and_siblings import _ObservedHost
 from tests.test_cursor_and_folding import _View, _source
 
@@ -21,7 +21,63 @@ def _focused(result):
     return next(cell for cell in result.characters if cell.position == result.cursor)
 
 
+def _host_cursor_glyph(frame):
+    """Read painted focus without rendering again or inspecting engine state."""
+    if "\x1b" in frame:
+        return styled_text(frame, "7").strip("{}[]") or None
+    lines = frame.splitlines()
+    for row, line in enumerate(lines):
+        if line.strip() == "^":
+            column = line.index("^")
+            return next((character for index, character in enumerate(lines[row - 1])
+                         if _text_cells(lines[row - 1][:index]) == column), None)
+    return None
+
+
 class HorizontalScrollingTests(unittest.TestCase):
+    def test_public_loop_reveals_wide_cells_in_two_column_body_and_retains_idle_focus(self):
+        cases = (("界界界", ("goto\t10000",)),
+                 ({"value": "界界界"},
+                  ("toggle_mode", "goto\t10000", "cursor_down") + ("text\tl",) * 9))
+        for value, setup in cases:
+            source = b"0\n" * 9999 + _source(value)
+            for color in (False, True):
+                with self.subTest(value=value, color=color):
+                    events = (*setup, "text\tl", "idle", "idle", "clear_search", "text\tl", "text\th", "close")
+                    host = _ObservedHost(events, size=(12, 8), color=color)
+                    view_jsonl(source, ViewerSpec("s", "c", "a", input_protocol="keys"), host)
+                    target = len(setup) + 1
+                    self.assertEqual(_host_cursor_glyph(host.observed[target - 1]), '"')
+                    for index in (target, target + 2, target + 3, target + 4, target + 5):
+                        frame = host.observed[index]
+                        self.assertEqual(_host_cursor_glyph(frame), "界")
+                        self.assertTrue(any(line.endswith("10000 │ 界") for line in _body(frame)))
+                        self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
+                    self.assertIsNone(_host_cursor_glyph(host.observed[target + 1]))
+                    self.assertEqual(_body(host.observed[target]), _body(host.observed[target + 1]))
+                    self.assertEqual(host.observed[target], host.observed[target + 2])
+                    self.assertEqual(host.close_calls, 1)
+
+    def test_public_loop_cursor_uses_neighbors_after_search_and_sibling_reveal(self):
+        cases = (({"content": "x" * 100 + "needle" + "y" * 20},
+                  ("search\tneedle",), (40, 12), "n", "e"),
+                 ({"content": {"first": "x" * 100 + "needle" + "y" * 20, "second": 1}},
+                  ("search\tneedle", "next_sibling"), (12, 8), "s", "e"))
+        for value, setup, size, first, following in cases:
+            source = _source(value)
+            for color in (False, True):
+                with self.subTest(setup=setup, color=color):
+                    host = _ObservedHost((*setup, "text\tl", "text\th", "idle", "idle", "close"),
+                                         size=size, color=color)
+                    view_jsonl(source, ViewerSpec("s", "c", "a", input_protocol="keys"), host)
+                    target = len(setup)
+                    self.assertEqual(_host_cursor_glyph(host.observed[target]), first)
+                    self.assertEqual(_host_cursor_glyph(host.observed[target + 1]), following)
+                    self.assertEqual(_host_cursor_glyph(host.observed[target + 2]), first)
+                    self.assertEqual(_host_cursor_glyph(host.observed[target + 4]), first)
+                    self.assertEqual(host.close_calls, 1)
+                    self.assertEqual(source, _source(value))
+
     def test_arrows_pan_half_body_clamp_and_keep_gutters_and_chrome_fixed(self):
         view = _View(_source({"content": "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 5}), size=(40, 12))
         initial = view.render()
@@ -63,6 +119,12 @@ class HorizontalScrollingTests(unittest.TestCase):
         result = view.step("cursor_right")
         self.assertEqual(result.cursor.line_index, 1)
         self.assertEqual(result.cursor.column, edge.position.column + 1)
+        if result.horizontal_offset == 0:
+            edge = _focused(result)
+            self.assertEqual(edge.screen_column, view.size[0] - 1)
+            result = view.step("cursor_right")
+            self.assertEqual(result.cursor.line_index, 1)
+            self.assertEqual(result.cursor.column, edge.position.column + 1)
         self.assertGreater(result.horizontal_offset, 0)
         seen = []
         for _ in range(120):

@@ -81,7 +81,7 @@ Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
 ```
 
 The [design system](docs/design-system.md) defines every visual role and user
-state. Fifteen [deterministic full-frame samples](docs/samples/README.md) cover
+state. Sixteen [deterministic full-frame samples](docs/samples/README.md) cover
 Simple, Verbose, search, nested expansion, leaf truncation, malformed input,
 cursor folding, search through folds, tiny terminals, and plain / `NO_COLOR` output.
 

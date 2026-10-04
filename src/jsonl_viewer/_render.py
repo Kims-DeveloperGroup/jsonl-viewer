@@ -674,11 +674,18 @@ def _clusters(text: str) -> Iterable[str]:
         yield cluster
 
 
-def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True) -> _RecordLine:
+def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
+                 focus_span: tuple[int, int] | None = None) -> _RecordLine:
     """Slice body cells without splitting clusters or changing fixed gutters."""
     gutter, segments = line.segments[:4], line.segments[4:]
     total = sum(_text_cells(segment.text) for segment in segments)
     right_clipped = overflow_cue and total > offset + width
+    if (focus_span is not None and offset <= focus_span[0]
+            and focus_span[1] <= offset + width
+            and focus_span[1] > offset + width - 1):
+        # A focused cluster gets the final cell before an overflow annotation.
+        # Apply this on every frame, not just on the transition that revealed it.
+        right_clipped = False
     end = offset + max(0, width - int(right_clipped))
     result: list[_Segment] = list(gutter)
     logical = 0
@@ -1083,32 +1090,42 @@ def render_frame(
     max_horizontal_offset = max(0, projected_width - body_width)
     if has_data:
         horizontal_offset = min(max(0, horizontal_offset), max_horizontal_offset)
+    projected_body = tuple(body)
     focus_line: tuple[int, int] | None = None
     focus_prefix = False
     first_focus_cells = 0
-    if state.reveal_cursor or state.reveal_match or state.focus_container is not None or state.cursor is None:
-        target = _resolve_cursor(state, logical_characters)
-        target_cell = next((cell for cell in logical_characters if cell.position == target), None)
-        if target_cell is not None:
-            target_row = next(line for line in body if isinstance(line, _RecordLine)
-                              and line.record_index == target.record_index and line.line_index == target.line_index)
-            start = target.column - target_row.gutter_columns
-            end = start + _text_cells(target_cell.text)
-            available = max(1, body_width - int(horizontal_offset < max_horizontal_offset))
+    target = _resolve_cursor(state, logical_characters)
+    target_cell = next((cell for cell in logical_characters if cell.position == target), None)
+    cursor_line: tuple[int, int] | None = None
+    cursor_span: tuple[int, int] | None = None
+    if target_cell is not None:
+        target_row = next(line for line in projected_body if isinstance(line, _RecordLine)
+                          and line.record_index == target.record_index and line.line_index == target.line_index)
+        start = target.column - target_row.gutter_columns
+        end = start + _text_cells(target_cell.text)
+        cursor_line = (target.record_index, target.line_index)
+        cursor_span = (start, end)
+        if state.reveal_cursor or state.reveal_match or state.focus_container is not None or state.cursor is None:
+            available = body_width
             if state.reveal_match and target_cell.search_focus:
                 # Give the keyword priority over context, brackets, and ellipsis.
                 # The footer already reports overflow when all body cells are needed.
                 focus_line = (target.record_index, target.line_index)
                 column = 0
+                match_started = False
                 for segment in target_row.segments[4:]:
                     cells = _text_cells(segment.text)
                     if segment.role == "match_current":
-                        start, end = column, column + cells
+                        if not match_started:
+                            start = column
+                            match_started = True
+                        end = column + cells
+                    elif match_started:
                         break
                     column += cells
                 if end - start + 2 <= body_width:
                     start, end = start - 1, end + 1
-                else:
+                elif end - start > body_width:
                     first_focus_cells = _text_cells(target_cell.text)
                     focus_prefix = body_width >= first_focus_cells + 2
                     if focus_prefix:
@@ -1124,7 +1141,8 @@ def render_frame(
     body = [(_focus_prefix_window(line, horizontal_offset, body_width, first_focus_cells)
              if focus_prefix and (line.record_index, line.line_index) == focus_line
              else _window_line(line, horizontal_offset, body_width,
-                               overflow_cue=(line.record_index, line.line_index) != focus_line))
+                               overflow_cue=(line.record_index, line.line_index) != focus_line,
+                               focus_span=cursor_span if (line.record_index, line.line_index) == cursor_line else None))
             if isinstance(line, _RecordLine) else line for line in body]
     width_clipped = bool(horizontal_offset or max_horizontal_offset)
     characters = tuple(
@@ -1133,6 +1151,12 @@ def render_frame(
     )
     cursor = _resolve_cursor(state, characters)
     focused = next((cell for cell in characters if cell.position == cursor), None)
+    navigation_state = replace(state, cursor=cursor, horizontal_offset=horizontal_offset)
+    logical_characters = tuple(
+        cell for row, line in enumerate(projected_body, start=len(header))
+        if isinstance(line, _RecordLine)
+        for cell in _logical_characters(line, row, navigation_state, body_width)
+    )
     if caret_rows and focused is not None:
         characters = tuple(replace(cell, screen_row=cell.screen_row + int(cell.screen_row > focused.screen_row))
                            for cell in characters)
