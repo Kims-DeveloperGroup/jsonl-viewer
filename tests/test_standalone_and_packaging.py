@@ -20,9 +20,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from jsonl_viewer import _standalone
+from jsonl_viewer import ViewerTerminal, _terminal
 from jsonl_viewer._input import MAX_SOURCE_BYTES
-from jsonl_viewer._standalone import _TerminalHost, _read_bounded
+from jsonl_viewer._standalone import _read_bounded
+from jsonl_viewer._terminal import _TerminalHost
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -115,22 +116,26 @@ class StandaloneTests(unittest.TestCase):
         output_stream = output if output is not None else _TerminalBuffer()
         fake_termios = mock.Mock()
         fake_termios.TCSADRAIN = 1
+        fake_termios.TCSANOW = 0
+        fake_termios.ECHO = 8
+        fake_termios.ECHONL = 64
         fake_termios.VINTR = 0
         fake_termios.VEOF = 1
         fake_termios.tcgetattr.return_value = [0, 0, 0, 0, 0, 0, [b"\x03", b"\x04"]]
         fake_tty = mock.Mock()
-        host = _TerminalHost(input_stream, output_stream, no_color=True)
+        host = _TerminalHost(ViewerTerminal(input_stream, output_stream, no_color=True))
         with (
-            mock.patch.object(_standalone, "termios", fake_termios),
-            mock.patch.object(_standalone, "tty", fake_tty),
-            mock.patch.object(_standalone.os, "read", side_effect=script.read),
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
+            mock.patch.object(_terminal, "termios", fake_termios),
+            mock.patch.object(_terminal, "tty", fake_tty),
+            mock.patch.object(_terminal.os, "read", side_effect=script.read),
             mock.patch.object(
-                _standalone.time,
+                _terminal.time,
                 "monotonic",
                 return_value=100.0,
             ),
             mock.patch.object(
-                _standalone.select,
+                _terminal.select,
                 "select",
                 side_effect=script.select,
             ),
@@ -153,7 +158,7 @@ class StandaloneTests(unittest.TestCase):
         self,
         path: Path,
     ) -> tuple[subprocess.Popen[bytes], int]:
-        if not hasattr(os, "openpty") or _standalone.termios is None:
+        if not hasattr(os, "openpty") or _terminal.termios is None:
             self.skipTest("POSIX PTY support is unavailable")
         try:
             import fcntl
@@ -294,7 +299,7 @@ class StandaloneTests(unittest.TestCase):
                 return True
 
         output = TerminalBuffer()
-        host = _TerminalHost(TerminalBuffer(), output, no_color=False)
+        host = _TerminalHost(ViewerTerminal(TerminalBuffer(), output, no_color=False))
         with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
             self.assertTrue(host.color_enabled())
         with mock.patch.dict(
@@ -319,10 +324,11 @@ class StandaloneTests(unittest.TestCase):
                 script = _RawScript(raw, [])
                 event, before, complete, _, termios, tty = self._scripted_event(script)
                 self.assertEqual(event, expected)
-                self.assertEqual(before, "\x1b[?1049h\x1b[?25l\x1b[H\x1b[2JPRIOR FRAME")
+                self.assertEqual(before, "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h\x1b[H\x1b[2JPRIOR FRAME")
                 self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
-                tty.setcbreak.assert_called_once_with(17)
-                termios.tcsetattr.assert_called_once_with(17, 1, termios.tcgetattr.return_value)
+                tty.setcbreak.assert_called_once_with(17, 0)
+                self.assertEqual(termios.tcsetattr.call_count, 2)
+                self.assertEqual(termios.tcsetattr.call_args.args, (17, 1, termios.tcgetattr.return_value))
                 script.assert_consumed(self)
 
     def test_escape_sequences_are_bounded_drained_and_never_leak(self) -> None:
@@ -343,9 +349,9 @@ class StandaloneTests(unittest.TestCase):
                 script.values.clear()
                 script.assert_consumed(self)
                 self.assertNotIn("Search", before)
-        for suffix, readiness, key in [(b"", [False], "escape"), (b"[", [True, False], "unknown_escape")]:
+        for suffix, readiness, event in [(b"", [False], "key\tescape"), (b"[", [True, False], "mouse\tinvalid")]:
             script = _RawScript(b"\x1b" + suffix, readiness)
-            self.assertEqual(self._scripted_event(script)[0], "key\t" + key)
+            self.assertEqual(self._scripted_event(script)[0], event)
             script.assert_consumed(self)
 
     def test_escape_drain_ceiling_fails_closed_and_restores(self) -> None:
@@ -371,23 +377,23 @@ class StandaloneTests(unittest.TestCase):
 
     def test_plain_host_returns_literal_bounded_line_transport(self) -> None:
         values = ["esc", "/content alpha", " / content 개요 ", "g 2", "q", "\tq\t", ""]
-        host = _TerminalHost(io.StringIO("\n".join(values) + "\n"), io.StringIO(), no_color=True)
+        host = _TerminalHost(ViewerTerminal(io.StringIO("\n".join(values) + "\n"), io.StringIO(), no_color=True))
         for value in values:
             self.assertEqual(host.read_event(), "line\t" + value)
         self.assertIsNone(host.read_event())
         for count in [8192, 8193, 20000]:
             with self.subTest(count=count):
-                host = _TerminalHost(io.StringIO("x" * count + "\nq\n"), io.StringIO(), no_color=True)
+                host = _TerminalHost(ViewerTerminal(io.StringIO("x" * count + "\nq\n"), io.StringIO(), no_color=True))
                 expected = "line\t" + "x" * count if count == 8192 else "key\tunknown"
                 self.assertEqual(host.read_event(), expected)
                 self.assertEqual(host.read_event(), "line\tq")
-        host = _TerminalHost(io.StringIO("x" * 65537), io.StringIO(), no_color=True)
+        host = _TerminalHost(ViewerTerminal(io.StringIO("x" * 65537), io.StringIO(), no_color=True))
         with self.assertRaisesRegex(ValueError, "drain bound"):
             host.read_event()
 
     def test_present_flush_failure_propagates_without_retaining_view_state(self) -> None:
         output = _FlushControlledBuffer()
-        host = _TerminalHost(io.StringIO(), output, no_color=True)
+        host = _TerminalHost(ViewerTerminal(io.StringIO(), output, no_color=True))
         host.present("FRAME A")
         output.fail_next_flush = True
         with self.assertRaisesRegex(RuntimeError, "flush failed"):
@@ -837,20 +843,25 @@ class StandaloneTests(unittest.TestCase):
         output_stream = TerminalBuffer()
         fake_termios = mock.Mock()
         fake_termios.TCSADRAIN = 1
+        fake_termios.TCSANOW = 0
+        fake_termios.ECHO = 8
+        fake_termios.ECHONL = 64
         fake_termios.VINTR = 0
         fake_termios.VEOF = 1
         fake_termios.tcgetattr.return_value = [0, 0, 0, 0, 0, 0, [b"\x03", b"\x04"]]
         fake_tty = mock.Mock()
         with (
-            mock.patch.object(_standalone, "termios", fake_termios),
-            mock.patch.object(_standalone, "tty", fake_tty),
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color"}),
+            mock.patch.object(_terminal, "termios", fake_termios),
+            mock.patch.object(_terminal, "tty", fake_tty),
             self.assertRaisesRegex(RuntimeError, "hosted failure"),
         ):
-            with _TerminalHost(input_stream, output_stream, no_color=True):
+            with _TerminalHost(ViewerTerminal(input_stream, output_stream, no_color=True)):
                 raise RuntimeError("hosted failure")
 
-        fake_tty.setcbreak.assert_called_once_with(17)
-        fake_termios.tcsetattr.assert_called_once_with(17, 1, fake_termios.tcgetattr.return_value)
+        fake_tty.setcbreak.assert_called_once_with(17, 0)
+        self.assertEqual(fake_termios.tcsetattr.call_count, 2)
+        self.assertEqual(fake_termios.tcsetattr.call_args.args, (17, 1, fake_termios.tcgetattr.return_value))
         output = output_stream.getvalue()
         self.assertTrue(output.startswith("\x1b[?1049h\x1b[?25l"))
         self.assertTrue(output.endswith("\x1b[?25h\x1b[?1049l"))
@@ -881,16 +892,16 @@ class StandaloneTests(unittest.TestCase):
 
 
     def test_idle_poll_preserves_partial_utf8_and_distinguishes_eof(self):
-        host = _TerminalHost(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
+        host = _TerminalHost(ViewerTerminal(_TerminalBuffer(), _TerminalBuffer(), no_color=True))
         host._interactive = True
         host._descriptor = 17
         encoded = "界".encode()
         ready = ([17], [], [])
         idle = ([], [], [])
-        with mock.patch.object(_standalone.time, "monotonic", return_value=100.0), \
-             mock.patch.object(_standalone.select, "select", side_effect=[
+        with mock.patch.object(_terminal.time, "monotonic", return_value=100.0), \
+             mock.patch.object(_terminal.select, "select", side_effect=[
             idle, ready, idle, ready, ready, ready,
-        ]) as poll, mock.patch.object(_standalone.os, "read", side_effect=[
+        ]) as poll, mock.patch.object(_terminal.os, "read", side_effect=[
             encoded[:1], encoded[1:2], encoded[2:], b"",
         ]) as read:
             self.assertEqual(host.read_event(), "idle")
@@ -901,20 +912,20 @@ class StandaloneTests(unittest.TestCase):
         self.assertTrue(all(call.args == ([17], [], [], 0.5) for call in poll.call_args_list))
 
     def test_idle_deadline_is_not_restarted_by_partial_utf8(self):
-        host = _TerminalHost(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
+        host = _TerminalHost(ViewerTerminal(_TerminalBuffer(), _TerminalBuffer(), no_color=True))
         host._interactive = True
         host._descriptor = 17
         ready = ([17], [], [])
-        with mock.patch.object(_standalone.time, "monotonic", side_effect=[100.0, 100.1, 100.4]), \
-             mock.patch.object(_standalone.select, "select", side_effect=[ready, ([], [], [])]) as poll, \
-             mock.patch.object(_standalone.os, "read", return_value=b"\xe7"):
+        with mock.patch.object(_terminal.time, "monotonic", side_effect=[100.0, 100.1, 100.4]), \
+             mock.patch.object(_terminal.select, "select", side_effect=[ready, ([], [], [])]) as poll, \
+             mock.patch.object(_terminal.os, "read", return_value=b"\xe7"):
             self.assertEqual(host.read_event(), "idle")
         self.assertAlmostEqual(poll.call_args_list[0].args[3], 0.4)
         self.assertAlmostEqual(poll.call_args_list[1].args[3], 0.1)
 
     def test_ordinary_line_host_does_not_poll_or_emit_idle(self):
-        host = _TerminalHost(io.StringIO("J\nK\n"), io.StringIO(), no_color=True)
-        with mock.patch.object(_standalone.select, "select") as poll:
+        host = _TerminalHost(ViewerTerminal(io.StringIO("J\nK\n"), io.StringIO(), no_color=True))
+        with mock.patch.object(_terminal.select, "select") as poll:
             self.assertEqual(host.read_event(), "line\tJ")
             self.assertEqual(host.read_event(), "line\tK")
             self.assertIsNone(host.read_event())
@@ -971,7 +982,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.5.4")
+        self.assertEqual(project["version"], "0.6.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
@@ -1024,8 +1035,8 @@ class PackagingBoundaryTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
-        self.assertEqual(len(modules), 10)
-        self.assertEqual(sum(len(value) for value in graph.values()), 18)
+        self.assertEqual(len(modules), 12)
+        self.assertEqual(sum(len(value) for value in graph.values()), 24)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -1033,8 +1044,8 @@ class PackagingBoundaryTests(unittest.TestCase):
         index = (ROOT / "PYTHON_MODULE_INDEX.md").read_text(encoding="utf-8")
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
-        self.assertIn("Importable production units indexed: 10.", index)
-        self.assertIn("Direct internal dependency edges indexed: 18.", index)
+        self.assertIn("Importable production units indexed: 12.", index)
+        self.assertIn("Direct internal dependency edges indexed: 24.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
@@ -1059,9 +1070,11 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "_input.py",
                 "_json.py",
                 "_model.py",
+                "_mouse.py",
                 "_render.py",
                 "_search.py",
                 "_standalone.py",
+                "_terminal.py",
                 "contracts.py",
                 "engine.py",
                 "py.typed",

@@ -70,8 +70,10 @@ It is descriptive current-state navigation, not a plan or history.
 - The public engine MUST interact with terminals only through `ViewerHost`.
   When a host is injected, the package MUST NOT assume ownership of raw mode,
   alternate screen, cursor, signals, geometry, input, output, or cleanup.
-- The standalone adapter MAY own those resources only around its own CLI call
-  and MUST restore them visibly.
+- A terminal-owner adapter MAY own those resources around an explicit
+  terminal-owned library or CLI call and MUST restore them visibly. The public
+  facade may dispatch that call to the owner, while the engine remains host-driven.
+  Supplying a host MUST keep the injected-host ownership boundary intact.
 - Production modules MUST NOT reach into underscored names owned by another
   package, mutate peer internals, modify `sys.path`, or use wildcard imports.
 - Dynamic imports are allowed only for a documented platform extension point;

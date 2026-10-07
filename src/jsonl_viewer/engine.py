@@ -5,6 +5,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import replace
 
+from ._mouse import hit_test, parse_mouse
 from ._input import InputFailure, parse_jsonl
 from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState, VisibleCharacter
 from ._render import render_frame, render_loading
@@ -194,6 +195,23 @@ def _transition(
         return action(state, None)
     if type(event) is not str:
         return _input_error(state, "Unsupported host event; press ? for help."), False
+    if spec.input_protocol == "keys" and event.startswith("mouse\t"):
+        mouse = parse_mouse(event)
+        if (mouse is None or rendered is None or state.prompt is not None
+                or state.help_visible or malformed
+                or not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows)):
+            return state, False
+        if mouse.action in {"cursor_up", "cursor_down"}:
+            return action(state, mouse.action)
+        if mouse.action == "click":
+            cell = hit_test(mouse, rendered)
+            if cell is not None:
+                return replace(state, cursor=cell.position,
+                               preferred_column=cell.position.column,
+                               focus_container=None, focus_property=None,
+                               reveal_match=False, reveal_cursor=False,
+                               message=None, message_is_error=False), False
+        return state, False
     if len(event) > _MAX_EVENT_CHARACTERS + len("text\t"):
         return _input_error(state, "Unsupported host event; press ? for help."), False
     kind, separator, payload = event.partition("\t")
@@ -688,6 +706,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
         raise TypeError("spec must be a ViewerSpec")
 
     closed = False
+    active_failure: BaseException | None = None
     try:
         columns, rows = host.terminal_size()
         color = bool(host.color_enabled())
@@ -745,5 +764,12 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                 or state.reveal_match):
                 state = replace(state, focus_property=None)
             rendered = None
+    except BaseException as failure:
+        active_failure = failure
+        raise
     finally:
-        host.close_view()
+        try:
+            host.close_view()
+        except BaseException:
+            if active_failure is None:
+                raise

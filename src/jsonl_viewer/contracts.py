@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Callable, Protocol, TextIO
 
 
 _MAX_HEADER_VALUE_CHARACTERS = 512
@@ -100,6 +100,35 @@ class ViewerSpec:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ViewerTerminal:
+    """Supply transport while transferring one view's terminal ownership.
+
+    Streams remain caller-owned and are never closed. ``read_character`` may
+    supply an existing buffered UTF-8 reader; it receives a readiness callback
+    positionally and invokes it only before reading new bytes, not before
+    delivering already buffered characters. It returns one decoded character
+    or reports EOF with an empty string or ``EOFError``.
+    """
+
+    input_stream: TextIO
+    output_stream: TextIO
+    read_character: Callable[[Callable[[], None] | None], str] | None = None
+    no_color: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.no_color) is not bool:
+            raise TypeError("no_color must be bool")
+        for stream, methods, label in (
+            (self.input_stream, ("read", "readline", "isatty"), "input_stream"),
+            (self.output_stream, ("write", "flush", "isatty"), "output_stream"),
+        ):
+            if any(not callable(getattr(stream, method, None)) for method in methods):
+                raise TypeError(f"{label} must be a text stream")
+        if self.read_character is not None and not callable(self.read_character):
+            raise TypeError("read_character must be callable or None")
+
+
 class ViewerHost(Protocol):
     """Injected terminal-lifecycle boundary used by :func:`view_jsonl`.
 
@@ -115,7 +144,13 @@ class ViewerHost(Protocol):
     ``close``, ``goto<TAB>LINE``, or ``search<TAB>QUERY``.
 
     ``input_protocol='keys'`` additionally accepts ``text<TAB>TEXT``,
-    ``line<TAB>COMMAND``, and ``key<TAB>NAME``. Each payload is bounded to
+    ``line<TAB>COMMAND``, ``key<TAB>NAME``, and
+    ``mouse<TAB>BUTTON<TAB>COLUMN<TAB>ROW<TAB>PHASE``. Mouse buttons are decimal
+    0..255; coordinates are positive one-based terminal cells of at most six
+    digits; phase is ``press`` or ``release``. The viewer consumes mouse input
+    during prompts/help and ignores malformed or unsupported reports. Wheel
+    presses reuse j/k cursor movement; left presses focus visible JSON cells.
+    Each text/key/line payload is bounded to
     8,192 characters, independently of its envelope. Text contains printable
     Unicode code points; line input may also contain tab separators. Hosts
     preserve literal line input: the viewer owns command grammar and bindings.
