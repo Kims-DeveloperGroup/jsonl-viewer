@@ -739,7 +739,7 @@ def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCha
                     None if segment.container is None else FoldIdentity(line.record_index, segment.container),
                     segment.delimiter, segment.role == "match_current",
                     None if segment.property is None else FoldIdentity(line.record_index, segment.property),
-                    segment.key_anchor, screen_column,
+                    segment.key_anchor, screen_column, width,
                 )
             column += width
             screen_column += width

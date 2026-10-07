@@ -11,7 +11,7 @@ or terminal-driver implementations.
 
 ## Capabilities
 
-- a three-name public API: `ViewerSpec`, `ViewerHost`, and `view_jsonl`;
+- a four-name public API: `ViewerSpec`, `ViewerHost`, `ViewerTerminal`, and `view_jsonl`;
 - Simple and Verbose views, with configurable date/time, request-type, and
   content fields ordered first;
 - recursive, bounded expansion of string values that contain complete strict
@@ -30,7 +30,7 @@ or terminal-driver implementations.
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
   controls, bidi controls, and other format controls; and
-- a standalone terminal owner plus an injected host boundary for applications
+- an explicit terminal owner for library and CLI calls plus an injected host boundary for applications
   that already own raw mode, signals, geometry, input, output, and cleanup.
 
 There is no writer API, persistence, live tail, network access, replay, retry,
@@ -210,6 +210,59 @@ view_jsonl(snapshot_bytes, spec, host)
 The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
+
+## Embed with viewer-owned terminal control
+
+Version 0.6.0 can own the terminal around a library call. Existing
+`view_jsonl(snapshot_bytes, spec, host)` calls keep their borrowed-host behavior.
+
+```python
+import sys
+from jsonl_viewer import ViewerSpec, ViewerTerminal, view_jsonl
+
+spec = ViewerSpec("session-01", "conversation-01", "agent-01")
+terminal = ViewerTerminal(sys.stdin, sys.stdout)
+view_jsonl(snapshot_bytes, spec, terminal=terminal, transient_only=True)
+```
+
+Omitting both `host` and `terminal` uses the process's standard input and output.
+The owned path uses physical-key input through a copy of `spec`; it does not
+mutate the caller's specification or close supplied streams. It owns raw mode,
+the alternate screen, mouse reports, decoding and cleanup for that call.
+`transient_only=True` refuses unsupported terminals before displaying content.
+A supplied `host` cannot be combined with `terminal` or `transient_only=True`.
+
+An embedding application with buffered input can supply
+`ViewerTerminal(input_stream, output_stream, read_character=read_character)`.
+The callback receives an optional `before_read` readiness function, returns one
+decoded character, and may raise `EOFError` for EOF. It must invoke that function
+before reading new bytes and deliver already buffered characters without waiting.
+The terminal owner retains decoding across idle intervals and bounded escapes.
+The application lends its current terminal baseline and resumes only after cleanup;
+it must not create another viewer screen or read concurrently.
+
+### Mouse navigation
+
+Ordinary mouse-wheel reports move the cursor one navigable line, like `j`/`k`,
+including automatic viewport scrolling. A left press on a visible JSON character
+moves the cursor to that character. Clicking either cell of a wide character
+selects the same character; panning and plain-mode caret rows are accounted for.
+Headers, gutters, empty cells, releases, motion and other buttons do not navigate.
+Mouse input is consumed without editing or cancelling search/goto drafts or help.
+
+The terminal owner enables SGR mouse reporting before normal tracking and disables
+both during cleanup. This routes ordinary wheel input to the viewer instead of
+terminal history. iTerm2 must permit mouse and wheel reporting: explicitly disabling
+reporting or holding Option can force the emulator's native behavior. No terminal
+history is erased. Noninteractive line fallback retains its existing behavior.
+
+Physical-input hosts may return
+`mouse<TAB>BUTTON<TAB>COLUMN<TAB>ROW<TAB>PHASE` in `input_protocol="keys"`.
+Button is the SGR button/modifier value (0–255); coordinates are positive one-based
+terminal cells with at most six decimal digits; phase is `press` or `release`.
+Wheel codes 64/65 and left-button code 0 use their existing navigation after
+modifier bits are removed. Invalid or unsupported mouse input has no action.
+Injected hosts remain responsible for enabling, decoding and restoring mouse modes.
 
 ### New in 0.5.4
 

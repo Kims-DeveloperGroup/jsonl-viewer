@@ -239,7 +239,7 @@ cursor control is embedded in a prompt frame.
 
 ## Keyboard and focus behavior
 
-The package consumes host input without reading a terminal. `ViewerSpec.input_protocol` defaults to `"semantic"`. Version 0.4.0 retains the
+The pure engine consumes host input without reading a terminal. `ViewerSpec.input_protocol` defaults to `"semantic"`. Version 0.4.0 retains the
 three public exports and five host methods, adds cursor/fold events, and
 changes the main-view h/j/k bindings; see the
 [migration guide](../README.md#migrating-to-040). Hosts selecting
@@ -512,7 +512,7 @@ The embedding application must authorize the user, select the correct bounded
 snapshot, and apply any retention or redaction policy before calling the
 viewer.
 
-The library does not open files, use the network, emit telemetry, persist view
+The snapshot API does not open source files, use the network, emit telemetry, persist view
 state, or return viewed content. Its standalone adapter performs only the
 explicit bounded path or standard-input read. Valid JSON values are displayed
 after control neutralization; malformed input diagnostics expose a safe reason
@@ -538,6 +538,28 @@ and source location without echoing the malformed record.
    source bytes and parsed string types. Full-text search inspects decoded
    children under bounded strict decoding rules, using original encoded text
    only when those children have no direct hit.
+
+## Viewer-owned mouse capture (0.6.0)
+
+An explicit terminal-owned call uses `ViewerTerminal` streams and, when supplied,
+the embedding application's buffered character reader. The facade dispatches to
+one private terminal owner; the pure engine still consumes `ViewerHost` events.
+Existing injected-host calls never transfer terminal modes to the package.
+
+The owner enters one alternate screen, enables SGR coordinates before normal mouse
+tracking, and consumes wheel/click reports. A wheel report moves the character
+cursor one navigable row using existing vertical cursor behavior. A left press
+hits the last displayed JSON character cell, including panning, wide and combining
+clusters, and the extra caret row in plain output. Header, gutter and blank cells,
+release/motion/other-button reports, invalid coordinates, and mouse navigation during
+prompt/help/error views are inert. A click never folds or edits source data.
+
+Before returning, cleanup disables normal tracking before SGR reporting, clears the
+alternate screen, leaves it, and restores saved terminal attributes and owned signal
+dispositions. Supplied streams stay open. The application resumes its input only
+after that cleanup; no buffered keyboard input is flushed to hide mouse reports.
+Transient-only calls refuse unsupported terminals before presenting source content.
+Native emulator reporting overrides remain outside application control.
 
 ## End-to-end standalone scenario
 
@@ -587,16 +609,14 @@ supplies generic inputs through the viewer's public contract:
    ID. The package does not interpret those generic values and shortens them
    only through content-safe responsive width clipping. Each supplied header
    string is limited to 512 characters.
-4. An integration using 0.4.0 selects `input_protocol="keys"` and validates
-   that capability before opening the terminal. Story's adapter passes the
-   immutable bytes to `view_jsonl` and transports decoded physical text/keys
-   or literal ordinary lines through `ViewerHost`. The engine owns all viewer
-   bindings, command grammar, search/goto drafts, editing, and cancellation.
-   Story remains sole owner of raw mode, signals, geometry, input, output,
-   application focus, and cleanup. Integrations upgrading from older releases
-   must update their dependency,
-   constructor signature checks, and semantic search events as described in
-   the migration guide.
+4. An integration using 0.6.0 may lend `ViewerTerminal` streams and its
+   persistent character reader to `view_jsonl(..., terminal=terminal,
+   transient_only=True)`. Story keeps its lobby echo guard and pauses its input
+   operations; jsonl-viewer owns the viewer's raw mode, alternate screen, mouse
+   reporting, physical decoding and cleanup. The engine owns cursor movement,
+   key bindings, search/goto drafts and cancellation. The injected `ViewerHost`
+   path remains available to integrations retaining their own terminal ownership.
+   Adopting applications update dependency and exact public-signature checks.
 5. A provider exchange whose `content` string is a complete JSON object is
    displayed as derived structure; a complete encoded `response_text` object
    inside it expands recursively. The literal expansion cues and footer counts
@@ -611,8 +631,11 @@ supplies generic inputs through the viewer's public contract:
    their parent objects, keys, siblings, and closing structure remain present
    and pageable. If a safety bound rejects an expansion, the user sees the
    reason and the bounded original string rather than a partial object.
-8. On `q`, EOF, or the final Escape, `jsonl-viewer` calls `close_view`. Story
-   restores its prior `/exchanges` scope/agent selection or shell frame.
+8. On `q`, EOF, final Escape, interruption or failure, the library closes
+   the view, disables its mouse modes and restores the saved terminal/screen.
+   Story resumes its guarded lobby input after cleanup, without another screen
+   lifecycle or an ECHO-enabled input gap. Ordinary wheel input inside the view
+   moves its cursor instead of terminal history; left presses target JSON cells.
 9. Story owns the pickers, labels, snapshot location, and retention policy. No
    request, response, picker choice, or viewer state is modified or persisted
    by the viewer package.

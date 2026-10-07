@@ -14,9 +14,9 @@ Source root: `src/`
 
 Package root: `src/jsonl_viewer/`
 
-Importable production units indexed: 10.
+Importable production units indexed: 12.
 
-Direct internal dependency edges indexed: 18.
+Direct internal dependency edges indexed: 24.
 
 Directed internal dependency cycles indexed: 0.
 
@@ -26,23 +26,25 @@ Directed internal dependency cycles indexed: 0.
 
 ```text
 jsonl_viewer -> contracts
-             -> engine -> contracts
-                       -> _input -> _model
-                       -> _model
-                       -> _render -> contracts/_model/_json
-                       -> _search -> _model/_json
+             -> engine -> contracts/_input/_mouse/_model/_render/_search
+             -> _terminal -> contracts/engine/_mouse
 
+_mouse -> _model
+_render -> contracts/_model/_json
+_search -> _model/_json
 _json -> _model
+_input -> _model
 
-__main__ -> _standalone -> contracts/engine/_input
+__main__ -> _standalone -> jsonl_viewer/contracts/_input
 ```
 
 The facade and standalone entry points depend inward on the stable generic
 contracts and transient engine. The engine depends on bounded parsing,
 immutable private state, pure search, and deterministic rendering. Search and
 rendering depend on shared strict bounded JSON expansion and immutable path
-types, with separate call-local traversal budgets. Reusable internals never
-depend on the standalone terminal owner. The graph is acyclic and no production
+types, with separate call-local traversal budgets. Pure engine/model/contracts/render
+modules never depend on the terminal owner; the facade imports it lazily only
+for an owned call. The graph is acyclic and no production
 unit imports Story or any third-party runtime package.
 
 ## Package and module entries
@@ -50,14 +52,16 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer`
 
 - **Source:** `src/jsonl_viewer/__init__.py`
-- **Responsibility:** Provide the intentional stable library facade.
-- **Supported surface:** Exactly `ViewerSpec`, `ViewerHost`, and `view_jsonl` in
-  `__all__` and as root imports. No internal terminal type is exported.
-- **Direct internal dependencies:** `contracts` and `engine`.
-- **State, resources, and side effects:** Owns no state or external resource;
-  import loads the public contracts and engine without I/O or terminal work.
-- **Primary verification/documentation:** `tests/test_public_api_and_engine.py`,
-  `tests/test_standalone_and_packaging.py`, and `README.md`.
+- **Responsibility:** Provide the stable library facade and select a borrowed
+  host or one viewer-owned terminal call.
+- **Supported surface:** `ViewerHost`, `ViewerSpec`, `ViewerTerminal`, and
+  `view_jsonl(source, spec, host=None, *, terminal=None, transient_only=False)`.
+  Existing supplied-host calls retain their lifecycle and return None. A host
+  cannot be combined with a terminal or `transient_only=True`.
+- **Direct internal dependencies:** `contracts`, `engine`, and lazily `_terminal`.
+- **State/resources:** Validates source/spec and ownership arguments before I/O.
+  Import and borrowed-host calls perform no process-stdio or terminal work.
+- **Verification:** Public API/engine and standalone/packaging tests; README.
 
 ### `jsonl_viewer.__main__`
 
@@ -98,7 +102,7 @@ unit imports Story or any third-party runtime package.
 - **State/resources:** `ViewState` owns session folds, logical cursor/preferred
   column, horizontal body offset, one-shot cursor reveal, container/property
   focus, and search/prompt state. `VisibleCharacter` separates logical display
-  cells from painted screen columns. `RenderResult` owns bounded visible
+  cells from painted screen columns and full-cluster screen widths. `RenderResult` owns bounded visible
   geometry, compact logical navigation candidates for viewport rows,
   full-record navigable row indices, horizontal bounds, sibling metadata, and
   deterministic visible/idle frame text. No module state, I/O, or lifecycle ownership.
@@ -221,57 +225,70 @@ unit imports Story or any third-party runtime package.
 
 ### `jsonl_viewer._standalone`
 
-- **Idle transport:** Raw input polls every 500 ms, returning semantic `idle`
-  without finalizing the incremental UTF-8 decoder. Ordinary-line transport
-  remains blocking/static; bounded escape parsing keeps its separate deadline.
-
 - **Source:** `src/jsonl_viewer/_standalone.py`
-- **Responsibility:** Adapt the generic viewer to one standalone CLI-owned
-  terminal lifecycle.
-- **Supported surface:** The installed `jsonl-viewer` entry point targets
-  internal `main(argv=None)`. `_TerminalHost` and read/parser helpers are not
-  supported library APIs. The CLI accepts the exact conversation/scope ID,
-  scope label (default `Conversation`), and optional scope subject separately.
-  Search is full-text only; there is no field-selection CLI option.
-- **Direct internal dependencies:** `_input`, `contracts`, and `engine`.
-- **State, resources, and side effects:** A `main` call opens its selected source
-  only for a bounded binary read. On a supported interactive POSIX terminal its
-  private context owns cbreak mode, alternate screen, cursor visibility, key
-  decoding, repaint, and exact restoration. It selects the public `keys`
-  input protocol and emits normalized physical keys, incrementally decoded
-  text, or bounded literal line transport. Escape recognition is limited to
-  32 bytes with a 20 ms deadline and 4,096-byte drain ceiling; overlong lines
-  drain through their terminator up to 65,536 characters. A drain-bound failure
-  raises fixed text instead of interpreting the remaining suffix. Configured
-  terminal interrupt/EOF bytes are decoded before ordinary text. The host owns
-  no viewer bindings, command grammar, prompt draft, search/goto action, or
-  cancellation-specific retained frame. EOF and interrupt are delivered to
-  the engine; terminal cleanup remains visible and host-owned. `NO_COLOR` and
-  `--no-color` disable SGR. Import alone performs no filesystem or terminal
-  operation; optional `termios`/`tty` imports select a platform fallback.
-- **Primary verification/documentation:**
-  `tests/test_standalone_and_packaging.py`, `README.md`, and the standalone
-  scenario in `docs/design-system.md`.
+- **Responsibility:** Adapt CLI arguments and one bounded binary source snapshot
+  to the public viewer facade.
+- **Supported surface:** Installed `jsonl-viewer` targets private `main(argv=None)`.
+  Source, generic header fields, and `--no-color` retain existing CLI grammar.
+- **Direct internal dependencies:** `jsonl_viewer`, `_input`, and `contracts`.
+- **State/resources:** Owns only CLI-opened source and EOF-fallback handles,
+  closing them after reading/viewing. Uses `ViewerTerminal` transport; modes,
+  decoding, geometry, and restoration belong to `_terminal`. No import-time I/O.
+- **Verification:** Standalone/packaging tests; README.
+
+### `jsonl_viewer._terminal`
+
+- **Source:** `src/jsonl_viewer/_terminal.py`
+- **Responsibility:** Own one terminal lifecycle and bounded physical input
+  transport for standalone or library-owned viewing.
+- **Supported surface:** None; facade uses private `view_owned`.
+- **Direct internal dependencies:** `_mouse`, `contracts`, and `engine`.
+- **State/resources:** Owns no-flush cbreak/echo suppression, saved current termios,
+  alternate screen, cursor visibility, SGR tracking, output-stream geometry, and
+  cleanup. Enables 1006 before 1000; disables 1000 before 1006. Every managed exit
+  attempts display, attributes, and scoped default-only SIGTERM/SIGHUP restoration;
+  custom/ignored handlers and SIGINT remain untouched. Required default-signal
+  ownership fails off the main thread before tty mutation. The first default
+  termination unwinds, later owned terminations cannot interrupt cleanup, and
+  successful cleanup restores dispositions before re-delivering the original
+  signal with its default semantics. Streams remain caller-owned.
+  Buffered character callbacks receive readiness checks only when new bytes are
+  needed. Default UTF-8 decoding persists across 500-ms idle and 20-ms escape
+  deadlines. Recognized CSI prefixes persist inertly across deadlines until
+  completed or invalidated, preserving prompt drafts and subsequent keyboard
+  characters; bare Escape retains cancellation. Incomplete/invalid mouse reports
+  stay inert. Unsupported terminals use bounded line
+  fallback unless transient-only ownership fails before rendering.
+- **Verification:** Terminal ownership, physical mouse, standalone/packaging tests.
+
+### `jsonl_viewer._mouse`
+
+- **Source:** `src/jsonl_viewer/_mouse.py`
+- **Responsibility:** Validate bounded mouse reports and resolve painted JSON hits.
+- **Supported surface:** None; pure private parsing and hit testing.
+- **Direct internal dependencies:** `_model`.
+- **State/resources:** Immutable reports with decimal button 0..255, positive
+  one-based coordinates of at most six digits, and press/release phase.
+  Modifier-independent left presses and wheel-up/down are recognized; other
+  buttons, motion, releases, and invalid geometry are inert. Hit testing uses
+  renderer-owned absolute rows, columns, and cluster widths without projection
+  or terminal I/O.
+- **Verification:** Mouse parsing, Unicode/panned/caret hit tests, engine tests.
 
 ### `jsonl_viewer.contracts`
 
 - **Source:** `src/jsonl_viewer/contracts.py`
-- **Responsibility:** Define the immutable generic public embedding contracts.
-- **Supported surface:** Package-supported frozen `ViewerSpec` and structural
-  `ViewerHost` protocol through the root facade. `ViewerSpec` supplies exact
-  header values—including a separate scope label, exact scope ID, and optional
-  subject—and configurable Simple-mode field identities. There is no
-  `searchable_fields` constructor argument. `input_protocol` defaults
-  to `semantic`, whose search event is `search<TAB>QUERY` and whose
-  `scroll_left`/`scroll_right` events pan the body; `keys` additionally enables bounded
-  text/key/literal-line envelopes without changing the three-name facade or
-  host method signatures. `ViewerHost` owns size/color decisions,
-  complete-frame presentation, closed event delivery, and close restoration.
+- **Responsibility:** Define immutable generic embedding contracts.
+- **Supported surface:** Frozen `ViewerSpec`, frozen `ViewerTerminal`, and the
+  five-method structural `ViewerHost` through the root facade. Spec keeps bounded
+  generic headers, primary fields, and semantic/keys protocol. Keys additionally
+  accepts bounded mouse envelopes. The terminal adapter supplies input/output
+  streams, optional buffered character reader, and strict boolean `no_color`.
 - **Direct internal dependencies:** None.
-- **State, resources, and side effects:** Defines and validates bounded immutable
-  values/protocols only. Import and construction perform no I/O.
-- **Primary verification/documentation:** `tests/test_public_api_and_engine.py`,
-  `README.md`, and `docs/design-system.md`.
+- **State/resources:** Validates values/transport shape without I/O. A host retains
+  complete terminal lifecycle ownership; a terminal adapter transfers one view's
+  lifecycle while its streams remain caller-owned and are never closed.
+- **Verification:** Public API, host ownership, terminal transport tests; README.
 
 ### `jsonl_viewer.engine`
 
@@ -279,9 +296,9 @@ unit imports Story or any third-party runtime package.
 - **Responsibility:** Coordinate one transient read-only view through the host.
   Reveal adjacent cursor pages using bounded row metadata and constant render
   probes; page commands land on the last/first row according to direction.
-- **Supported surface:** Root-facade `view_jsonl(source, spec, host)` accepts exact
-  immutable bytes, returns None, and persists no view state.
-- **Direct internal dependencies:** `_input`, `_model`, `_render`, `_search`,
+- **Supported surface:** Private host-engine `view_jsonl(source, spec, host)`
+  accepts exact immutable bytes, returns None, and persists no view state.
+- **Direct internal dependencies:** `_input`, `_mouse`, `_model`, `_render`, `_search`,
   `contracts`.
 - **State/resources:** Main-view character movement, record/page navigation,
   structural folding, sibling-property navigation, search and prompt editing stay
@@ -299,11 +316,16 @@ unit imports Story or any third-party runtime package.
   cached frame variants without rebuilding projections. Real input restores the
   cursor; geometry/color changes invalidate the cache. Prompt/help views remain
   steady. Hosts without idle events retain static emphasis.
-- **Compatibility:** Three public exports and five host signatures stay stable.
+- **Mouse behavior:** Keys-protocol wheel presses reuse cursor-up/down; left
+  presses update the logical cursor using the last painted full-cluster cell
+  without folding. Prompts, help, malformed snapshots, and invalid reports ignore
+  mouse input. Existing keyboard and semantic behavior remain intact.
+- **Compatibility:** Five host signatures stay stable.
   Existing semantic events, prompt literal input, bounded transport validation,
   search-driven ancestor unfolding, and immutable source handling remain intact.
   Batched text refreshes logical/horizontal geometry before subsequent navigation.
 - **Lifecycle:** Loading precedes parsing; host closure is guaranteed in finally.
+  An active failure takes precedence over secondary closure failures.
   No terminal driver, filesystem, thread, network, replay, or live-tail ownership.
 - **Verification:** Public API/engine, cursor/folding, search, deterministic sample,
   and standalone integration tests; README and design-system behavior contract.

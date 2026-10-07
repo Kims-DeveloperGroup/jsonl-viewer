@@ -54,7 +54,7 @@ class PublicApiTests(unittest.TestCase):
     def test_facade_is_exact_and_spec_is_normalized_immutable(self) -> None:
         self.assertEqual(
             jsonl_viewer.__all__,
-            ["ViewerHost", "ViewerSpec", "view_jsonl"],
+            ["ViewerHost", "ViewerSpec", "ViewerTerminal", "view_jsonl"],
         )
         spec = ViewerSpec(
             "session",
@@ -125,7 +125,7 @@ class PublicApiTests(unittest.TestCase):
         script = (
             "import jsonl_viewer; "
             "assert jsonl_viewer.__all__ == "
-            "['ViewerHost', 'ViewerSpec', 'view_jsonl']; print('ok')"
+            "['ViewerHost', 'ViewerSpec', 'ViewerTerminal', 'view_jsonl']; print('ok')"
         )
         with tempfile.TemporaryDirectory() as temporary:
             completed = subprocess.run(

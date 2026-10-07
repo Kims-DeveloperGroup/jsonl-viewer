@@ -111,6 +111,7 @@ class VisibleCharacter:
     property: FoldIdentity | None = None
     key_anchor: bool = False
     screen_column: int = 0
+    screen_width: int = 1
 
 @dataclass(frozen=True, slots=True)
 class PropertyMetadata:
