@@ -734,10 +734,10 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
         for segment in line.segments:
             text_bytes += len(segment.text.encode("utf-8"))
             segments += 1
-            if segment.delimiter is not None and segment.container is not None:
+            if segment.delimiter == "open":
+                assert segment.container is not None
                 containers.append(ContainerMetadata(FoldIdentity(index, segment.container), segment.nonempty, segment.folded))
-                if segment.delimiter == "open":
-                    container_rows[segment.container] = row
+                container_rows[segment.container] = row
             if segment.key_anchor and segment.property is not None:
                 key_rows[segment.property] = row
             if segment.role == "match_current" and match_row is None:

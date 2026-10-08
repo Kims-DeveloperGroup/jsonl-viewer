@@ -61,6 +61,63 @@ class _Navigation:
 
 
 class NavigationCacheTests(unittest.TestCase):
+    def test_nested_containers_are_unique_and_focus_their_opening_rows(self):
+        snapshot = parse_jsonl(_source(
+            {"branch": [{"leaf": [1]}, {}], "tail": []},
+        ))
+        spec = ViewerSpec("s", "c", "a", title="Container opening rows")
+        # Rows follow the actual verbose opening structure, including empty pairs.
+        openings = (
+            ((), 0, "{", True),
+            (("branch",), 1, "[", True),
+            (("branch", 0), 2, "{", True),
+            (("branch", 0, "leaf"), 3, "[", True),
+            (("branch", 1), 7, "{", False),
+            (("tail",), 9, "[", False),
+        )
+        expected = [(FoldIdentity(0, path), nonempty, False)
+                    for path, _, _, nonempty in openings]
+        for cached in (False, True):
+            session = _render.RenderSession() if cached else None
+            for path, row, glyph, _ in openings:
+                with self.subTest(cached=cached, path=path):
+                    view = _Navigation(
+                        snapshot, spec, session=session,
+                        state=ViewState(mode=ViewMode.VERBOSE,
+                                        focus_container=FoldIdentity(0, path)),
+                    )
+                    self.assertEqual(
+                        [(item.identity, item.nonempty, item.folded)
+                         for item in view.frame.containers], expected,
+                    )
+                    focused = next(cell for cell in view.frame.characters
+                                   if cell.position == view.frame.cursor)
+                    self.assertEqual(focused.position.line_index, row)
+                    self.assertEqual((focused.text, focused.delimiter), (glyph, "open"))
+                    self.assertEqual(focused.container, FoldIdentity(0, path))
+            with self.subTest(cached=cached, folded=True):
+                view = _Navigation(
+                    snapshot, spec, session=session,
+                    state=ViewState(mode=ViewMode.VERBOSE,
+                                    focus_container=FoldIdentity(0, ("branch",))),
+                )
+                opening = view.frame.cursor
+                folded = view.step("toggle_fold")
+                self.assertEqual(folded.cursor, opening)
+                self.assertEqual(
+                    [(item.identity, item.nonempty, item.folded)
+                     for item in folded.containers],
+                    [(FoldIdentity(0, ()), True, False),
+                     (FoldIdentity(0, ("branch",)), True, True),
+                     (FoldIdentity(0, ("tail",)), False, False)],
+                )
+                expanded = view.step("toggle_fold")
+                self.assertEqual(expanded.cursor, opening)
+                self.assertEqual(
+                    [(item.identity, item.nonempty, item.folded)
+                     for item in expanded.containers], expected,
+                )
+
     def test_warm_unicode_moves_reuse_projection_without_full_leaf_cell_scans(self):
         payload = "界e\u0301🙂" * 6553
         snapshot = parse_jsonl(_source({"content": payload}))
