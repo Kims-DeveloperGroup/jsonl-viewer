@@ -406,6 +406,22 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(host.close_calls, 0)
 
 class KeyInputTests(unittest.TestCase):
+    def test_public_prompt_batches_remain_literal_and_refresh_committed_match(self):
+        source = (json.dumps({"content": "x" * 8192 + " ll界hh suffix"},
+                             ensure_ascii=False) + "\n").encode()
+        start = ("toggle_mode", "text\t/")
+        finish = ("key\tleft", "key\tleft", "text\t界", "key\tctrl_e", "key\tenter",
+                  "text\tl", "close")
+        batched = FakeHost((*start, "text\tllhh", *finish), size=(40, 12))
+        separate = FakeHost((*start, *("text\t" + ch for ch in "llhh"), *finish), size=(40, 12))
+        spec = ViewerSpec("s", "c", "a", input_protocol="keys")
+        view_jsonl(source, spec, batched)
+        view_jsonl(source, spec, separate)
+        self.assertEqual(batched.frames[-1], separate.frames[-1])
+        self.assertIn("ll界hh", batched.frames[-1])
+        self.assertIn("1/1", batched.frames[-1])
+        self.assertEqual((batched.close_calls, separate.close_calls), (1, 1))
+
     def setUp(self) -> None:
         from jsonl_viewer._input import parse_jsonl
 

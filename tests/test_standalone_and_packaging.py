@@ -982,7 +982,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.6.0")
+        self.assertEqual(project["version"], "0.6.1")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
@@ -1035,8 +1035,8 @@ class PackagingBoundaryTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
-        self.assertEqual(len(modules), 12)
-        self.assertEqual(sum(len(value) for value in graph.values()), 24)
+        self.assertEqual(len(modules), 13)
+        self.assertEqual(sum(len(value) for value in graph.values()), 25)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -1044,8 +1044,8 @@ class PackagingBoundaryTests(unittest.TestCase):
         index = (ROOT / "PYTHON_MODULE_INDEX.md").read_text(encoding="utf-8")
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
-        self.assertIn("Importable production units indexed: 12.", index)
-        self.assertIn("Direct internal dependency edges indexed: 24.", index)
+        self.assertIn("Importable production units indexed: 13.", index)
+        self.assertIn("Direct internal dependency edges indexed: 25.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
@@ -1068,6 +1068,7 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "__init__.py",
                 "__main__.py",
                 "_input.py",
+                "_cell_layout.py",
                 "_json.py",
                 "_model.py",
                 "_mouse.py",

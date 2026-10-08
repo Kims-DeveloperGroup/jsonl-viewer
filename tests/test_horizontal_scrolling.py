@@ -30,11 +30,33 @@ def _host_cursor_glyph(frame):
         if line.strip() == "^":
             column = line.index("^")
             return next((character for index, character in enumerate(lines[row - 1])
-                         if _text_cells(lines[row - 1][:index]) == column), None)
+                         if _text_cells(character)
+                         and _text_cells(lines[row - 1][:index]) == column), None)
     return None
 
 
 class HorizontalScrollingTests(unittest.TestCase):
+    def test_public_long_unicode_tail_batches_match_ordered_cursor_events(self):
+        payload = "x" * 8192 + "界e\u0301🙂" * 16
+        source = _source({"content": payload})
+        setup = ("toggle_mode", "text\tj", "text\th", "text\th", "text\th")
+        moves = "hhllhl"
+        for size in ((96, 24), (40, 12)):
+            with self.subTest(size=size):
+                ordered = _ObservedHost((*setup, *("text\t" + ch for ch in moves), "close"),
+                                        size=size, color=False)
+                batched = FakeHost((*setup, "text\t" + moves, "close"), size=size)
+                spec = ViewerSpec("s", "c", "a", input_protocol="keys")
+                view_jsonl(source, spec, ordered)
+                view_jsonl(source, spec, batched)
+                self.assertEqual(_host_cursor_glyph(ordered.observed[len(setup) + 1]), "🙂")
+                self.assertEqual(_host_cursor_glyph(ordered.observed[len(setup) + 2]), "e")
+                self.assertEqual(ordered.frames[-1], batched.frames[-1])
+                self.assertTrue(all(_text_cells(line) <= size[0]
+                                    for line in strip_ansi(batched.frames[-1]).splitlines()))
+                self.assertEqual((ordered.close_calls, batched.close_calls), (1, 1))
+                self.assertEqual(source, _source({"content": payload}))
+
     def test_public_loop_reveals_wide_cells_in_two_column_body_and_retains_idle_focus(self):
         cases = (("界界界", ("goto\t10000",)),
                  ({"value": "界界界"},

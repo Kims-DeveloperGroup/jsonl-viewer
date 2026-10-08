@@ -14,9 +14,9 @@ Source root: `src/`
 
 Package root: `src/jsonl_viewer/`
 
-Importable production units indexed: 12.
+Importable production units indexed: 13.
 
-Direct internal dependency edges indexed: 24.
+Direct internal dependency edges indexed: 25.
 
 Directed internal dependency cycles indexed: 0.
 
@@ -30,7 +30,7 @@ jsonl_viewer -> contracts
              -> _terminal -> contracts/engine/_mouse
 
 _mouse -> _model
-_render -> contracts/_model/_json
+_render -> contracts/_model/_json/_cell_layout
 _search -> _model/_json
 _json -> _model
 _input -> _model
@@ -131,6 +131,17 @@ unit imports Story or any third-party runtime package.
   `tests/test_public_api_and_engine.py`, `tests/test_unrestricted_search.py`,
   and the README input contract.
 
+### `jsonl_viewer._cell_layout`
+
+- **Source:** `src/jsonl_viewer/_cell_layout.py`
+- **Responsibility:** Seek intact Unicode clusters using sparse display-cell indexes.
+- **Supported surface:** Internal `TextLayout`/`RowLayout` metrics, window and nearest-cell access only.
+- **Direct internal dependencies:** None.
+- **State/resources:** Immutable indexes reference formatted text without copying source snapshots.
+  ASCII uses direct offsets; Unicode checkpoints occur every 256 display cells at cluster boundaries.
+  Renderer-owned sessions control retention. No caches, I/O, terminal state, or import-time effects.
+- **Verification:** Rendering, cursor/folding, horizontal navigation and responsiveness tests.
+
 ### `jsonl_viewer._render`
 
 - **Sibling/blink projection:** Immutable property ownership and first-key-cell
@@ -151,14 +162,19 @@ unit imports Story or any third-party runtime package.
 
 - **Source:** `src/jsonl_viewer/_render.py`
 - **Responsibility:** Render deterministic bounded semantic ANSI/plain frames
-  from call-local derived JSON projections.
+  from explicitly scoped derived JSON projections.
 - **Supported surface:** No supported consumer API. The engine consumes private
   loading/frame renderers, effective viewport offset, and current record-line count; tests use the
   private SGR-stripping verifier.
-- **Direct internal dependencies:** `_json`, `_model`, and `contracts`.
+- **Direct internal dependencies:** `_json`, `_model`, `_cell_layout`, and `contracts`.
 - **State, resources, and side effects:** Owns immutable role/bound metadata,
-  one call-local expansion budget, projection facts, and pure formatting
-  behavior only. It
+  construction-local expansion budgets, frozen projection summaries, and pure formatting.
+  Explicit `RenderSession` caches retain at most two current record variants, bounded
+  in aggregate by 8 MiB formatted UTF-8, 8,192 rows, 65,536 segments and 65,536 checkpoints.
+  Structural mode/fold/active-occurrence changes replace a record variant; geometry,
+  cursor and panning reuse it. Over-budget projections/indexes use exact uncached fallbacks.
+  Visible row layouts build lazily; markers, gutters, focus targets and geometry stay frame-local.
+  It
   performs no terminal or filesystem I/O. Rendering reorders/project fields by
   `ViewerSpec` and recursively traverses complete string-encoded JSON containers
   accepted by `_json`, without mutating source/search values. Shared
@@ -312,6 +328,9 @@ unit imports Story or any third-party runtime package.
   Up/Down cycle source records, reset viewport/cursor, and report first/last/only
   record notices; paging scrolls within a record before using that transition. Hidden
   folded descendants and Simple-mode exclusions are not navigation targets.
+  The engine creates one lexical renderer session per view call, passes it through
+  batched transitions/navigation probes, and discards it on return. All ordered input
+  events are retained; no blocking-host read-ahead or terminal buffering is introduced.
 - **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
   cached frame variants without rebuilding projections. Real input restores the
   cursor; geometry/color changes invalidate the cache. Prompt/help views remain

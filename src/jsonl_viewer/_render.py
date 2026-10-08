@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
 from typing import Iterable
 
+from ._cell_layout import RowLayout, character_cells as _character_cells, clusters as _clusters, text_cells as _text_cells
 from ._json import Expansion, ExpansionBudget, SkippedExpansion, expand_json_string
 from ._model import (
     ContainerMetadata,
@@ -86,6 +88,106 @@ class _ProjectionFacts:
     content_preview: tuple[int, int] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ProjectionSummary:
+    properties: tuple[tuple[JSONPath, JSONPath], ...]
+    expanded_strings: int
+    skipped_expansions: int
+    truncated_leaves: int
+    truncated_retained_utf8_bytes: int
+    truncated_full_utf8_bytes: int
+    content_preview: tuple[int, int] | None
+
+
+_CACHE_RECORDS = 2
+_CACHE_TEXT_BYTES = 8 * 1024 * 1024
+_CACHE_ROWS = 8192
+_CACHE_SEGMENTS = 65536
+_CACHE_CHECKPOINTS = 65536
+
+
+@dataclass(slots=True)
+class _RecordProjection:
+    key: tuple
+    lines: tuple[_DisplayLine, ...]
+    facts: _ProjectionSummary
+    widths: tuple[int, ...]
+    containers: tuple[ContainerMetadata, ...]
+    navigable_rows: tuple[int, ...]
+    key_rows: dict[JSONPath, int]
+    container_rows: dict[JSONPath, int]
+    match_row: int | None
+    text_bytes: int
+    segment_count: int
+    layouts: dict[int, RowLayout] = field(default_factory=dict)
+    checkpoints: int = 0
+
+
+class RenderSession:
+    """Explicit bounded derived caches; its engine owner supplies call lifetime."""
+
+    def __init__(self) -> None:
+        self._context: tuple[ViewerSpec, Snapshot | None] | None = None
+        self._records: OrderedDict[int, _RecordProjection] = OrderedDict()
+        self._text_bytes = self._rows = self._segments = self._checkpoints = 0
+
+    def bind(self, spec: ViewerSpec, snapshot: Snapshot | None) -> None:
+        if self._context is None or self._context[0] is not spec or self._context[1] is not snapshot:
+            self._records.clear()
+            self._text_bytes = self._rows = self._segments = self._checkpoints = 0
+            self._context = (spec, snapshot)
+
+    def cache_info(self) -> tuple[int, int, int, int, int]:
+        """Record slots, UTF-8 bytes, rows, segments and sparse checkpoints."""
+        return len(self._records), self._text_bytes, self._rows, self._segments, self._checkpoints
+
+    def _evict(self, index: int) -> None:
+        old = self._records.pop(index)
+        self._text_bytes -= old.text_bytes
+        self._rows -= len(old.lines)
+        self._segments -= old.segment_count
+        self._checkpoints -= old.checkpoints
+
+    def projection(self, record: Record, index: int, spec: ViewerSpec, state: ViewState) -> _RecordProjection:
+        active = state.search.current_occurrence if state.search is not None else None
+        if active is not None and active.record_index != index:
+            active = None
+        folds = frozenset(fold.path for fold in state.folds if fold.record_index == index)
+        key = (state.mode, active, folds)
+        cached = self._records.get(index)
+        if cached is not None and cached.key == key:
+            self._records.move_to_end(index)
+            return cached
+        if cached is not None:
+            self._evict(index)
+        projection = _build_projection(record, index, spec, state.mode, active, folds, key)
+        if (projection.text_bytes > _CACHE_TEXT_BYTES or len(projection.lines) > _CACHE_ROWS
+                or projection.segment_count > _CACHE_SEGMENTS):
+            return projection
+        while self._records and (len(self._records) >= _CACHE_RECORDS
+                or self._text_bytes + projection.text_bytes > _CACHE_TEXT_BYTES
+                or self._rows + len(projection.lines) > _CACHE_ROWS
+                or self._segments + projection.segment_count > _CACHE_SEGMENTS):
+            self._evict(next(iter(self._records)))
+        self._records[index] = projection
+        self._text_bytes += projection.text_bytes
+        self._rows += len(projection.lines)
+        self._segments += projection.segment_count
+        return projection
+
+    def layout(self, index: int, projection: _RecordProjection, row: int) -> RowLayout:
+        cached = projection.layouts.get(row)
+        if cached is not None:
+            return cached
+        layout = RowLayout.build(segment.text for segment in projection.lines[row].segments)
+        if (self._records.get(index) is projection
+                and self._checkpoints + layout.checkpoints <= _CACHE_CHECKPOINTS):
+            projection.layouts[row] = layout
+            projection.checkpoints += layout.checkpoints
+            self._checkpoints += layout.checkpoints
+        return layout
+
+
 def strip_ansi(value: str) -> str:
     """Return semantic text without renderer-owned SGR sequences."""
 
@@ -113,18 +215,6 @@ def _neutralize_text(value: str) -> str:
 def _safe_json_token(value: str) -> str:
     encoded = json.dumps(value, ensure_ascii=False)
     return "".join(_neutralize_character(character) for character in encoded)
-
-
-def _character_cells(character: str) -> int:
-    if unicodedata.combining(character):
-        return 0
-    if unicodedata.east_asian_width(character) in {"W", "F"}:
-        return 2
-    return 1
-
-
-def _text_cells(value: str) -> int:
-    return sum(_character_cells(character) for character in value)
 
 
 def _take_cells(value: str, maximum: int) -> tuple[str, int, bool]:
@@ -616,105 +706,92 @@ class _RecordLine:
     record_index: int
     line_index: int
     gutter_columns: int = 0
+    layout: RowLayout | None = None
+    body_cells: int = 0
 
 
-def _record_lines(
-    record: Record, index: int, spec: ViewerSpec, state: ViewState, *,
-    gutter_width: int, body_width: int, color: bool,
-) -> tuple[list[_RecordLine], bool, int, _ProjectionFacts, int | None, tuple[ContainerMetadata, ...]]:
-    active = state.search.current_occurrence if state.search is not None else None
-    if active is not None and active.record_index != index:
-        active = None
-    folds = frozenset(fold.path for fold in state.folds if fold.record_index == index)
-    logical, facts = _format_record(record, spec, state.mode, active, folds)
+def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMode,
+                      active: Occurrence | None, folds: frozenset[JSONPath], key: tuple) -> _RecordProjection:
+    logical, facts = _format_record(record, spec, mode, active, folds)
     visible_properties = {segment.property for line in logical for segment in line.segments if segment.key_anchor}
-    facts.properties[:] = [(path, parent) for path, parent in facts.properties if path in visible_properties]
+    summary = _ProjectionSummary(
+        tuple((path, parent) for path, parent in facts.properties if path in visible_properties),
+        facts.expanded_strings, facts.skipped_expansions, facts.truncated_leaves,
+        facts.truncated_retained_utf8_bytes, facts.truncated_full_utf8_bytes, facts.content_preview,
+    )
+    widths: list[int] = []
+    containers: list[ContainerMetadata] = []
+    navigable: list[int] = []
+    key_rows: dict[JSONPath, int] = {}
+    container_rows: dict[JSONPath, int] = {}
+    match_row = None
+    text_bytes = segments = 0
+    for row, line in enumerate(logical):
+        cells = tuple(_text_cells(segment.text) for segment in line.segments)
+        widths.append(sum(cells))
+        if any(segment.navigable and width for segment, width in zip(line.segments, cells)):
+            navigable.append(row)
+        for segment in line.segments:
+            text_bytes += len(segment.text.encode("utf-8"))
+            segments += 1
+            if segment.delimiter is not None and segment.container is not None:
+                containers.append(ContainerMetadata(FoldIdentity(index, segment.container), segment.nonempty, segment.folded))
+                if segment.delimiter == "open":
+                    container_rows[segment.container] = row
+            if segment.key_anchor and segment.property is not None:
+                key_rows[segment.property] = row
+            if segment.role == "match_current" and match_row is None:
+                match_row = row
+    return _RecordProjection(key, tuple(logical), summary, tuple(widths), tuple(containers),
+                             tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments)
+
+
+def _record_line(record: Record, index: int, row: int, projection: _RecordProjection,
+                 state: ViewState, gutter_width: int, session: RenderSession) -> _RecordLine:
     matched = state.search is not None and state.search.has_record(index)
     marker, marker_role = _record_marker(index, state, matched=matched)
-    result: list[_RecordLine] = []
-    containers: list[ContainerMetadata] = []
-    any_width_clip = False
-    focus_row = None
-    for row, line in enumerate(logical):
-        for segment in line.segments:
-            if segment.delimiter == "open":
-                assert segment.container is not None
-                containers.append(ContainerMetadata(
-                    FoldIdentity(index, segment.container), segment.nonempty, segment.folded,
-                ))
-        key_focused = state.focus_property is not None and any(
-            segment.key_anchor and FoldIdentity(index, segment.property) == state.focus_property
-            for segment in line.segments)
-        focused = key_focused or any(segment.role == "match_current" for segment in line.segments)
-        if focused:
-            focus_row = row
-        gutter = (
-            _Segment(marker, marker_role), _Segment(" "),
-            _Segment(str(record.source_line).rjust(gutter_width), "gutter"),
-            _Segment(" │ ", "gutter"),
-        )
-        # Retain the complete projected row until its vertical viewport is known.
-        # Character metadata is materialized only for those visible rows below.
-        any_width_clip |= sum(_text_cells(segment.text) for segment in line.segments) > body_width
-        result.append(_RecordLine(gutter + line.segments, index, row, gutter_width + 5))
-    return result, any_width_clip, len(logical), facts, focus_row, tuple(containers)
-
-
-def _clusters(text: str) -> Iterable[str]:
-    """Keep combining marks attached to their readable inverse-video cell."""
-    cluster = ""
-    for character in text:
-        if _character_cells(character) == 0 and cluster:
-            cluster += character
-        else:
-            if cluster:
-                yield cluster
-            cluster = character
-    if cluster:
-        yield cluster
+    gutter = (_Segment(marker, marker_role), _Segment(" ", "gutter"),
+              _Segment(str(record.source_line).rjust(gutter_width), "gutter"), _Segment(" │ ", "gutter"))
+    return _RecordLine(gutter + projection.lines[row].segments, index, row, gutter_width + 5,
+                       session.layout(index, projection, row), projection.widths[row])
 
 
 def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
                  focus_span: tuple[int, int] | None = None) -> _RecordLine:
     """Slice body cells without splitting clusters or changing fixed gutters."""
     gutter, segments = line.segments[:4], line.segments[4:]
-    total = sum(_text_cells(segment.text) for segment in segments)
-    right_clipped = overflow_cue and total > offset + width
+    layout = line.layout or RowLayout.build(segment.text for segment in segments)
+    right_clipped = overflow_cue and layout.cells > offset + width
     if (focus_span is not None and offset <= focus_span[0]
             and focus_span[1] <= offset + width
             and focus_span[1] > offset + width - 1):
-        # A focused cluster gets the final cell before an overflow annotation.
-        # Apply this on every frame, not just on the transition that revealed it.
         right_clipped = False
     end = offset + max(0, width - int(right_clipped))
     result: list[_Segment] = list(gutter)
-    logical = 0
+    current_index = None
+    piece_start = piece_begin = piece_end = 0
     painted = 0
-    for segment in segments:
-        piece: list[str] = []
-        piece_start = 0
-        for cluster in _clusters(segment.text):
-            cells = _text_cells(cluster)
-            start = logical
-            logical += cells
-            if start < offset or logical > end or not cells:
-                continue
-            if not piece:
-                piece_start = start
-                gap = start - offset - painted
-                if gap > 0:
-                    result.append(_Segment(" " * gap))
-                    painted += gap
-            piece.append(cluster)
-            painted += cells
-        if piece:
-            result.append(replace(segment, text="".join(piece),
+
+    def append_piece() -> None:
+        if current_index is not None:
+            result.append(replace(segments[current_index], text=segments[current_index].text[piece_begin:piece_end],
                                   logical_column=line.gutter_columns + piece_start))
-        if logical >= end:
-            break
+
+    for index, start, begin, finish, cells in layout.window(offset, end):
+        if current_index != index:
+            append_piece()
+            current_index = index
+            piece_start, piece_begin = start, begin
+            gap = start - offset - painted
+            if gap > 0:
+                result.append(_Segment(" " * gap))
+                painted += gap
+        piece_end = finish
+        painted += cells
+    append_piece()
     if right_clipped:
         result.append(_Segment("…", "muted"))
-    return replace(line, segments=tuple(result))
+    return replace(line, segments=tuple(result), layout=None)
 
 
 def _focus_prefix_window(line: _RecordLine, offset: int, width: int,
@@ -751,44 +828,70 @@ def _visible_characters(line: _RecordLine, screen_row: int) -> tuple[VisibleChar
 
 def _logical_characters(line: _RecordLine, screen_row: int, state: ViewState,
                         body_width: int) -> tuple[VisibleCharacter, ...]:
-    """Keep navigation candidates, never a complete long-row character map."""
-    retained: dict[int, VisibleCharacter] = {}
-    first = previous = closest = None
+    """Seek bounded candidates without allocating discarded row characters."""
+    segments = line.segments[4:]
+    layout = line.layout or RowLayout.build(segment.text for segment in segments)
+    retained: dict[int, tuple[int, int, int, int]] = {}
+
+    def retain(index: int, span: tuple[int, int, int, int]) -> None:
+        column, begin, finish, cells = span
+        if cells and segments[index].navigable:
+            retained[layout.starts[index] + column] = (index, begin, finish, cells)
+
+    def retain_window(start: int, end: int) -> None:
+        for index, column, begin, finish, cells in layout.window(start, end):
+            if segments[index].navigable:
+                retained[column] = (index, begin, finish, cells)
+
+    retain_window(state.horizontal_offset - 2, state.horizontal_offset + body_width + 4)
     preferred = state.preferred_column
     if preferred is None and state.cursor is not None:
         preferred = state.cursor.column
-    cursor_row = state.cursor is not None and (state.cursor.record_index, state.cursor.line_index) == (line.record_index, line.line_index)
-    following_cursor = False
+    closest = None
+    first = None
     first_match = True
-    left = line.gutter_columns + state.horizontal_offset
-    right = left + body_width
-    for cell in _character_stream(line, screen_row):
-        column = cell.position.column
-        if first is None:
-            first = cell
-            retained[column] = cell
-            following_cursor = True  # The initial cursor also needs its neighbor.
-        elif following_cursor:
-            retained[column] = cell
-            following_cursor = False
-        if left - 2 <= column <= right + 2 or cell.key_anchor or cell.delimiter is not None:
-            retained[column] = cell
-        if cell.search_focus and first_match:
-            retained[column] = cell
+    for index, (segment, part) in enumerate(zip(segments, layout.parts)):
+        if not segment.navigable or not part.cells:
+            continue
+        beginning = part.nearest(0)
+        ending = part.nearest(part.cells)
+        if beginning is not None:
+            retain(index, beginning)
+            if first is None:
+                first = layout.starts[index] + beginning[0]
+        if ending is not None:
+            retain(index, ending)
+        if segment.role == "match_current" and first_match:
+            if beginning is not None:
+                retain(index, beginning)
             first_match = False
-        if cursor_row and column == state.cursor.column:
-            retained[column] = cell
-            if previous is not None:
-                retained[previous.position.column] = previous
-            following_cursor = True
-        if preferred is not None and (closest is None or abs(column - preferred) < abs(closest.position.column - preferred)):
-            closest = cell
-        previous = cell
-    if previous is not None:
-        retained[previous.position.column] = previous
+        if preferred is not None:
+            candidate = part.nearest(preferred - line.gutter_columns - layout.starts[index])
+            if candidate is not None:
+                column = layout.starts[index] + candidate[0] + line.gutter_columns
+                distance = (abs(column - preferred), column)
+                if closest is None or distance < closest[0]:
+                    closest = (distance, index, candidate)
+    if first is not None:
+        retain_window(first, first + 4)
     if closest is not None:
-        retained[closest.position.column] = closest
-    return tuple(retained[column] for column in sorted(retained))
+        retain(closest[1], closest[2])
+    if state.cursor is not None and (state.cursor.record_index, state.cursor.line_index) == (line.record_index, line.line_index):
+        column = state.cursor.column - line.gutter_columns
+        retain_window(column - 2, column + 4)
+    result: list[VisibleCharacter] = []
+    for column in sorted(retained):
+        index, begin, finish, cells = retained[column]
+        segment = segments[index]
+        result.append(VisibleCharacter(
+            CursorPosition(line.record_index, line.line_index, line.gutter_columns + column),
+            screen_row, segment.text[begin:finish],
+            None if segment.container is None else FoldIdentity(line.record_index, segment.container),
+            segment.delimiter, segment.role == "match_current",
+            None if segment.property is None else FoldIdentity(line.record_index, segment.property),
+            segment.key_anchor, line.gutter_columns + column, cells,
+        ))
+    return tuple(result)
 
 
 def _resolve_cursor(state: ViewState, characters: tuple[VisibleCharacter, ...]) -> CursorPosition | None:
@@ -846,7 +949,7 @@ def _paint_record_line(
     return "".join(result)
 
 
-def _projection_footer_pieces(facts: _ProjectionFacts | None) -> list[str]:
+def _projection_footer_pieces(facts: _ProjectionFacts | _ProjectionSummary | None) -> list[str]:
     if facts is None:
         return []
     pieces: list[str] = []
@@ -875,7 +978,7 @@ def _footer_lines(
     spec: ViewerSpec,
     width: int,
     width_clipped: bool,
-    projection_facts: _ProjectionFacts | None,
+    projection_facts: _ProjectionFacts | _ProjectionSummary | None,
     horizontal_offset: int = 0,
     max_horizontal_offset: int = 0,
 ) -> list[tuple[str, str]]:
@@ -1003,7 +1106,10 @@ def render_frame(
     columns: int,
     rows: int,
     color: bool,
+    session: RenderSession | None = None,
 ) -> RenderResult:
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
     width = min(MAX_COLUMNS, max(MIN_COLUMNS, columns))
     height = min(MAX_ROWS, max(MIN_ROWS, rows))
     has_data = (not state.help_visible and diagnostic is None
@@ -1021,7 +1127,7 @@ def render_frame(
     horizontal_offset = state.horizontal_offset
     max_horizontal_offset = 0
     body_width = width
-    selected_projection_facts: _ProjectionFacts | None = None
+    selected_projection_facts: _ProjectionFacts | _ProjectionSummary | None = None
     containers: list[ContainerMetadata] = []
     properties: list[PropertyMetadata] = []
     navigable_rows: list[tuple[int, tuple[int, ...]]] = []
@@ -1037,42 +1143,31 @@ def render_frame(
             body_width = max(1, width - gutter_width - 5)
             remaining = available_body_rows
             for index in range(state.selected_index, len(snapshot.records)):
-                record_lines, clipped, logical_count, facts, focus_row, record_containers = _record_lines(
-                    snapshot.records[index], index, spec, state,
-                    gutter_width=gutter_width, body_width=body_width, color=color,
-                )
-                containers.extend(record_containers)
-                navigable_rows.append((index, tuple(
-                    line.line_index for line in record_lines
-                    if any(segment.navigable and _text_cells(segment.text)
-                           for segment in line.segments)
-                )))
-                properties.extend(PropertyMetadata(FoldIdentity(index, path), parent)
-                                  for path, parent in facts.properties)
-                width_clipped = width_clipped or clipped
+                record = snapshot.records[index]
+                projection = session.projection(record, index, spec, state)
+                logical_count = len(projection.lines)
+                facts = projection.facts
+                containers.extend(projection.containers)
+                navigable_rows.append((index, projection.navigable_rows))
+                properties.extend(PropertyMetadata(FoldIdentity(index, path), parent) for path, parent in facts.properties)
+                start = 0
                 if index == state.selected_index:
                     selected_line_count = logical_count
                     selected_projection_facts = facts
                     effective_offset = min(state.record_line_offset, max(0, logical_count - 1))
-                    if state.focus_property is not None and state.cursor is None:
-                        focus_row = next((line.line_index for line in record_lines if any(
-                            segment.key_anchor and FoldIdentity(index, segment.property) == state.focus_property
-                            for segment in line.segments)), focus_row)
-                    if state.focus_container is not None:
-                        opener_row = next((line.line_index for line in record_lines
-                            if any(segment.delimiter == "open"
-                                   and FoldIdentity(index, segment.container) == state.focus_container
-                                   for segment in line.segments)), None)
-                        if opener_row is not None:
-                            focus_row = opener_row
+                    focus_row = projection.match_row
+                    if (state.focus_property is not None and state.cursor is None
+                            and state.focus_property.record_index == index):
+                        focus_row = projection.key_rows.get(state.focus_property.path, focus_row)
+                    if state.focus_container is not None and state.focus_container.record_index == index:
+                        focus_row = projection.container_rows.get(state.focus_container.path, focus_row)
                     if (state.reveal_match or state.focus_container is not None or (state.focus_property is not None and state.cursor is None)) and focus_row is not None:
                         if not effective_offset <= focus_row < effective_offset + max(1, remaining):
                             effective_offset = max(0, focus_row - max(0, remaining // 2))
-                    record_lines = record_lines[effective_offset:]
-                if not record_lines:
-                    continue
-                take = min(remaining, len(record_lines))
-                body.extend(record_lines[:take])
+                    start = effective_offset
+                take = min(remaining, max(0, logical_count - start))
+                body.extend(_record_line(record, index, row, projection, state, gutter_width, session)
+                            for row in range(start, start + take))
                 remaining -= take
                 if remaining <= 0:
                     break
@@ -1085,8 +1180,7 @@ def render_frame(
         cell for row, line in enumerate(body, start=len(header))
         if isinstance(line, _RecordLine) for cell in _logical_characters(line, row, state, body_width)
     )
-    projected_width = max((sum(_text_cells(segment.text) for segment in line.segments)
-                           - line.gutter_columns for line in body if isinstance(line, _RecordLine)), default=0)
+    projected_width = max((line.body_cells for line in body if isinstance(line, _RecordLine)), default=0)
     max_horizontal_offset = max(0, projected_width - body_width)
     if has_data:
         horizontal_offset = min(max(0, horizontal_offset), max_horizontal_offset)
@@ -1113,8 +1207,8 @@ def render_frame(
                 focus_line = (target.record_index, target.line_index)
                 column = 0
                 match_started = False
-                for segment in target_row.segments[4:]:
-                    cells = _text_cells(segment.text)
+                for segment, part in zip(target_row.segments[4:], target_row.layout.parts):
+                    cells = part.cells
                     if segment.role == "match_current":
                         if not match_started:
                             start = column
