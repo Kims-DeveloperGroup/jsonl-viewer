@@ -1,6 +1,7 @@
 """Per-view projection reuse without changing observable navigation."""
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import replace
 import gc
 import json
@@ -11,6 +12,7 @@ import weakref
 from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer import _cell_layout, _render, engine
 from jsonl_viewer._input import parse_jsonl
+from jsonl_viewer._mouse import MouseEvent, hit_test
 from jsonl_viewer._model import FoldIdentity, ViewMode, ViewState
 from tests.support import FakeHost
 
@@ -23,13 +25,13 @@ def _source(*values):
 class _Navigation:
     """Keep the last painted result; never add a pre-event refresh."""
 
-    def __init__(self, snapshot, spec, *, session=None, state=None, size=(96, 24)):
+    def __init__(self, snapshot, spec, *, session=None, state=None, size=(96, 24), color=False):
         self.snapshot = snapshot
         self.spec = spec
         self.session = session
         self.state = state or ViewState()
         self.size = size
-        self.color = False
+        self.color = color
         self.frames = []
         self.render()
 
@@ -61,6 +63,105 @@ class _Navigation:
 
 
 class NavigationCacheTests(unittest.TestCase):
+    def test_multi_record_viewport_moves_reuse_fitting_projections(self):
+        values = [{"content": "abcdefghij" * 20, "tail": index} for index in range(3)]
+        snapshot = parse_jsonl(_source(*values))
+        spec = ViewerSpec("s", "c", "a", input_protocol="keys")
+        events = ("text\tj", "text\tl", "text\tj", "text\th", "text\tk", "text\tk")
+        for mode in (ViewMode.SIMPLE, ViewMode.VERBOSE):
+            for color in (False, True):
+                with self.subTest(mode=mode, color=color):
+                    state = ViewState(mode=mode)
+                    with mock.patch.object(_render, "_format_record", wraps=_render._format_record) as formats:
+                        view = _Navigation(snapshot, spec, session=_render.RenderSession(),
+                                           state=state, size=(120, 57), color=color)
+                        self.assertEqual({cell.position.record_index for cell in view.frame.characters},
+                                         {0, 1, 2})
+                        cold_formats = formats.call_count
+                        actual = [view.step(event) for event in events]
+                        self.assertEqual(formats.call_count, cold_formats)
+                    reference = _Navigation(snapshot, spec, state=state, size=(120, 57), color=color)
+                    expected = [reference.step(event) for event in events]
+                    self.assertEqual([frame.text for frame in actual], [frame.text for frame in expected])
+                    self.assertEqual([frame.idle_text for frame in actual], [frame.idle_text for frame in expected])
+                    self.assertEqual([frame.characters for frame in actual], [frame.characters for frame in expected])
+                    self.assertEqual(view.state, reference.state)
+
+    def test_dense_candidates_keep_full_mouse_cells_and_exact_blink_frames(self):
+        snapshot = parse_jsonl(_source({"content": {
+            f"row_{index:02}": "ABCD" * 80 for index in range(70)
+        }}))
+        spec = ViewerSpec("s", "c", "a", input_protocol="keys")
+        for color in (False, True):
+            with self.subTest(color=color):
+                view = _Navigation(snapshot, spec, session=_render.RenderSession(),
+                                   state=ViewState(mode=ViewMode.VERBOSE), size=(40, 57), color=color)
+                narrow_candidates = Counter((cell.position.record_index, cell.position.line_index)
+                                            for cell in view.frame.logical_characters)
+                narrow_cells = len(view.frame.characters)
+                view.size = (120, 57)
+                frame = view.render()
+                # Widening these same rows adds painted cells, not navigation needs.
+                self.assertGreater(len(frame.characters), narrow_cells * 2)
+                wide_candidates = Counter((cell.position.record_index, cell.position.line_index)
+                                          for cell in frame.logical_characters)
+                # Chrome can leave an extra body row at the wider geometry.
+                for row in narrow_candidates.keys() & wide_candidates.keys():
+                    self.assertEqual(wide_candidates[row], narrow_candidates[row])
+                rows = _render.strip_ansi(frame.text).splitlines()
+                for screen_row, line in enumerate(rows):
+                    if " │ " not in line:
+                        continue
+                    expected = line.split(" │ ", 1)[1].lstrip().removesuffix("…")
+                    cells = [cell for cell in frame.characters if cell.screen_row == screen_row]
+                    self.assertEqual("".join(cell.text for cell in cells), expected)
+                    # Include interior cells that are not sparse navigation anchors.
+                    for cell in cells[::max(1, len(cells) // 3)]:
+                        self.assertEqual(hit_test(MouseEvent(0, cell.screen_column + 1,
+                                                             cell.screen_row + 1, "press"), frame), cell)
+                fresh = _Navigation(snapshot, spec, state=view.state, size=view.size, color=color)
+                self.assertEqual((frame.text, frame.idle_text, frame.characters),
+                                 (fresh.frame.text, fresh.frame.idle_text, fresh.frame.characters))
+                self.assertEqual(view.step("idle").text, frame.text)
+                self.assertNotEqual(frame.text, frame.idle_text)
+
+    def test_sparse_navigation_keeps_row_ends_preferred_columns_and_field_groups(self):
+        spec = ViewerSpec("s", "c", "a", input_protocol="keys")
+        leaf = "A界e\u0301🙂Z" + "x" * 160
+        for color in (False, True):
+            with self.subTest(color=color, behavior="offscreen row ends"):
+                view = _Navigation(parse_jsonl(_source(leaf)), spec,
+                                   session=_render.RenderSession(), size=(40, 12), color=color)
+                opening = view.frame.cursor
+                closing = view.step("text\th")
+                self.assertEqual(closing.cursor.column, opening.column + 168)
+                self.assertGreater(closing.horizontal_offset, 0)
+                self.assertEqual(self._focused(closing).text, '"')
+                self.assertEqual(self._focused(view.step("text\th")).text, "x")
+                self.assertEqual(view.step("text\tl").cursor, closing.cursor)
+                self.assertEqual(view.step("text\tl").cursor, opening)
+            with self.subTest(color=color, behavior="preferred column and siblings"):
+                snapshot = parse_jsonl(_source({"content": {
+                    "first": "A界e\u0301🙂B" + "x" * 120,
+                    "second": "C界e\u0301🙂D", "last": 1,
+                }}))
+                view = _Navigation(snapshot, spec, session=_render.RenderSession(),
+                                   state=ViewState(mode=ViewMode.VERBOSE), size=(40, 12), color=color)
+                face = next(cell for cell in view.frame.characters if cell.text == "🙂")
+                clicked = view.step(f"mouse\t0\t{face.screen_column + 2}\t{face.screen_row + 1}\tpress")
+                self.assertEqual(clicked.cursor, face.position)
+                self.assertEqual(self._focused(view.step("text\tj")).text, "e\u0301")
+                self.assertEqual(self._focused(view.step("text\tk")).text, "🙂")
+                view.step("scroll_right")
+                self.assertEqual(self._focused(view.step("next_sibling")).text, "s")
+                self.assertEqual(self._focused(view.step("text\tl")).text, "e")
+                self.assertEqual(self._focused(view.step("previous_sibling")).text, "f")
+                self.assertEqual(self._focused(view.step("text\tl")).text, "i")
+
+    @staticmethod
+    def _focused(frame):
+        return next(cell for cell in frame.characters if cell.position == frame.cursor)
+
     def test_nested_containers_are_unique_and_focus_their_opening_rows(self):
         snapshot = parse_jsonl(_source(
             {"branch": [{"leaf": [1]}, {}], "tail": []},
@@ -164,7 +265,8 @@ class NavigationCacheTests(unittest.TestCase):
         spec = ViewerSpec("s", "c", "a")
         session = _render.RenderSession()
         observed = []
-        with mock.patch.object(_render, "_format_record", wraps=_render._format_record) as formats:
+        with mock.patch.object(_render, "_CACHE_RECORDS", 2), \
+                mock.patch.object(_render, "_format_record", wraps=_render._format_record) as formats:
             for index in (0, 1, 0, 2, 0, 1):
                 observed.append(_Navigation(snapshot, spec, session=session,
                                             state=ViewState(selected_index=index), size=(40, 8)).frame.text)
@@ -172,6 +274,22 @@ class NavigationCacheTests(unittest.TestCase):
         expected = [_Navigation(snapshot, spec, state=ViewState(selected_index=index),
                                 size=(40, 8)).frame.text for index in (0, 1, 0, 2, 0, 1)]
         self.assertEqual(observed, expected)
+
+        # Individually fitting records must evict when their aggregate exceeds a cap.
+        reference = _Navigation(snapshot, spec, session=_render.RenderSession(), size=(40, 8))
+        totals = reference.session.cache_info()
+        for name, metric, cap in (("_CACHE_RECORDS", 0, 1),
+                                  ("_CACHE_TEXT_BYTES", 1, totals[1]),
+                                  ("_CACHE_ROWS", 2, totals[2]),
+                                  ("_CACHE_SEGMENTS", 3, totals[3])):
+            with self.subTest(aggregate=name), mock.patch.object(_render, name, cap):
+                bounded = _render.RenderSession()
+                for index, expected_frame in zip((0, 1, 0, 2, 0, 1), expected):
+                    view = _Navigation(snapshot, spec, session=bounded,
+                                       state=ViewState(selected_index=index), size=(40, 8))
+                    self.assertEqual(view.frame.text, expected_frame)
+                    self.assertLessEqual(bounded.cache_info()[metric], cap)
+                    self.assertEqual(bounded.cache_info()[0], 1)
 
         one = parse_jsonl(_source({"content": {"a": "界e\u0301🙂" * 20, "b": [1, 2, 3]}}))
         expected = _Navigation(one, spec, state=ViewState(mode=ViewMode.VERBOSE)).frame.text

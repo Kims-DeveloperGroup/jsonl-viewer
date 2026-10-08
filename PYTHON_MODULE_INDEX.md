@@ -169,7 +169,7 @@ unit imports Story or any third-party runtime package.
 - **Direct internal dependencies:** `_json`, `_model`, `_cell_layout`, and `contracts`.
 - **State, resources, and side effects:** Owns immutable role/bound metadata,
   construction-local expansion budgets, frozen projection summaries, and pure formatting.
-  Explicit `RenderSession` caches retain at most two current record variants, bounded
+  Explicit `RenderSession` caches retain at most 64 current record variants, bounded
   in aggregate by 8 MiB formatted UTF-8, 8,192 rows, 65,536 segments and 65,536 checkpoints.
   Structural mode/fold/active-occurrence changes replace a record variant; geometry,
   cursor and panning reuse it. Over-budget projections/indexes use exact uncached fallbacks.

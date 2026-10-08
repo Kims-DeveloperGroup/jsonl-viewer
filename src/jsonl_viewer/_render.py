@@ -99,7 +99,7 @@ class _ProjectionSummary:
     content_preview: tuple[int, int] | None
 
 
-_CACHE_RECORDS = 2
+_CACHE_RECORDS = 64
 _CACHE_TEXT_BYTES = 8 * 1024 * 1024
 _CACHE_ROWS = 8192
 _CACHE_SEGMENTS = 65536
@@ -807,15 +807,17 @@ def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCha
     for segment in line.segments:
         if segment.logical_column is not None:
             column = segment.logical_column
+        container = None if segment.container is None else FoldIdentity(line.record_index, segment.container)
+        property_identity = None if segment.property is None else FoldIdentity(line.record_index, segment.property)
         for cluster in _clusters(segment.text):
             width = _text_cells(cluster)
             if segment.navigable and width:
                 yield VisibleCharacter(
                     CursorPosition(line.record_index, line.line_index, column),
                     screen_row, cluster,
-                    None if segment.container is None else FoldIdentity(line.record_index, segment.container),
+                    container,
                     segment.delimiter, segment.role == "match_current",
-                    None if segment.property is None else FoldIdentity(line.record_index, segment.property),
+                    property_identity,
                     segment.key_anchor, screen_column, width,
                 )
             column += width
@@ -843,7 +845,8 @@ def _logical_characters(line: _RecordLine, screen_row: int, state: ViewState,
             if segments[index].navigable:
                 retained[column] = (index, begin, finish, cells)
 
-    retain_window(state.horizontal_offset - 2, state.horizontal_offset + body_width + 4)
+    # Keyboard navigation needs endpoints, preferred destinations and current
+    # neighbors. The separate visible-cell map retains every mouse hit target.
     preferred = state.preferred_column
     if preferred is None and state.cursor is not None:
         preferred = state.cursor.column
@@ -880,15 +883,21 @@ def _logical_characters(line: _RecordLine, screen_row: int, state: ViewState,
         column = state.cursor.column - line.gutter_columns
         retain_window(column - 2, column + 4)
     result: list[VisibleCharacter] = []
+    previous_index = -1
+    container = property_identity = None
     for column in sorted(retained):
         index, begin, finish, cells = retained[column]
         segment = segments[index]
+        if index != previous_index:
+            previous_index = index
+            container = None if segment.container is None else FoldIdentity(line.record_index, segment.container)
+            property_identity = None if segment.property is None else FoldIdentity(line.record_index, segment.property)
         result.append(VisibleCharacter(
             CursorPosition(line.record_index, line.line_index, line.gutter_columns + column),
             screen_row, segment.text[begin:finish],
-            None if segment.container is None else FoldIdentity(line.record_index, segment.container),
+            container,
             segment.delimiter, segment.role == "match_current",
-            None if segment.property is None else FoldIdentity(line.record_index, segment.property),
+            property_identity,
             segment.key_anchor, line.gutter_columns + column, cells,
         ))
     return tuple(result)
@@ -932,19 +941,21 @@ def _paint_record_line(
         return _paint(line.segments, color=False)
     result: list[str] = []
     column = 0
+    cursor_column = (cursor.column if cursor is not None
+                     and cursor.record_index == line.record_index
+                     and cursor.line_index == line.line_index else None)
     for segment in line.segments:
         if segment.logical_column is not None:
             column = segment.logical_column
+        matching = (segment.delimiter is not None and container is not None
+                    and container.record_index == line.record_index
+                    and container.path == segment.container)
+        style = _ANSI.get(segment.role, _ANSI["plain"])
+        style += ";1;7" if matching else ""
+        focused_style = style + (";4" if matching else ";7")
         for cluster in _clusters(segment.text):
-            position = CursorPosition(line.record_index, line.line_index, column)
-            matching = (segment.delimiter is not None and container is not None
-                        and container == FoldIdentity(line.record_index, segment.container))
-            focused = cursor_visible and segment.navigable and cursor == position
-            style = _ANSI.get(segment.role, _ANSI["plain"])
-            style += ";1" if matching else ""
-            style += ";7" if matching or focused else ""
-            style += ";4" if matching and focused else ""
-            result.append(f"\x1b[{style}m{cluster}\x1b[0m")
+            focused = cursor_visible and segment.navigable and cursor_column == column
+            result.append(f"\x1b[{focused_style if focused else style}m{cluster}\x1b[0m")
             column += _text_cells(cluster)
     return "".join(result)
 
@@ -1245,15 +1256,24 @@ def render_frame(
     )
     cursor = _resolve_cursor(state, characters)
     focused = next((cell for cell in characters if cell.position == cursor), None)
-    navigation_state = replace(state, cursor=cursor, horizontal_offset=horizontal_offset)
-    logical_characters = tuple(
-        cell for row, line in enumerate(projected_body, start=len(header))
-        if isinstance(line, _RecordLine)
-        for cell in _logical_characters(line, row, navigation_state, body_width)
-    )
+    # Preferred-column semantics are unchanged here. Rebuild only when reveal
+    # or clipping relocated the cursor/window after the initial candidates.
+    if cursor != state.cursor or horizontal_offset != state.horizontal_offset:
+        navigation_state = replace(state, cursor=cursor, horizontal_offset=horizontal_offset)
+        logical_characters = tuple(
+            cell for row, line in enumerate(projected_body, start=len(header))
+            if isinstance(line, _RecordLine)
+            for cell in _logical_characters(line, row, navigation_state, body_width)
+        )
     if caret_rows and focused is not None:
-        characters = tuple(replace(cell, screen_row=cell.screen_row + int(cell.screen_row > focused.screen_row))
-                           for cell in characters)
+        characters = tuple(
+            cell if cell.screen_row <= focused.screen_row else VisibleCharacter(
+                cell.position, cell.screen_row + 1, cell.text, cell.container,
+                cell.delimiter, cell.search_focus, cell.property, cell.key_anchor,
+                cell.screen_column, cell.screen_width,
+            )
+            for cell in characters
+        )
     footer = _footer_lines(
         snapshot, state, spec=spec, width=width, width_clipped=width_clipped,
         projection_facts=selected_projection_facts,
@@ -1264,13 +1284,17 @@ def render_frame(
     idle_body: list[str] = []
     for row, line in enumerate(body, start=len(header)):
         if isinstance(line, _RecordLine):
-            idle_body.append(_paint_record_line(
-                line, cursor=cursor, container=None if focused is None else focused.container,
-                color=color, cursor_visible=False,
-            ))
-            rendered_body.append(_paint_record_line(
+            painted = _paint_record_line(
                 line, cursor=cursor, container=None if focused is None else focused.container, color=color,
-            ))
+            )
+            rendered_body.append(painted)
+            if color and focused is not None and row == focused.screen_row:
+                idle_body.append(_paint_record_line(
+                    line, cursor=cursor, container=focused.container,
+                    color=color, cursor_visible=False,
+                ))
+            else:
+                idle_body.append(painted)
         elif isinstance(line, str):
             rendered_body.append(line)
         else:
