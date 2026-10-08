@@ -264,12 +264,13 @@ Wheel codes 64/65 and left-button code 0 use their existing navigation after
 modifier bits are removed. Invalid or unsupported mouse input has no action.
 Injected hosts remain responsible for enabling, decoding and restoring mouse modes.
 
-### Navigation responsiveness (0.6.1)
+### Navigation responsiveness (0.6.2)
 
-Cursor movement and horizontal panning reuse bounded row layouts while the
-displayed projection remains unchanged. This reduces the work needed to handle
-repeated navigation through long values. Inputs stay ordered; the viewer does
-not discard queued keys or read ahead across blocking host events.
+Cursor movement and horizontal panning reuse bounded row layouts and fitting
+visible-record projections. Dense panes also reuse navigation work, reducing
+the cost of repeated movement through long values and multiple records.
+Inputs stay ordered; the viewer does not discard queued keys or read ahead
+across blocking host events.
 
 Derived layouts belong to the current view and are discarded when it closes.
 Mode, folding, search, record, and viewport changes refresh the affected data.

@@ -36,6 +36,41 @@ def _host_cursor_glyph(frame):
 
 
 class HorizontalScrollingTests(unittest.TestCase):
+    def test_public_search_resize_and_sibling_reveals_keep_immediate_neighbors(self):
+        source = _source({"content": {
+            "first": "x" * 160 + "needle" + "a" * 80,
+            "second": "y" * 160 + "needle" + "b" * 80,
+        }})
+
+        class ResizeHost(_ObservedHost):
+            def read_event(self):
+                event = super().read_event()
+                if event == "search\tneedle":
+                    self._size = (24, 10)
+                elif event == "next_match":
+                    self._size = (120, 57)
+                return event
+
+        events = ("toggle_mode", "search\tneedle", "text\tl", "next_match", "text\tl",
+                  "previous_sibling", "text\tl", "idle", "idle", "close")
+        for color in (False, True):
+            with self.subTest(color=color):
+                host = ResizeHost(events, size=(120, 57), color=color)
+                view_jsonl(source, ViewerSpec("s", "c", "a", input_protocol="keys"), host)
+                self.assertEqual([_host_cursor_glyph(frame) for frame in host.observed[2:8]],
+                                 ["n", "e", "n", "e", "f", "i"])
+                self.assertIsNone(_host_cursor_glyph(host.observed[8]))
+                self.assertEqual(host.observed[7], host.observed[9])
+                self.assertIn("1/2", strip_ansi(host.observed[2]))
+                self.assertIn("2/2 occurrences", strip_ansi(host.observed[4]))
+                self.assertTrue(all(_text_cells(line) <= 24
+                                    for line in strip_ansi(host.observed[2]).splitlines()))
+                self.assertEqual(host.close_calls, 1)
+                self.assertEqual(source, _source({"content": {
+                    "first": "x" * 160 + "needle" + "a" * 80,
+                    "second": "y" * 160 + "needle" + "b" * 80,
+                }}))
+
     def test_public_long_unicode_tail_batches_match_ordered_cursor_events(self):
         payload = "x" * 8192 + "界e\u0301🙂" * 16
         source = _source({"content": payload})
