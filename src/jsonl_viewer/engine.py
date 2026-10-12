@@ -181,9 +181,7 @@ def _transition(
             # Refresh its structural positions before consuming another cursor key.
             rendered = render_frame(spec, current, snapshot=snapshot, diagnostic=None,
                                     columns=rendered.columns, rows=rendered.rows, color=rendered.color, session=session)
-            current = replace(current, cursor=rendered.cursor if rendered.characters else current.cursor,
-                              record_line_offset=rendered.record_line_offset, horizontal_offset=rendered.horizontal_offset,
-                              reveal_cursor=False, focus_container=None)
+            current = _accept_frame(current, rendered)
             rendered_state = current
         return _semantic_transition(
             current, value, snapshot, spec,
@@ -281,6 +279,17 @@ def _record_notice(index: int, count: int) -> str | None:
             "Last record." if index == count - 1 else None)
 
 
+def _accept_frame(state: ViewState, frame: RenderResult) -> ViewState:
+    delta = frame.gutter_columns - state.gutter_columns if state.gutter_columns else 0
+    return replace(state, record_line_offset=frame.record_line_offset,
+                   cursor=frame.cursor if frame.characters else state.cursor,
+                   preferred_column=state.preferred_column + delta
+                   if state.preferred_column is not None else None,
+                   gutter_columns=frame.gutter_columns,
+                   horizontal_offset=frame.horizontal_offset,
+                   reveal_cursor=False, focus_container=None)
+
+
 def _navigation_probe(state: ViewState, rendered: RenderResult,
                       snapshot: Snapshot, spec: ViewerSpec,
                       index: int, offset: int, session: RenderSession | None = None) -> tuple[ViewState, RenderResult]:
@@ -288,13 +297,13 @@ def _navigation_probe(state: ViewState, rendered: RenderResult,
     # it from changing the requested viewport offset during a probe.
     probe = replace(state, selected_index=index, record_line_offset=offset,
                     cursor=state.cursor or rendered.cursor, focus_container=None,
+                    gutter_columns=state.gutter_columns or rendered.gutter_columns,
                     reveal_match=False, reveal_cursor=False,
                     horizontal_offset=state.horizontal_offset if index == state.selected_index else 0,
                     message=None, message_is_error=False)
     frame = render_frame(spec, probe, snapshot=snapshot, diagnostic=None,
                          columns=rendered.columns, rows=rendered.rows, color=rendered.color, session=session)
-    return replace(probe, record_line_offset=frame.record_line_offset,
-                   horizontal_offset=frame.horizontal_offset), frame
+    return _accept_frame(probe, frame), frame
 
 
 def _row_destination(frame: RenderResult, index: int, row: int,
@@ -331,6 +340,8 @@ def _cursor_page(state: ViewState, event: str, current: VisibleCharacter,
         target = adjacent[-1] if backward else adjacent[0]
     offset = max(0, target - rendered.body_rows + 1) if backward else target
     probe, frame = _navigation_probe(state, rendered, snapshot, spec, index, offset, session)
+    if rendered.gutter_columns and frame.gutter_columns:
+        preferred += frame.gutter_columns - rendered.gutter_columns
     destination = _row_destination(frame, index, target, event, preferred)
     if destination is None:
         return state
@@ -741,10 +752,7 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
                                         columns=columns, rows=rows, color=color, session=session)
                 geometry = current_geometry
                 present_needed = True
-                state = replace(state, record_line_offset=rendered.record_line_offset,
-                                cursor=rendered.cursor if rendered.characters else state.cursor,
-                                horizontal_offset=rendered.horizontal_offset, reveal_cursor=False,
-                                focus_container=None)
+                state = _accept_frame(state, rendered)
             if present_needed:
                 host.present(rendered.text if cursor_visible else (rendered.idle_text or rendered.text))
             event = host.read_event()

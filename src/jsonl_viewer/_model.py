@@ -144,6 +144,7 @@ class ViewState:
     focus_property: FoldIdentity | None = None
     horizontal_offset: int = 0
     reveal_cursor: bool = False
+    gutter_columns: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,3 +166,4 @@ class RenderResult:
     horizontal_offset: int = 0
     max_horizontal_offset: int = 0
     body_width: int = 74
+    gutter_columns: int = 0

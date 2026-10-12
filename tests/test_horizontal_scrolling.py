@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import unittest
 
 from jsonl_viewer import ViewerSpec, view_jsonl
@@ -14,7 +15,9 @@ from tests.test_cursor_and_folding import _View, _source
 
 
 def _body(frame):
-    return [line for line in strip_ansi(frame).splitlines() if " │ " in line]
+    return [line for line in strip_ansi(frame).splitlines()
+            if "│" in line and re.fullmatch(r"[>@* ]\s*(?:R\s*\d+)?\s*L\s*(?:\d+|–)\s*",
+                                           line.partition("│")[0])]
 
 
 def _focused(result):
@@ -101,15 +104,15 @@ class HorizontalScrollingTests(unittest.TestCase):
             for color in (False, True):
                 with self.subTest(value=value, color=color):
                     events = (*setup, "text\tl", "idle", "idle", "clear_search", "text\tl", "text\th", "close")
-                    host = _ObservedHost(events, size=(12, 8), color=color)
+                    host = _ObservedHost(events, size=(16, 8), color=color)
                     view_jsonl(source, ViewerSpec("s", "c", "a", input_protocol="keys"), host)
                     target = len(setup) + 1
                     self.assertEqual(_host_cursor_glyph(host.observed[target - 1]), '"')
                     for index in (target, target + 2, target + 3, target + 4, target + 5):
                         frame = host.observed[index]
                         self.assertEqual(_host_cursor_glyph(frame), "界")
-                        self.assertTrue(any(line.endswith("10000 │ 界") for line in _body(frame)))
-                        self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
+                        self.assertTrue(any(line.endswith("│界") for line in _body(frame)))
+                        self.assertTrue(all(_text_cells(line) <= 16 for line in strip_ansi(frame).splitlines()))
                     self.assertIsNone(_host_cursor_glyph(host.observed[target + 1]))
                     self.assertEqual(_body(host.observed[target]), _body(host.observed[target + 1]))
                     self.assertEqual(host.observed[target], host.observed[target + 2])
@@ -139,7 +142,8 @@ class HorizontalScrollingTests(unittest.TestCase):
         view = _View(_source({"content": "ABCDEFGHIJKLMNOPQRSTUVWXYZ" * 5}), size=(40, 12))
         initial = view.render()
         step = max(1, initial.body_width // 2)
-        target = next(cell for cell in initial.characters if cell.position.column == 30)
+        target = next(cell for cell in initial.characters
+                      if cell.position.column == initial.gutter_columns + 24)
         view.focus(target)
         first = view.step("scroll_right")
         self.assertEqual(first.horizontal_offset, step)
@@ -215,7 +219,7 @@ class HorizontalScrollingTests(unittest.TestCase):
                                     for cell in result.characters))
                 self.assertFalse(any(cell.text.startswith("\u0301") for cell in result.characters))
                 focused = _focused(result)
-                self.assertGreaterEqual(focused.screen_column, 6)
+                self.assertGreaterEqual(focused.screen_column, result.gutter_columns)
                 if not color:
                     self.assertEqual(plain.splitlines()[focused.screen_row + 1],
                                      " " * focused.screen_column + "^")

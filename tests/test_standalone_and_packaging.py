@@ -700,7 +700,7 @@ class StandaloneTests(unittest.TestCase):
                 selected, end = self._pty_frame_containing(
                     master, output, "2/2 occurrences • Search all text='STRASSE'".encode(), start=end,
                 )
-                self.assertIn(b"@ 2", selected)
+                self.assertIn(b"@ R2", selected)
                 self._pty_write(master, b"q")
                 self._pty_read_until(master, output, b"\x1b[?25h\x1b[?1049l", start=end)
                 self._pty_finish(process, master, output)
@@ -982,7 +982,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.6.2")
+        self.assertEqual(project["version"], "0.6.3")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")

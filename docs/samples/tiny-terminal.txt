@@ -1,6 +1,6 @@
 READ ONLY • SIMPLE
 S:session-01 • Conversation…
-> 1 │ {
+>R1L1│{
       ^
 Record 1/2 • source line 1 …
 ? help • q close

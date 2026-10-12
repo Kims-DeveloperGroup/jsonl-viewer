@@ -177,7 +177,7 @@ class EngineTests(unittest.TestCase):
         self.assertIn('"timestamp"', simple)
         self.assertNotIn('"latency_ms"', simple)
         moved = host.frames[2]
-        self.assertIn("> 2 │", moved)
+        self.assertRegex(moved, r"> R2 L\s*6 │")
         verbose = host.frames[3]
         self.assertIn("READ ONLY • VERBOSE", verbose)
         self.assertIn('"latency_ms": 23', verbose)
@@ -200,10 +200,10 @@ class EngineTests(unittest.TestCase):
         self.assertIn("VERBOSE", first)
         self.assertIn("Hidden-field match selected", first)
         self.assertIn("1/3 occurrences • Search all text='latency_ms'", first)
-        self.assertIn("@ 1 │", first)
+        self.assertRegex(first, r"@ R1 L\s*\d+ │")
         second = host.frames[3]
         self.assertIn("2/3 occurrences • Search all text='latency_ms'", second)
-        self.assertIn("@ 2 │", second)
+        self.assertRegex(second, r"@ R2 L\s*\d+ │")
         previous = host.frames[4]
         self.assertIn("1/3 occurrences • Search all text='latency_ms'", previous)
 

@@ -2,7 +2,7 @@
 
 `jsonl-viewer` is a read-only, transient, structured JSONL viewer for Python
 terminals. It parses one bounded immutable byte snapshot, renders colored
-multiline JSON with source-record line gutters, and discards navigation,
+multiline JSON with separate record and display-line gutters, and discards navigation,
 cursor, fold, search, help, and mode state when the view closes.
 
 The package is Python 3.11+, MIT licensed, and has no runtime dependencies. It
@@ -19,13 +19,13 @@ or terminal-driver implementations.
 - per-string-leaf UTF-8 previews (4 KiB in Simple and 64 KiB in Verbose), with
   explicit retained/full byte counts and aggregate display facts;
 - strict UTF-8 JSONL parsing with bounded, content-safe malformed-input views;
-- stable source-record line gutters, record navigation, paging, and exact
-  go-to-line;
+- first-visible-row record labels, continuous formatted line numbers, record
+  navigation, paging, and exact source-line goto;
 - literal, case-insensitive full-text search, including decoded nested JSON,
   with `n`/`N` moving between individual keyword occurrences, visible keyword
   focus, current/total counts, and hidden-hit Verbose promotion;
 - blinking character focus, structural sibling-key navigation, and container folding;
-- horizontal body scrolling with fixed source gutters and automatic cursor reveal;
+- horizontal body scrolling with fixed record/line gutters and automatic cursor reveal;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
@@ -38,26 +38,36 @@ or arbitrary search-expression language.
 
 ## Preview
 
+The left gutter distinguishes `R` (record number) from `L` (formatted JSON line
+number). A record label appears only on its first visible row, including when
+a page begins midway through the record. Line numbers continue across records
+in the fully expanded layout of the selected mode; folded rows leave gaps.
+Simple and Verbose have separate numbering. Blank separators, caret rows, and
+supplemental search excerpts do not consume line numbers; excerpts show `L–`.
+The footer and `g` still refer to the original JSONL source line.
+Below 48 columns, the gutter removes padding. If complete identity labels leave
+no room for one JSON cell, the viewer shows `Too narrow` until it is widened.
+
 This excerpt shows the plain view. ANSI uses inverse-video character focus;
 plain output inserts an aligned caret row below the focused JSON row:
 
 ```text
 JSONL VIEWER • READ ONLY • SIMPLE
-Session: session-01 • Debate: d20260829T090000_abcd1234 — Provider diagnostics • Agent: agent-01
-@ 1 │ {
-@ 1 │   "timestamp": "2026-08-29T09:00:00Z",
-@ 1 │   "⟦r⟧equest_type": "request",
-          ^
-@ 1 │   "content": "Find the mismatch."
-@ 1 │ }
+Session: session-01 • Conversation: conversation-01 • Agent: agent-01
+@ R1 L 1 │ {
+@    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+@    L 3 │   "⟦r⟧equest_type": "request",
+               ^
+@    L 4 │   "content": "Find the mismatch."
+@    L 5 │ }
 
-* 2 │ {
-* 2 │   "timestamp": "2026-08-29T09:00:01Z",
-* 2 │   "request_type": "response",
-* 2 │   "content": "The field is missing."
-* 2 │ }
+* R2 L 6 │ {
+*    L 7 │   "timestamp": "2026-08-29T09:00:01Z",
+*    L 8 │   "request_type": "response",
+*    L 9 │   "content": "The field is missing."
+*    L10 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-h/j/k/l cursor • J/K siblings • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
+? help • q close
 ```
 
 An encoded provider response is expanded as a derived, read-only display. The
@@ -65,19 +75,26 @@ cue is visible without color, and genuine string leaves retain the JSON
 escaping required for quotes, backslashes, and control characters:
 
 ```text
-> 1 │   "content": [expanded JSON string ×1] {
-> 1 │     "action": "provider_response",
-> 1 │     "response_text": [expanded JSON string ×1] {
-> 1 │       "status": "provider_error",
-> 1 │       "details": [
-> 1 │         "correlation token mismatch",
-> 1 │         {
-> 1 │           "retryable": false
-> 1 │         }
-> 1 │       ]
-> 1 │     }
-> 1 │   }
+JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conversation-01 | Agent: ag…
+> R1 L 1 │ {
+           ^
+>    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+>    L 3 │   "request_type": "response",
+>    L 4 │   "content": [expanded JSON string ×1] {
+>    L 5 │     "action": "provider_response",
+>    L 6 │     "response_text": [expanded JSON string ×1] {
+>    L 7 │       "status": "provider_error",
+>    L 8 │       "details": [
+>    L 9 │         "correlation token mismatch",
+>    L10 │         {
+>    L11 │           "retryable": false
+>    L12 │         }
+>    L13 │       ]
+>    L14 │     }
+>    L15 │   }
+>    L16 │ }
 Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
+←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close
 ```
 
 The [design system](docs/design-system.md) defines every visual role and user
@@ -151,7 +168,7 @@ bounded text window around it, even beyond a long value's normal preview.
 Hidden-field hits promote the view to Verbose. Manual paging remains available;
 `n` or `N` brings the next selected occurrence back into view. Resizing
 recomputes the window at the current geometry. At very narrow widths, the active keyword takes priority over context and
-display brackets. The source gutter stays fixed; a readable bare keyword uses
+display brackets. The record/line gutter stays fixed; a readable bare keyword uses
 ANSI focus or the plain caret when its brackets cannot fit. Long keywords can
 still be clipped to the available body cells. Press `c` to clear
 search; Escape follows the cancellation rules above.
@@ -279,7 +296,7 @@ The existing capture and string-preview limits remain unchanged.
 ### New in 0.5.4
 
 Left/Right arrows pan the JSON body by half its visible width, rounded down
-with a minimum of one display column. Header, source-line gutters, and footer
+with a minimum of one display column. Header, record/line gutters, and footer
 stay fixed. The footer shows `x OFFSET` and `←`/`→` for content available on
 either side. Scroll stops at the beginning and end of the visible rows' full
 projected content; shorter rows can be blank at a shared offset.

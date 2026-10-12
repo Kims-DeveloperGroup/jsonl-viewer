@@ -1,5 +1,5 @@
 JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conversation-01 | Agent: ag…
-> 1 │ {...}
-      ^
+> R1 L1 │ {...}
+          ^
 Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
 ←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close

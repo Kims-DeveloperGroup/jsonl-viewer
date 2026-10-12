@@ -1,16 +1,16 @@
 JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
-> 1 │ {
-      ^
-> 1 │   "timestamp": "2026-08-29T09:00:00Z",
-> 1 │   "request_type": "request",
-> 1 │   "content": "Find the mismatch."
-> 1 │ }
+> R1 L 1 │ {
+           ^
+>    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+>    L 3 │   "request_type": "request",
+>    L 4 │   "content": "Find the mismatch."
+>    L 5 │ }
 
-  2 │ {
-  2 │   "timestamp": "2026-08-29T09:00:01Z",
-  2 │   "request_type": "response",
-  2 │   "content": "The field is missing."
-  2 │ }
+  R2 L 6 │ {
+     L 7 │   "timestamp": "2026-08-29T09:00:01Z",
+     L 8 │   "request_type": "response",
+     L 9 │   "content": "The field is missing."
+     L10 │ }
 Record 1/2 • source line 1 • 1 fields hidden
 ? help • q close

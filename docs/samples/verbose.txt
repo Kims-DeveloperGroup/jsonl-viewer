@@ -1,18 +1,18 @@
 JSONL VIEWER • READ ONLY • VERBOSE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
-> 1 │ {
-      ^
-> 1 │   "timestamp": "2026-08-29T09:00:00Z",
-> 1 │   "request_type": "request",
-> 1 │   "content": "Find the mismatch.",
-> 1 │   "latency_ms": 12
-> 1 │ }
+> R1 L 1 │ {
+           ^
+>    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+>    L 3 │   "request_type": "request",
+>    L 4 │   "content": "Find the mismatch.",
+>    L 5 │   "latency_ms": 12
+>    L 6 │ }
 
-  2 │ {
-  2 │   "timestamp": "2026-08-29T09:00:01Z",
-  2 │   "request_type": "response",
-  2 │   "content": "The field is missing.",
-  2 │   "latency_ms": 23
-  2 │ }
+  R2 L 7 │ {
+     L 8 │   "timestamp": "2026-08-29T09:00:01Z",
+     L 9 │   "request_type": "response",
+     L10 │   "content": "The field is missing.",
+     L11 │   "latency_ms": 23
+     L12 │ }
 Switched to Verbose mode.
 ? help • q close
