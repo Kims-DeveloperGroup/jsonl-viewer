@@ -37,7 +37,7 @@ class FullTextOccurrenceTests(unittest.TestCase):
             with self.subTest(color=color):
                 host = self._view(source, "search\tneed", size=(12, 8), color=color)
                 frame = host.frames[-1]
-                self.assertIn("@ 1 │ ⟦need⟧", strip_ansi(frame))
+                self.assertRegex(strip_ansi(frame), r"@(?:R1|  )L2│⟦need⟧")
                 self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
                 if color:
                     self.assertIn("n", styled_text(frame, "7"))
@@ -50,7 +50,7 @@ class FullTextOccurrenceTests(unittest.TestCase):
             with self.subTest(color=color):
                 host = self._view(source, "search\tneedle", size=(12, 8), color=color)
                 frame = host.frames[-1]
-                self.assertIn("@ 1 │ needle", strip_ansi(frame))
+                self.assertRegex(strip_ansi(frame), r"@(?:R1|  )L2│needle")
                 self.assertNotIn("⟦", _body(strip_ansi(frame)))
                 self.assertTrue(all(_text_cells(line) <= 12 for line in strip_ansi(frame).splitlines()))
                 if color:
@@ -218,17 +218,24 @@ class FullTextOccurrenceTests(unittest.TestCase):
         self.assertIn("⟦needle⟧", _body(host.frames[-1]))
         self.assertTrue(all(_text_cells(line) <= 18 for line in host.frames[-1].splitlines()))
 
-    def test_twelve_columns_and_five_digit_gutter_keep_visible_wide_keyword(self):
+    def test_five_digit_gutters_report_too_narrow_then_reveal_wide_keyword(self):
         source = b'{"content":"x"}\n' * 9999 + _source({"content": "x" * 100 + "개"})
         for color in (False, True):
             with self.subTest(color=color):
                 view = _View(source, size=(12, 5), color=color)
                 result = view.step("search\t개")
+                self.assertIn("Too narrow", strip_ansi(result.text))
+                self.assertEqual(result.characters, ())
+                self.assertTrue(all(_text_cells(line) <= 12
+                                    for line in strip_ansi(result.text).splitlines()))
+                view.size = (16, 5)
+                result = view.render()
                 plain = strip_ansi(result.text)
                 focused = next(cell for cell in result.characters if cell.position == result.cursor)
                 self.assertEqual(focused.text, "개")
                 self.assertTrue(focused.search_focus)
-                self.assertIn('@ 10000 │ 개', plain)
+                self.assertIn('R10000', plain)
+                self.assertIn('L29999│개', plain)
                 self.assertEqual(len(view.state.search.occurrences), 1)
                 self.assertEqual(view.state.search.current_index, 0)
                 if color:
@@ -236,7 +243,7 @@ class FullTextOccurrenceTests(unittest.TestCase):
                 else:
                     self.assertEqual(plain.splitlines()[focused.screen_row + 1],
                                      " " * focused.screen_column + "^")
-                self.assertTrue(all(_text_cells(line) <= 12 for line in plain.splitlines()))
+                self.assertTrue(all(_text_cells(line) <= 16 for line in plain.splitlines()))
 
     def test_escaped_quotes_backslashes_and_unsafe_characters_focus_original_span(self):
         for value, query, visible in ((r'a "quote" b', '"quote"', r'\"quote\"'),

@@ -100,11 +100,11 @@ unit imports Story or any third-party runtime package.
   cells and key anchors with parsed structure, never string-delimiter heuristics.
 - **Direct internal dependencies:** None.
 - **State/resources:** `ViewState` owns session folds, logical cursor/preferred
-  column, horizontal body offset, one-shot cursor reveal, container/property
-  focus, and search/prompt state. `VisibleCharacter` separates logical display
+  column and remembered gutter width, horizontal body offset, one-shot cursor reveal,
+  container/property focus, and search/prompt state. `VisibleCharacter` separates logical display
   cells from painted screen columns and full-cluster screen widths. `RenderResult` owns bounded visible
   geometry, compact logical navigation candidates for viewport rows,
-  full-record navigable row indices, horizontal bounds, sibling metadata, and
+  full-record navigable row indices, gutter geometry, horizontal bounds, sibling metadata, and
   deterministic visible/idle frame text. No module state, I/O, or lifecycle ownership.
 - **Verification:** Engine, cursor/folding, rendering, search, and sample tests;
   `docs/design-system.md` describes the behavior.
@@ -174,8 +174,13 @@ unit imports Story or any third-party runtime package.
   Structural mode/fold/active-occurrence changes replace a record variant; geometry,
   cursor and panning reuse it. Over-budget projections/indexes use exact uncached fallbacks.
   Visible row layouts build lazily; markers, gutters, focus targets and geometry stay frame-local.
-  It
-  performs no terminal or filesystem I/O. Rendering reorders/project fields by
+  Expanded row ordinals are assigned before folded children are discarded, leaving
+  line-number gaps and keeping subsequent record starts stable. The same session
+  owns lazy mode-specific record counts and cumulative prefixes, each bounded by
+  the immutable snapshot record count and cleared on rebind or view close. Fixed
+  record/line gutters show each record label once per frame; geometry chooses
+  aligned normal or compact columns and a content-free `Too narrow` state.
+  It performs no terminal or filesystem I/O. Rendering reorders/project fields by
   `ViewerSpec` and recursively traverses complete string-encoded JSON containers
   accepted by `_json`, without mutating source/search values. Shared
   layer/depth/node/decoded-byte bounds retain an over-bound candidate as its
@@ -329,7 +334,9 @@ unit imports Story or any third-party runtime package.
   record notices; paging scrolls within a record before using that transition. Hidden
   folded descendants and Simple-mode exclusions are not navigation targets.
   The engine creates one lexical renderer session per view call, passes it through
-  batched transitions/navigation probes, and discards it on return. All ordered input
+  batched transitions/navigation probes, and discards it on return. Frame adoption
+  rebases the character cursor and preferred column when gutter digits or compact
+  geometry change. All ordered input
   events are retained; no blocking-host read-ahead or terminal buffering is introduced.
 - **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
   cached frame variants without rebuilding projections. Real input restores the

@@ -37,18 +37,20 @@ full frame):
 ```text
 JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Conversation: conversation-01 • Agent: agent-01
-@ 1 │ {
-@ 1 │   "⟦r⟧equest_type": "request",
-          ^
-@ 1 │   "content": "Find the mismatch."
-@ 1 │ }
+@ R1 L 1 │ {
+@    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+@    L 3 │   "⟦r⟧equest_type": "request",
+               ^
+@    L 4 │   "content": "Find the mismatch."
+@    L 5 │ }
 
-* 2 │ {
-* 2 │   "request_type": "response",
-* 2 │   "content": "The field is missing."
-* 2 │ }
+* R2 L 6 │ {
+*    L 7 │   "timestamp": "2026-08-29T09:00:01Z",
+*    L 8 │   "request_type": "response",
+*    L 9 │   "content": "The field is missing."
+*    L10 │ }
 1/4 occurrences • Search all text='r' • ⟦active⟧ • n/N
-h/j/k/l cursor • J/K siblings • Enter fold • ↑/↓ records • PgUp/PgDn • / search • n/N • m mode • ? help • q close
+? help • q close
 ```
 
 That fixture uses the default `Conversation` label and no subject. Supplying
@@ -61,19 +63,26 @@ structure instead of a wall of outer `\"` and `\\` escapes. This excerpt is
 from the exact [nested sample](samples/nested-expanded-json.txt):
 
 ```text
-> 1 │   "content": [expanded JSON string ×1] {
-> 1 │     "action": "provider_response",
-> 1 │     "response_text": [expanded JSON string ×1] {
-> 1 │       "status": "provider_error",
-> 1 │       "details": [
-> 1 │         "correlation token mismatch",
-> 1 │         {
-> 1 │           "retryable": false
-> 1 │         }
-> 1 │       ]
-> 1 │     }
-> 1 │   }
+JSONL VIEWER • READ ONLY • SIMPLE | Session: session-01 | Conversation: conversation-01 | Agent: ag…
+> R1 L 1 │ {
+           ^
+>    L 2 │   "timestamp": "2026-08-29T09:00:00Z",
+>    L 3 │   "request_type": "response",
+>    L 4 │   "content": [expanded JSON string ×1] {
+>    L 5 │     "action": "provider_response",
+>    L 6 │     "response_text": [expanded JSON string ×1] {
+>    L 7 │       "status": "provider_error",
+>    L 8 │       "details": [
+>    L 9 │         "correlation token mismatch",
+>    L10 │         {
+>    L11 │           "retryable": false
+>    L12 │         }
+>    L13 │       ]
+>    L14 │     }
+>    L15 │   }
+>    L16 │ }
 Record 1/1 • source line 1 • JSON display 2 expanded, 0 skipped, 0 truncated
+←/→ pan • h/j/k/l • J/K keys • Enter fold • ↑/↓ • PgUp/Dn • / search • n/N • m • ? help • q close
 ```
 
 ## Frame anatomy and immutable cues
@@ -85,9 +94,14 @@ Every normal frame has three areas:
    subject, and agent values supplied by `ViewerSpec`, before responsive
    clipping. The scope projection is `LABEL: FULL_ID — subject`; the em dash
    and subject are omitted when no subject is supplied.
-2. **Body:** a stable source-record line gutter and pretty multiline JSON. The
-   same source line number repeats on continuation rows so paging cannot detach
-   content from its source identity.
+2. **Body:** separate aligned `R` record and `L` formatted-line columns beside
+   pretty multiline JSON. Show `R` only on each record's first visible row;
+   continuation rows leave that column blank. An interior page repeats the
+   record label on its new first visible row. `L` continues across records in
+   the fully expanded selected-mode projection, preserving gaps through folds.
+   Simple and Verbose have separate numbering. Blank separators, caret rows,
+   and supplemental search excerpts do not consume numbers; excerpts show `L–`.
+   Source-line goto and footer source identity remain distinct from `L`.
 3. **Footer:** transient status/search position followed by persistent command
    help. The normal footer retains at least `? help • q close` in the tiny
    tier. An active input draft replaces these two rows with its editor and
@@ -125,7 +139,7 @@ host.
 | Semantic role | Plain signal | ANSI SGR | Exact usage |
 | --- | --- | --- | --- |
 | chrome | labels and separators | `1;36` bold cyan | the complete header line(s), Help body heading, and draft editor row |
-| line-number gutter | repeated number and `│` | `2;90` dim bright-black | source line digits and gutter separator; the marker has its own role |
+| record/line gutter | first-visible-row `R`, per-row `L`, and `│` | `2;90` dim bright-black | record identity, expanded formatted-line positions, and gutter separator; the marker has its own role |
 | JSON keys | quoted key | `34` blue | object field-name token; `:` and structural punctuation remain plain |
 | strings | quoted JSON token | `32` green | content-safe string value, excluding a muted truncation marker |
 | numbers | decimal token | `35` magenta | integers and finite floats |
@@ -191,7 +205,7 @@ record; Page Up reverses that behavior. JSON and chrome use Unicode cell width:
 combining marks consume zero cells and East Asian wide/fullwidth characters
 consume two. Clipped visual rows end with `…` and the footer reports `width
 clipped`; clipping never changes the snapshot. In 0.5.4, the JSON body can
-scroll horizontally while chrome and source-line gutters stay fixed. The
+scroll horizontally while chrome and record/line gutters stay fixed. The
 footer's `x OFFSET` gives the horizontal display-cell offset; `←` and `→`
 indicate content on the corresponding side. A shared offset is clamped to the
 widest full projected row in the current vertical pane, including rows from
@@ -335,7 +349,7 @@ host methods are used.
 Since 0.5.4, `h`/`l` traverses the full projected row before wrapping, revealing
 offscreen destinations automatically. Logical character identity survives
 panning; ANSI inverse focus and the plain caret map to the displayed cell.
-All body rows share a horizontal offset, while source gutters stay fixed.
+All body rows share a horizontal offset, while record/line gutters stay fixed.
 Arrow panning preserves a visible cursor or relocates it to the nearest visible
 navigable character without automatically restoring the previous viewport.
 
@@ -438,7 +452,7 @@ are available. Manual paging can move away from it; the next `n`/`N`
 reveals the newly selected occurrence. Resize recomputes geometry and focus
 windows without changing search identity.
 
-Horizontal windows prioritize the focused keyword over context. Source gutters
+Horizontal windows prioritize the focused keyword over context. Record/line gutters
 remain fixed. When the keyword fits but its brackets do not, show the readable
 bare keyword with ANSI match styling or a plain caret, using footer overflow
 cues instead of spending its cells on an ellipsis. Longer keywords can still

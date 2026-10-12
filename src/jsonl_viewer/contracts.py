@@ -167,7 +167,7 @@ class ViewerHost(Protocol):
     ``toggle_fold``, ``next_sibling``, and ``previous_sibling`` semantic events.
     ``scroll_left`` and ``scroll_right`` pan the JSON body by half its width;
     physical Left/Right and ordinary-line ``left``/``right`` select those actions
-    outside prompts. Headers, source-line gutters, and footers remain fixed.
+    outside prompts. Headers, record/line gutters, and footers remain fixed.
     Interactive hosts may return ``idle`` after 500 ms without input; the engine
     alternates cached cursor emphasis while leaving prompt/help frames steady.
     Hosts that never return ``idle`` retain a steady cursor. Partial UTF-8 input

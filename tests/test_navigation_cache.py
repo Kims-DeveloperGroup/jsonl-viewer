@@ -43,9 +43,7 @@ class _Navigation:
         )
         self.frames.append(self.frame)
         self.state = replace(
-            self.state, cursor=self.frame.cursor if self.frame.characters else self.state.cursor,
-            record_line_offset=self.frame.record_line_offset,
-            horizontal_offset=self.frame.horizontal_offset,
+            engine._accept_frame(self.state, self.frame),
             reveal_cursor=False, focus_container=None,
         )
         return self.frame

@@ -75,6 +75,7 @@ class _Segment:
 class _DisplayLine:
     segments: tuple[_Segment, ...]
     path: JSONPath
+    expanded_line_index: int | None = None
 
 
 @dataclass(slots=True)
@@ -86,6 +87,7 @@ class _ProjectionFacts:
     truncated_retained_utf8_bytes: int = 0
     truncated_full_utf8_bytes: int = 0
     content_preview: tuple[int, int] | None = None
+    expanded_line_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,7 @@ class _ProjectionSummary:
     truncated_retained_utf8_bytes: int
     truncated_full_utf8_bytes: int
     content_preview: tuple[int, int] | None
+    expanded_line_count: int
 
 
 _CACHE_RECORDS = 64
@@ -130,11 +133,15 @@ class RenderSession:
         self._context: tuple[ViewerSpec, Snapshot | None] | None = None
         self._records: OrderedDict[int, _RecordProjection] = OrderedDict()
         self._text_bytes = self._rows = self._segments = self._checkpoints = 0
+        self._line_counts: dict[ViewMode, dict[int, int]] = {}
+        self._line_prefixes: dict[ViewMode, list[int]] = {}
 
     def bind(self, spec: ViewerSpec, snapshot: Snapshot | None) -> None:
         if self._context is None or self._context[0] is not spec or self._context[1] is not snapshot:
             self._records.clear()
             self._text_bytes = self._rows = self._segments = self._checkpoints = 0
+            self._line_counts.clear()
+            self._line_prefixes.clear()
             self._context = (spec, snapshot)
 
     def cache_info(self) -> tuple[int, int, int, int, int]:
@@ -161,6 +168,7 @@ class RenderSession:
         if cached is not None:
             self._evict(index)
         projection = _build_projection(record, index, spec, state.mode, active, folds, key)
+        self._line_counts.setdefault(state.mode, {})[index] = projection.facts.expanded_line_count
         if (projection.text_bytes > _CACHE_TEXT_BYTES or len(projection.lines) > _CACHE_ROWS
                 or projection.segment_count > _CACHE_SEGMENTS):
             return projection
@@ -174,6 +182,23 @@ class RenderSession:
         self._rows += len(projection.lines)
         self._segments += projection.segment_count
         return projection
+
+    def line_start(self, index: int, spec: ViewerSpec, mode: ViewMode) -> int:
+        """Lazily count preceding records without retaining their formatted text."""
+        assert self._context is not None
+        snapshot = self._context[1]
+        assert snapshot is not None
+        prefixes = self._line_prefixes.setdefault(mode, [0])
+        counts = self._line_counts.setdefault(mode, {})
+        while len(prefixes) <= index:
+            preceding = len(prefixes) - 1
+            count = counts.get(preceding)
+            if count is None:
+                _, facts = _format_record(snapshot.records[preceding], spec, mode)
+                count = facts.expanded_line_count
+                counts[preceding] = count
+            prefixes.append(prefixes[-1] + count)
+        return prefixes[index]
 
     def layout(self, index: int, projection: _RecordProjection, row: int) -> RowLayout:
         cached = projection.layouts.get(row)
@@ -428,6 +453,13 @@ def _key_segments(tokens: tuple[_Segment, ...], key: str, owner: JSONPath,
     return tuple(result)
 
 
+def _expanded_line(segments: tuple[_Segment, ...], path: JSONPath,
+                   facts: _ProjectionFacts) -> _DisplayLine:
+    line = _DisplayLine(segments, path, facts.expanded_line_count)
+    facts.expanded_line_count += 1
+    return line
+
+
 def _format_value(
     value: JSONValue,
     *,
@@ -452,8 +484,8 @@ def _format_value(
                           delimiter="open", nonempty=bool(value), folded=folded, property=owner)
         closer = replace(opener, text=closing, delimiter="close")
         if not value:
-            return [_DisplayLine(leading + (opener, closer), path)]
-        lines = [_DisplayLine(leading + (opener,), path)]
+            return [_expanded_line(leading + (opener, closer), path, facts)]
+        lines = [_expanded_line(leading + (opener,), path, facts)]
         items = tuple(value.items()) if isinstance(value, dict) else tuple(enumerate(value))
         for index, (key, child) in enumerate(items):
             child_path = path + (key,)
@@ -478,14 +510,14 @@ def _format_value(
                 last = child_lines[-1]
                 child_lines[-1] = _DisplayLine(
                     last.segments + (_Segment(",", navigable=True, container=path, property=child_path if isinstance(value, dict) else owner),),
-                    last.path,
+                    last.path, last.expanded_line_index,
                 )
             lines.extend(child_lines)
-        lines.append(_DisplayLine((_Segment(" " * indent), closer), path))
+        lines.append(_expanded_line((_Segment(" " * indent), closer), path, facts))
         # Traverse first even when folded: folding must not change expansion
         # budgets, projection facts, or acceptance of later encoded strings.
         if folded:
-            return [_DisplayLine(leading + (opener, _Segment("..."), closer), path)]
+            return [replace(lines[0], segments=leading + (opener, _Segment("..."), closer))]
         return lines
     if isinstance(value, str):
         expansion = expand_json_string(value, display_depth=display_depth, budget=budget)
@@ -516,7 +548,7 @@ def _format_value(
     if (not isinstance(value, str) and active is not None and active.path == path
             and active.kind == "value" and active.text == token[0].text):
         token = _focused_token(active.text, active, token[0].role, quoted=False)
-    return [_DisplayLine(leading + tuple(replace(segment, property=owner) for segment in _data_segments(token, parent)), path)]
+    return [_expanded_line(leading + tuple(replace(segment, property=owner) for segment in _data_segments(token, parent)), path, facts)]
 
 
 def _project_record(
@@ -708,6 +740,8 @@ class _RecordLine:
     gutter_columns: int = 0
     layout: RowLayout | None = None
     body_cells: int = 0
+    expanded_line_number: int | None = None
+    first_visible: bool = False
 
 
 def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMode,
@@ -718,6 +752,7 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
         tuple((path, parent) for path, parent in facts.properties if path in visible_properties),
         facts.expanded_strings, facts.skipped_expansions, facts.truncated_leaves,
         facts.truncated_retained_utf8_bytes, facts.truncated_full_utf8_bytes, facts.content_preview,
+        facts.expanded_line_count,
     )
     widths: list[int] = []
     containers: list[ContainerMetadata] = []
@@ -746,14 +781,30 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
                              tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments)
 
 
-def _record_line(record: Record, index: int, row: int, projection: _RecordProjection,
-                 state: ViewState, gutter_width: int, session: RenderSession) -> _RecordLine:
+def _record_line(index: int, row: int, projection: _RecordProjection,
+                 state: ViewState, line_start: int, first_visible: bool,
+                 session: RenderSession) -> _RecordLine:
     matched = state.search is not None and state.search.has_record(index)
     marker, marker_role = _record_marker(index, state, matched=matched)
-    gutter = (_Segment(marker, marker_role), _Segment(" ", "gutter"),
-              _Segment(str(record.source_line).rjust(gutter_width), "gutter"), _Segment(" │ ", "gutter"))
-    return _RecordLine(gutter + projection.lines[row].segments, index, row, gutter_width + 5,
-                       session.layout(index, projection, row), projection.widths[row])
+    gutter = (_Segment(marker, marker_role),)
+    expanded = projection.lines[row].expanded_line_index
+    return _RecordLine(gutter + projection.lines[row].segments, index, row, 0,
+                       session.layout(index, projection, row), projection.widths[row],
+                       None if expanded is None else line_start + expanded + 1, first_visible)
+
+
+def _gutter_line(line: _RecordLine, record_digits: int, line_digits: int,
+                 *, compact: bool) -> _RecordLine:
+    record = (f"R{str(line.record_index + 1).rjust(record_digits)}"
+              if line.first_visible else " " * (record_digits + 1))
+    number = "–" if line.expanded_line_number is None else str(line.expanded_line_number)
+    label = f"L{number.rjust(line_digits)}"
+    gutter = (line.segments[0], _Segment("" if compact else " ", "gutter"),
+              _Segment(record + ("" if compact else " ") + label, "gutter"),
+              _Segment("│" if compact else " │ ", "gutter"))
+    return _RecordLine(gutter + line.segments[1:], line.record_index, line.line_index,
+                       record_digits + line_digits + (4 if compact else 8),
+                       line.layout, line.body_cells, line.expanded_line_number, line.first_visible)
 
 
 def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
@@ -1138,6 +1189,7 @@ def render_frame(
     horizontal_offset = state.horizontal_offset
     max_horizontal_offset = 0
     body_width = width
+    gutter_columns = state.gutter_columns
     selected_projection_facts: _ProjectionFacts | _ProjectionSummary | None = None
     containers: list[ContainerMetadata] = []
     properties: list[PropertyMetadata] = []
@@ -1150,8 +1202,6 @@ def render_frame(
             body.extend(status[:available_body_rows])
         else:
             assert snapshot is not None and snapshot.records
-            gutter_width = max(1, len(str(snapshot.records[-1].source_line)))
-            body_width = max(1, width - gutter_width - 5)
             remaining = available_body_rows
             for index in range(state.selected_index, len(snapshot.records)):
                 record = snapshot.records[index]
@@ -1177,7 +1227,8 @@ def render_frame(
                             effective_offset = max(0, focus_row - max(0, remaining // 2))
                     start = effective_offset
                 take = min(remaining, max(0, logical_count - start))
-                body.extend(_record_line(record, index, row, projection, state, gutter_width, session)
+                line_start = session.line_start(index, spec, state.mode)
+                body.extend(_record_line(index, row, projection, state, line_start, row == start, session)
                             for row in range(start, start + take))
                 remaining -= take
                 if remaining <= 0:
@@ -1187,6 +1238,27 @@ def render_frame(
                     remaining -= 1
                     if remaining <= 0:
                         break
+    record_lines = [line for line in body if isinstance(line, _RecordLine)]
+    if record_lines:
+        record_digits = max(len(str(line.record_index + 1)) for line in record_lines)
+        line_digits = max((len(str(line.expanded_line_number)) for line in record_lines
+                           if line.expanded_line_number is not None), default=1)
+        compact = width < 48
+        next_gutter_columns = record_digits + line_digits + (4 if compact else 8)
+        if width <= next_gutter_columns:
+            body = [("Too narrow", "warning")]
+        else:
+            gutter_columns = next_gutter_columns
+            body_width = width - gutter_columns
+            body = [_gutter_line(line, record_digits, line_digits, compact=compact)
+                    if isinstance(line, _RecordLine) else line for line in body]
+            delta = gutter_columns - state.gutter_columns if state.gutter_columns else 0
+            if delta:
+                state = replace(state, gutter_columns=gutter_columns,
+                                cursor=replace(state.cursor, column=state.cursor.column + delta)
+                                if state.cursor is not None else None,
+                                preferred_column=state.preferred_column + delta
+                                if state.preferred_column is not None else None)
     logical_characters = tuple(
         cell for row, line in enumerate(body, start=len(header))
         if isinstance(line, _RecordLine) for cell in _logical_characters(line, row, state, body_width)
@@ -1313,7 +1385,7 @@ def render_frame(
         cursor=cursor, characters=characters, containers=tuple(containers),
         navigable_rows=tuple(navigable_rows), logical_characters=logical_characters,
         horizontal_offset=horizontal_offset, max_horizontal_offset=max_horizontal_offset, body_width=body_width,
-        columns=width, rows=height, color=color,
+        columns=width, rows=height, color=color, gutter_columns=gutter_columns,
         properties=tuple(properties),
         idle_text="\n".join((rendered_header + idle_body + rendered_footer)[:height]),
     )

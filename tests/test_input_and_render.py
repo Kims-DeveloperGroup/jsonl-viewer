@@ -628,8 +628,8 @@ class RenderTests(unittest.TestCase):
         host = FakeHost(("search\thit", "close"), size=(100, 30))
         view_jsonl(source, ViewerSpec("s", "c", "a"), host)
         frame = host.frames[-1]
-        self.assertIn("@ 1 │", frame)
-        self.assertIn("* 2 │", frame)
+        self.assertRegex(frame, r"@ R1 L\s*1 │")
+        self.assertRegex(frame, r"\* R2 L\s*6 │")
         self.assertIn("⟦active⟧ • n/N", frame)
 
         ansi = FakeHost(

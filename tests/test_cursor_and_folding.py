@@ -11,7 +11,7 @@ from jsonl_viewer import ViewerSpec, view_jsonl
 from jsonl_viewer._input import parse_jsonl
 from jsonl_viewer._model import FoldIdentity, ViewState
 from jsonl_viewer._render import _text_cells, render_frame, strip_ansi
-from jsonl_viewer.engine import _transition
+from jsonl_viewer.engine import _accept_frame, _transition
 from tests.support import FakeHost, styled_text, without_caret
 
 
@@ -33,9 +33,7 @@ class _View:
         result = render_frame(self.spec, self.state, snapshot=self.snapshot,
                               diagnostic=None, columns=self.size[0], rows=self.size[1],
                               color=self.color)
-        self.state = replace(self.state, cursor=result.cursor if result.characters else self.state.cursor,
-                             record_line_offset=result.record_line_offset,
-                             horizontal_offset=result.horizontal_offset,
+        self.state = replace(_accept_frame(self.state, result),
                              reveal_cursor=False, focus_container=None)
         return result
 
@@ -119,7 +117,8 @@ class CursorTests(unittest.TestCase):
                     reference = _View(source, size=(240, 200), color=color)
                     reference.state = replace(view.state, horizontal_offset=0, cursor=None,
                                               record_line_offset=0)
-                    projected = reference.render().characters
+                    reference_frame = reference.render()
+                    projected = reference_frame.characters
                     before = (view.state.selected_index, view.state.record_line_offset, view.state.folds)
                     for left, right in zip(result.characters, result.characters[1:]):
                         if left.screen_row == right.screen_row:
@@ -130,11 +129,16 @@ class CursorTests(unittest.TestCase):
                         right = next(cell for cell in projected if
                                      (cell.position.record_index, cell.position.line_index) ==
                                      (right.position.record_index, right.position.line_index))
-                        view.focus(left)
-                        self.assertEqual(view.step("cursor_right").cursor, right.position)
-                        self.assertEqual(view.state.preferred_column, right.position.column)
-                        self.assertEqual(view.step("cursor_left").cursor, left.position)
-                        self.assertEqual(view.state.preferred_column, left.position.column)
+                        left_body = replace(left.position, column=left.position.column - reference_frame.gutter_columns)
+                        right_body = replace(right.position, column=right.position.column - reference_frame.gutter_columns)
+                        view.focus(replace(left, position=replace(left_body,
+                                                                column=left_body.column + view.state.gutter_columns)))
+                        moved = view.step("cursor_right")
+                        self.assertEqual(replace(moved.cursor, column=moved.cursor.column - moved.gutter_columns), right_body)
+                        self.assertEqual(view.state.preferred_column - moved.gutter_columns, right_body.column)
+                        returned = view.step("cursor_left")
+                        self.assertEqual(replace(returned.cursor, column=returned.cursor.column - returned.gutter_columns), left_body)
+                        self.assertEqual(view.state.preferred_column - returned.gutter_columns, left_body.column)
                     self.assertEqual((view.state.selected_index, view.state.record_line_offset, view.state.folds), before)
                     self.assertEqual(view.snapshot, parse_jsonl(source))
 

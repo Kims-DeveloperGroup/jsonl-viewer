@@ -1,10 +1,10 @@
 JSONL VIEWER • READ ONLY • SIMPLE
 Session: session-01 • Conversation: conversation-01 • Agent: ag…
-> 1 │ {
-      ^
-> 1 │   "timestamp": "2026-08-29T09:00:00Z",
-> 1 │   "request_type": "request",
-> 1 │   "content": "Find the mismatch."
-> 1 │ }
+> R1 L1 │ {
+          ^
+>    L2 │   "timestamp": "2026-08-29T09:00:00Z",
+>    L3 │   "request_type": "request",
+>    L4 │   "content": "Find the mismatch."
+>    L5 │ }
 Record 1/2 • source line 1 • 1 fields hidden
 ? help • q close
