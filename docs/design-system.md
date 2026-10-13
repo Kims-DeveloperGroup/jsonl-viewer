@@ -575,6 +575,27 @@ after that cleanup; no buffered keyboard input is flushed to hide mouse reports.
 Transient-only calls refuse unsupported terminals before presenting source content.
 Native emulator reporting overrides remain outside application control.
 
+## Portable owned-screen restoration (0.6.4)
+
+The terminal owner repaints visible rows with absolute cursor positioning and
+erase-line operations. It clips output by display cells to the physical TTY
+dimensions, including screens narrower than the renderer's minimum layout, and
+does not emit a bottom-row scrolling newline. The last cell of the final physical
+row is reserved to avoid automatic wrapping. Smaller environment geometry
+overrides remain effective; larger stale overrides cannot exceed the TTY.
+
+Before the established cleanup trailer, the owner erases every currently visible
+alternate-buffer row. Any final clear-screen operation consequently acts on an
+empty buffer. This avoids copying viewer frames into history in terminals that
+archive full-screen erasures, while retaining the existing cursor, mouse, raw-mode,
+and signal restoration contract. No terminal-specific preference change or
+saved-history erase is part of the operation.
+
+Screen/history regressions interpret emitted output for both conventional and
+erase-to-history terminal behavior. Real PTY checks separately cover terminal
+attributes and signals; neither is described as observation of every terminal
+application's GUI.
+
 ## End-to-end standalone scenario
 
 1. The user snapshots a JSONL file and launches `jsonl-viewer` with explicit

@@ -16,7 +16,7 @@ Package root: `src/jsonl_viewer/`
 
 Importable production units indexed: 13.
 
-Direct internal dependency edges indexed: 25.
+Direct internal dependency edges indexed: 26.
 
 Directed internal dependency cycles indexed: 0.
 
@@ -27,7 +27,7 @@ Directed internal dependency cycles indexed: 0.
 ```text
 jsonl_viewer -> contracts
              -> engine -> contracts/_input/_mouse/_model/_render/_search
-             -> _terminal -> contracts/engine/_mouse
+             -> _terminal -> contracts/engine/_mouse/_cell_layout
 
 _mouse -> _model
 _render -> contracts/_model/_json/_cell_layout
@@ -263,10 +263,16 @@ unit imports Story or any third-party runtime package.
 - **Responsibility:** Own one terminal lifecycle and bounded physical input
   transport for standalone or library-owned viewing.
 - **Supported surface:** None; facade uses private `view_owned`.
-- **Direct internal dependencies:** `_mouse`, `contracts`, and `engine`.
+- **Direct internal dependencies:** `_cell_layout`, `_mouse`, `contracts`, and `engine`.
 - **State/resources:** Owns no-flush cbreak/echo suppression, saved current termios,
   alternate screen, cursor visibility, SGR tracking, output-stream geometry, and
-  cleanup. Enables 1006 before 1000; disables 1000 before 1006. Every managed exit
+  cleanup. Enables 1006 before 1000; disables 1000 before 1006. Repaint batches
+  absolute row positioning and line erasure; physical output geometry caps
+  environment overrides. Overflow clipping preserves SGR and combining clusters;
+  only the last physical row reserves its bottom-right cell to prevent scrolling.
+  Successful screen acquisition enables clearing all freshly observed physical
+  rows before the unchanged exit trailer, preventing viewer text from being
+  archived during screen clearing. Every managed exit
   attempts display, attributes, and scoped default-only SIGTERM/SIGHUP restoration;
   custom/ignored handlers and SIGINT remain untouched. Required default-signal
   ownership fails off the main thread before tty mutation. The first default

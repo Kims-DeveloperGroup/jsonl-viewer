@@ -18,6 +18,7 @@ from jsonl_viewer import _terminal
 from tests.support import FakeHost
 from tests import test_standalone_and_packaging as standalone_tests
 from tests.test_standalone_and_packaging import _TerminalBuffer
+from tests.terminal_screen import TerminalScreen
 
 
 _ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"
@@ -117,18 +118,19 @@ class OwnedTerminalTests(unittest.TestCase):
             def fileno(self):
                 return 29
         terminal = ViewerTerminal(_TerminalBuffer(), OutputBuffer())
-        with _acquired(terminal) as (host, _, _, _, _):
-            with host, mock.patch.object(_terminal.os, "get_terminal_size", return_value=os.terminal_size((88, 22))) as size:
-                with mock.patch.dict(os.environ, {"TERM": "xterm-256color"}, clear=True):
-                    self.assertEqual(host.terminal_size(), (88, 22))
-                size.assert_called_once_with(29)
-                for overrides, expected in (({"COLUMNS": "120", "LINES": "24"}, (120, 24)),
-                                            ({"COLUMNS": "120"}, (120, 22)),
-                                            ({"LINES": "24"}, (88, 24)),
-                                            ({"COLUMNS": "0", "LINES": "-1"}, (88, 22)),
-                                            ({"COLUMNS": "bad", "LINES": ""}, (88, 22))):
-                    with self.subTest(overrides=overrides), mock.patch.dict(os.environ, overrides, clear=True):
-                        self.assertEqual(host.terminal_size(), expected)
+        with _acquired(terminal) as (host, _, _, _, _), mock.patch.object(
+                _terminal.os, "get_terminal_size", return_value=os.terminal_size((88, 22))) as size, \
+                mock.patch.dict(os.environ, {"TERM": "xterm"}, clear=True), host:
+            size.reset_mock()
+            self.assertEqual(host.terminal_size(), (88, 22))
+            size.assert_called_once_with(29)
+            for overrides, expected in (({"COLUMNS": "120", "LINES": "24"}, (88, 22)),
+                                        ({"COLUMNS": "120"}, (88, 22)),
+                                        ({"LINES": "24"}, (88, 22)),
+                                        ({"COLUMNS": "0", "LINES": "-1"}, (88, 22)),
+                                        ({"COLUMNS": "bad", "LINES": ""}, (88, 22))):
+                with self.subTest(overrides=overrides), mock.patch.dict(os.environ, overrides, clear=True):
+                    self.assertEqual(host.terminal_size(), expected)
 
     def test_acquisition_disables_echo_and_cleanup_restores_exact_modes_in_order(self):
         terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
@@ -360,6 +362,196 @@ class MousePtyTests(unittest.TestCase):
                 self.assertEqual(termios.tcgetattr(master), self._pty_original_attributes)
             finally:
                 self._pty_cleanup(process, master)
+
+
+class _ScreenOutput(_TerminalBuffer):
+    def __init__(self, screen):
+        super().__init__()
+        self.screen = screen
+
+    def fileno(self):
+        return 29
+
+    def write(self, text):
+        result = super().write(text)
+        # Simulate the ordinary POSIX ONLCR output mapping outside the model.
+        self.screen.feed(text.replace("\n", "\r\n"))
+        return result
+
+
+@contextmanager
+def _observed(columns=72, rows=10, *, archive_ed2=False, eager_wrap=False,
+              reader=None, overrides=None):
+    screen = TerminalScreen(columns, rows, archive_ed2=archive_ed2,
+                            eager_wrap=eager_wrap)
+    screen.feed("\x1b[1;1HP\x1b[2;1HS\x1b[3;2H")
+    original = screen.primary_state()
+    terminal = ViewerTerminal(_TerminalBuffer(), _ScreenOutput(screen),
+                              read_character=reader)
+    with _acquired(terminal) as (host, _, _, _, _), \
+            mock.patch.dict(os.environ, {"TERM": "xterm-256color", **(overrides or {})},
+                            clear=True), \
+            mock.patch.object(_terminal.os, "get_terminal_size",
+                              side_effect=lambda fd: os.terminal_size(
+                                  (screen.columns, screen.rows))) as size:
+        yield host, screen, original, terminal, size
+
+
+class ScreenRestorationTests(unittest.TestCase):
+    def _assert_restored(self, screen, original):
+        self.assertEqual(screen.primary_state(), original)
+        self.assertEqual(screen.alternate_scrolls, 0)
+
+    def test_screen_model_distinguishes_archiving_erase_and_delayed_wrap(self):
+        for archiving in (False, True):
+            with self.subTest(archiving=archiving):
+                screen = TerminalScreen(4, 2, archive_ed2=archiving)
+                screen.feed("P\x1b[2;2H")
+                original = screen.primary_state()
+                screen.feed("\x1b[?1049hABCD")
+                self.assertEqual(screen.lines(), ("ABCD", ""))
+                self.assertEqual((screen.row, screen.column, screen.wrap_pending), (0, 3, True))
+                screen.feed("E\r\nF")
+                self.assertEqual(screen.lines(), ("E", "F"))
+                self.assertEqual(screen.alternate_scrolls, 1)
+                screen.feed("\x1b[2;1H\x1b[2K\x1b[2J\x1b[?1049l")
+                expected_history = ("prior shell history", "ABCD", "E") if archiving \
+                    else ("prior shell history",)
+                self.assertEqual(screen.primary_state(),
+                                 (original[0], expected_history, *original[2:]))
+                self.assertEqual(screen.erase_display_count, 1)
+        screen = TerminalScreen(4, 2, archive_ed2=False)
+        screen.feed("\x1b[?1049h\x1b[31me\u0301界Z\x1b[0m")
+        self.assertEqual(screen.lines(), ("e\u0301界Z", ""))
+        self.assertEqual((screen.row, screen.column, screen.wrap_pending), (0, 3, True))
+        screen.feed("X")
+        self.assertEqual(screen.lines(), ("e\u0301界Z", "X"))
+        screen = TerminalScreen(4, 2, archive_ed2=False, eager_wrap=True)
+        screen.feed("\x1b[?1049h\x1b[2;1HABCD")
+        self.assertEqual(screen.alternate_scrolls, 1)
+
+    def test_open_close_preserves_primary_screen_cursor_and_prior_history(self):
+        for archiving in (False, True):
+            for eager in (False, True):
+                with self.subTest(archiving=archiving, eager=eager), \
+                        _observed(archive_ed2=archiving, eager_wrap=eager,
+                                  reader=lambda before_read=None: "q") as observed:
+                    _, screen, original, terminal, _ = observed
+                    view_jsonl(_SOURCE, _SPEC, terminal=terminal, transient_only=True)
+                    self._assert_restored(screen, original)
+                    self.assertTrue(terminal.output_stream.getvalue().endswith(_LEAVE))
+                    self.assertFalse(terminal.input_stream.closed)
+                    self.assertFalse(terminal.output_stream.closed)
+
+    def test_paging_close_does_not_archive_loading_or_previous_pages(self):
+        source = b"".join(b'{"content":"page-' + str(i).encode() + b'"}\n'
+                          for i in range(1, 9))
+        for archiving in (False, True):
+            for eager in (False, True):
+                frames = []
+                keys = iter((" ", "q"))
+                def reader(before_read=None):
+                    frames.append(screen.lines())
+                    return next(keys)
+                with self.subTest(archiving=archiving, eager=eager), \
+                        _observed(archive_ed2=archiving, eager_wrap=eager,
+                                  reader=reader) as observed:
+                    _, screen, original, terminal, _ = observed
+                    view_jsonl(source, _SPEC, terminal=terminal, transient_only=True)
+                    self.assertEqual(len(frames), 2)
+                    self.assertNotEqual(frames[0], frames[1])
+                    self.assertIn("page-1", "\n".join(frames[0]))
+                    self._assert_restored(screen, original)
+
+    def test_repeated_owned_sessions_preserve_the_same_primary_and_history(self):
+        for archiving in (False, True):
+            with self.subTest(archiving=archiving), \
+                    _observed(archive_ed2=archiving,
+                              reader=lambda before_read=None: "q") as observed:
+                _, screen, original, terminal, _ = observed
+                for _ in range(3):
+                    view_jsonl(_SOURCE, _SPEC, terminal=terminal, transient_only=True)
+                    self._assert_restored(screen, original)
+                self.assertEqual(terminal.output_stream.getvalue().count(_ENTER), 3)
+                self.assertEqual(terminal.output_stream.getvalue().count(_LEAVE), 3)
+
+    def test_physical_geometry_caps_stale_overrides_and_honors_smaller_overrides(self):
+        cases = (({}, (20, 6)),
+                 ({"COLUMNS": "120", "LINES": "40"}, (20, 6)),
+                 ({"COLUMNS": "12", "LINES": "4"}, (12, 4)),
+                 ({"COLUMNS": "12", "LINES": "40"}, (12, 6)),
+                 ({"COLUMNS": "bad", "LINES": "0"}, (20, 6)))
+        for overrides, expected in cases:
+            with self.subTest(overrides=overrides), \
+                    _observed(20, 6, archive_ed2=True, overrides=overrides) as observed:
+                host, screen, original, _, size = observed
+                with host:
+                    self.assertEqual(host.terminal_size(), expected)
+                    size.assert_called_with(29)
+                    host.present("VISIBLE\n" + "x" * 120 + "\n" + "tail\n" * 40)
+                    self.assertIn("VISIBLE", screen.lines()[0])
+                    self.assertEqual(screen.alternate_scrolls, 0)
+                self._assert_restored(screen, original)
+
+    def test_physical_width_below_renderer_minimum_clips_ansi_and_unicode_without_scrolling(self):
+        fixtures = ((1, "e\u0301"), (2, "e\u0301X"),
+                    (5, "e\u0301界ZX"), (11, "e\u0301界ZX012345"))
+        for columns, first in fixtures:
+            for archiving in (False, True):
+                for eager in (False, True):
+                    with self.subTest(columns=columns, archiving=archiving, eager=eager), \
+                            _observed(columns, 4, archive_ed2=archiving,
+                                      eager_wrap=eager,
+                                      reader=lambda before_read=None: "q") as observed:
+                        host, screen, original, terminal, _ = observed
+                        with host:
+                            host.present("\x1b[31m" + first + "\x1b[0m\n" +
+                                         "0123456789ABC\nshort\n" + "X" * columns + "\nEXCESS")
+                            self.assertEqual(screen.lines()[0], first)
+                            self.assertEqual(screen.alternate_scrolls, 0)
+                            self.assertEqual(tuple(screen.history), original[1])
+                        self._assert_restored(screen, original)
+                        # Exercise the renderer's existing minimum dimensions
+                        # through the real owned adapter at the smaller TTY cap.
+                        view_jsonl(_SOURCE, _SPEC, terminal=terminal, transient_only=True)
+                        self._assert_restored(screen, original)
+
+    def test_resize_and_shorter_frames_clear_all_physical_stale_rows(self):
+        for archiving in (False, True):
+            with self.subTest(archiving=archiving), \
+                    _observed(16, 6, archive_ed2=archiving) as observed:
+                host, screen, original, _, _ = observed
+                with host:
+                    host.present("\n".join("old-row-" + str(i) for i in range(6)))
+                    self.assertIn("old-row-4", screen.lines())
+                    screen.resize(12, 4)
+                    self.assertEqual(host.terminal_size(), (12, 4))
+                    host.present("short\nsecond")
+                    self.assertEqual(screen.lines(), ("short", "second", "", ""))
+                    screen.resize(20, 7)
+                    self.assertEqual(host.terminal_size(), (20, 7))
+                    host.present("after")
+                    self.assertEqual(screen.lines(), ("after", "", "", "", "", "", ""))
+                    primary = tuple(TerminalScreen._line(row) for row in screen.primary)
+                self._assert_restored(screen, (primary, original[1], *original[2:]))
+
+    def test_eof_and_render_failure_restore_without_archiving_viewer_rows(self):
+        from jsonl_viewer import engine
+        for archiving in (False, True):
+            for failure in (None, RuntimeError("frame rendering failed")):
+                def eof(before_read=None):
+                    raise EOFError
+                with self.subTest(archiving=archiving, failure=type(failure).__name__), \
+                        _observed(archive_ed2=archiving, reader=eof) as observed:
+                    _, screen, original, terminal, _ = observed
+                    if failure is None:
+                        view_jsonl(_SOURCE, _SPEC, terminal=terminal, transient_only=True)
+                    else:
+                        with mock.patch.object(engine, "render_frame", side_effect=failure), \
+                                self.assertRaisesRegex(RuntimeError, "frame rendering failed"):
+                            view_jsonl(_SOURCE, _SPEC, terminal=terminal, transient_only=True)
+                    self._assert_restored(screen, original)
+                    self.assertTrue(terminal.output_stream.getvalue().endswith(_LEAVE))
 
 
 if __name__ == "__main__":
