@@ -258,6 +258,21 @@ The terminal owner retains decoding across idle intervals and bounded escapes.
 The application lends its current terminal baseline and resumes only after cleanup;
 it must not create another viewer screen or read concurrently.
 
+### Portable screen restoration (0.6.4)
+
+Viewer-owned calls repaint with absolute cursor positions and erase-line commands
+on supported POSIX VT/xterm-compatible terminals. They use the observed terminal
+dimensions as the physical paint limit; smaller `COLUMNS`/`LINES` overrides remain
+available. Repaints are sent together without scrolling past the bottom row;
+the final physical row's last cell is reserved to avoid automatic wrapping.
+
+Cleanup first erases the visible alternate-buffer rows, then sends the existing
+terminal-restoration trailer. Its clear-screen command therefore sees an empty
+buffer rather than archiving a viewer frame. This preserves the caller's screen
+and existing history without changing terminal preferences or erasing saved
+history. Previously archived viewer rows remain in existing history. Injected
+hosts retain responsibility for their own screen presentation and cleanup.
+
 ### Mouse navigation
 
 Ordinary mouse-wheel reports move the cursor one navigable line, like `j`/`k`,

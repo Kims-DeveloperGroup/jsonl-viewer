@@ -7,6 +7,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import replace
 import os
+import re
 import select
 import signal
 import sys
@@ -15,6 +16,7 @@ import time
 from types import TracebackType
 from typing import Any, Callable
 
+from ._cell_layout import clusters as _clusters, text_cells as _text_cells
 from ._mouse import decode_sgr
 from .contracts import ViewerSpec, ViewerTerminal
 from .engine import view_jsonl
@@ -29,6 +31,55 @@ except ImportError:  # pragma: no cover
 _ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"
 _LEAVE = "\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _INVALID_MOUSE = "mouse\tinvalid"
+_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _environment_size() -> tuple[int, int]:
+    dimensions: list[int] = []
+    for name in ("COLUMNS", "LINES"):
+        try:
+            value = int(os.environ.get(name, ""))
+        except ValueError:
+            value = 0
+        dimensions.append(value if value > 0 else 0)
+    return dimensions[0], dimensions[1]
+
+
+def _clear_rows(rows: int) -> str:
+    return "".join(f"\x1b[{row};1H\x1b[2K" for row in range(1, rows + 1))
+
+
+def _clip_line(line: str, columns: int) -> str:
+    """Keep fitting rows untouched; clip only overflow at intact cell clusters."""
+    text = _SGR.sub("", line) if "\x1b" in line else line
+    if _text_cells(text) <= columns:
+        return line
+    retained: list[str] = []
+    remaining = columns
+
+    def append_text(value: str) -> bool:
+        nonlocal remaining
+        if value.isascii():
+            retained.append(value[:remaining])
+            fits = len(value) <= remaining
+            remaining = max(0, remaining - len(value))
+            return fits
+        for cluster in _clusters(value):
+            cells = _text_cells(cluster)
+            if cells > remaining:
+                return False
+            retained.append(cluster)
+            remaining -= cells
+        return True
+
+    start = 0
+    for match in _SGR.finditer(line):
+        if not append_text(line[start:match.start()]):
+            return "".join(retained) + "\x1b[0m"
+        retained.append(match.group())
+        start = match.end()
+    append_text(line[start:])
+    return "".join(retained) + ("\x1b[0m" if "\x1b" in line else "")
 
 
 class _ReadTimeout(Exception):
@@ -62,6 +113,8 @@ class _TerminalHost:
         self._restoration_failed = False
         self._interactive = False
         self._terminal_started = False
+        self._screen_acquired = False
+        self._last_physical_size = (100, 30)
         self._closed = False
         self._restoring = False
         self._decoder = codecs.getincrementaldecoder(self._input.encoding or "utf-8")(
@@ -100,7 +153,8 @@ class _TerminalHost:
             self._interactive = True
             # Mark acquisition before the write: partial writes require cleanup.
             self._terminal_started = True
-            self._output.write(_ENTER)
+            written = self._output.write(_ENTER)
+            self._screen_acquired = written is None or written == len(_ENTER)
             self._output.flush()
         except BaseException as failure:
             self._restore_terminal(failure)
@@ -148,8 +202,15 @@ class _TerminalHost:
         try:
             if self._terminal_started:
                 self._terminal_started = False
+                trailer = _LEAVE
+                if self._screen_acquired:
+                    self._screen_acquired = False
+                    try:
+                        trailer = _clear_rows(self._physical_size()[1]) + trailer
+                    except BaseException as failure:
+                        failures.append(failure)
                 try:
-                    self._output.write(_LEAVE)
+                    self._output.write(trailer)
                     self._output.flush()
                 except BaseException as failure:
                     failures.append(failure)
@@ -180,24 +241,30 @@ class _TerminalHost:
             if active_failure is None:
                 raise failures[0]
 
+    def _physical_size(self) -> tuple[int, int]:
+        try:
+            descriptor = self._output_descriptor
+            if descriptor is None:
+                descriptor = self._output.fileno()
+            size = os.get_terminal_size(descriptor)
+        except (AttributeError, OSError, ValueError):
+            return self._last_physical_size if self._interactive else (100, 30)
+        if not self._interactive:
+            return size.columns, size.lines
+        previous = self._last_physical_size if self._interactive else (100, 30)
+        self._last_physical_size = (
+            size.columns if size.columns > 0 else previous[0],
+            size.lines if size.lines > 0 else previous[1],
+        )
+        return self._last_physical_size
+
     def terminal_size(self) -> tuple[int, int]:
-        dimensions: list[int] = []
-        for name in ("COLUMNS", "LINES"):
-            try:
-                value = int(os.environ.get(name, ""))
-            except ValueError:
-                value = 0
-            dimensions.append(value if value > 0 else 0)
-        if not all(dimensions):
-            try:
-                descriptor = self._output_descriptor
-                if descriptor is None:
-                    descriptor = self._output.fileno()
-                size = os.get_terminal_size(descriptor)
-                actual = (size.columns, size.lines)
-            except (AttributeError, OSError, ValueError):
-                actual = (100, 30)
-            dimensions = [override or observed for override, observed in zip(dimensions, actual)]
+        dimensions = list(_environment_size())
+        if not self._interactive and all(dimensions):
+            return dimensions[0], dimensions[1]
+        actual = self._physical_size()
+        dimensions = [min(override or observed, observed) if self._interactive else override or observed
+                      for override, observed in zip(dimensions, actual)]
         return dimensions[0], dimensions[1]
 
     def color_enabled(self) -> bool:
@@ -205,7 +272,24 @@ class _TerminalHost:
                 and self._output.isatty() and os.environ.get("TERM", "") != "dumb")
 
     def present(self, frame: str) -> None:
-        self._output.write("\x1b[H\x1b[2J" + frame if self._interactive else frame + "\n")
+        if self._interactive:
+            actual = self._physical_size()
+            columns, rows = [min(override or observed, observed)
+                             for override, observed in zip(_environment_size(), actual)]
+            lines = frame.split("\n")[:rows]
+            painted: list[str] = []
+            for row in range(1, actual[1] + 1):
+                painted.append(f"\x1b[{row};1H\x1b[2K")
+                if row <= len(lines):
+                    capacity = columns
+                    if row == actual[1] and columns == actual[0]:
+                        capacity = max(0, capacity - 1)
+                    painted.append(_clip_line(lines[row - 1], capacity))
+            painted.append("\x1b[H")
+            output = "".join(painted)
+        else:
+            output = frame + "\n"
+        self._output.write(output)
         self._output.flush()
 
     def _before_read(self, deadline: float) -> Callable[[], None]:

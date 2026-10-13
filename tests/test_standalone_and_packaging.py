@@ -28,6 +28,7 @@ from jsonl_viewer._terminal import _TerminalHost
 
 ROOT = Path(__file__).resolve().parents[1]
 _PRESENT = b"\x1b[H\x1b[2J"
+_ROW_PRESENT = b"\x1b[1;1H\x1b[2K"
 _HELP = "? help • q close".encode()
 
 
@@ -143,8 +144,10 @@ class StandaloneTests(unittest.TestCase):
             with host:
                 for frame in frames:
                     host.present(frame)
+                before_read = output_stream.getvalue()
                 event = host.read_event()
                 before_restore = output_stream.getvalue()
+                self.assertEqual(before_restore, before_read)
         return (
             event,
             before_restore,
@@ -252,12 +255,29 @@ class StandaloneTests(unittest.TestCase):
         footer_index = self._pty_read_until(
             master, output, _HELP, start=marker_index,
         )
-        frame_start = output.rfind(_PRESENT, 0, footer_index)
+        # Only physical row 1 starts a complete repaint; other CUP/EL2 rows
+        # belong to that frame.  The older ED2 prefix remains useful for the
+        # frozen-source regression proof and the unchanged cleanup trailer.
+        frame_start, prefix = max(
+            ((output.rfind(prefix, 0, footer_index), prefix)
+             for prefix in (_PRESENT, _ROW_PRESENT)),
+            key=lambda candidate: candidate[0],
+        )
         if frame_start < 0:
             self.fail(f"frame marker has no presentation prefix: {bytes(output)!r}")
         self.assertIn(marker, output[frame_start:footer_index])
         frame_end = footer_index + len(_HELP)
-        return bytes(output[frame_start + len(_PRESENT) : frame_end]), frame_end
+        if prefix == _ROW_PRESENT:
+            presentation = bytes(output[frame_start:frame_end])
+            positions = list(re.finditer(rb"\x1b\[(\d+);1H\x1b\[2K", presentation))
+            rows = {}
+            for index, position in enumerate(positions):
+                end = positions[index + 1].start() if index + 1 < len(positions) else len(presentation)
+                rows[int(position.group(1))] = presentation[position.end():end]
+            # Preserve styling and physical row coordinates for mouse targets;
+            # only the placement/erase controls replace the old TTY CRLFs.
+            return b"\r\n".join(rows.get(row, b"") for row in range(1, max(rows) + 1)), frame_end
+        return bytes(output[frame_start + len(prefix) : frame_end]), frame_end
 
     def _pty_write(self, master: int, value: bytes) -> None:
         remaining = memoryview(value)
@@ -324,7 +344,9 @@ class StandaloneTests(unittest.TestCase):
                 script = _RawScript(raw, [])
                 event, before, complete, _, termios, tty = self._scripted_event(script)
                 self.assertEqual(event, expected)
-                self.assertEqual(before, "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h\x1b[H\x1b[2JPRIOR FRAME")
+                self.assertTrue(before.startswith("\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"))
+                self.assertIn(_ROW_PRESENT.decode() + "PRIOR FRAME", before)
+                self.assertNotIn("\x1b[2J", before)
                 self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
                 tty.setcbreak.assert_called_once_with(17, 0)
                 self.assertEqual(termios.tcsetattr.call_count, 2)
@@ -982,7 +1004,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.6.3")
+        self.assertEqual(project["version"], "0.6.4")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
@@ -1036,7 +1058,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         for module in graph:
             visit(module)
         self.assertEqual(len(modules), 13)
-        self.assertEqual(sum(len(value) for value in graph.values()), 25)
+        self.assertEqual(sum(len(value) for value in graph.values()), 26)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -1045,7 +1067,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
         self.assertIn("Importable production units indexed: 13.", index)
-        self.assertIn("Direct internal dependency edges indexed: 25.", index)
+        self.assertIn("Direct internal dependency edges indexed: 26.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
