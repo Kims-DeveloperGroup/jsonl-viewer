@@ -146,6 +146,29 @@ cancel behavior. EOF always closes. In the main view, Escape dismisses help,
 then search, then transient status, and otherwise closes. Ordinary-line
 `g LINE` and textual `esc` retain their existing grammar.
 
+### Command input language (0.6.5)
+
+On supported local macOS and Linux desktops, a viewer-owned interactive call
+temporarily selects an English keyboard source for navigation, help, and the
+numeric go-to prompt. Opening `/` restores the source that was active when the
+viewer opened, so a Korean entry source remains available for literal search.
+Successful submission or cancellation selects English again; an invalid search
+keeps its draft and text input active. Closing the view attempts to restore the
+exact entry source, including after interruption or a terminal failure.
+
+The viewer switches only when the input context changes. You can still change
+the language manually within a context. Non-English navigation input performs
+no command and displays guidance to select English; input is never transliterated.
+The saved source is not hard-coded to Korean or replaced by a later OS choice.
+
+macOS uses native TIS/CoreFoundation calls and refreshes pending source-change
+notifications before observing the current source. Linux supports a configured
+or unambiguous IBus/Fcitx5 desktop framework through installed tools with bounded
+calls. Source control is best effort: remote, multiplexed, background, redirected,
+and unsupported sessions retain manual keyboard selection. Source-selection
+failures do not prevent viewing or replace the primary terminal error. Ordinary
+line input and existing borrowed hosts retain their lifecycle.
+
 ## Search text and nested values
 
 Press `/`, type a phrase at `Search query:`, and press Enter. For example,
@@ -227,6 +250,14 @@ view_jsonl(snapshot_bytes, spec, host)
 The `primary_fields` property, derived from `date_time_field`,
 `request_type_field`, and `content_field`, controls Simple-mode display
 priority and does not constrain search.
+
+A host that owns desktop input-source control may optionally provide
+`set_input_mode(mode)`, accepting `"command"` or `"text"`. The engine resolves
+this capability once, then notifies it initially and on context changes before
+the next event read. Only a search draft requests `"text"`; navigation, help,
+go-to, empty, and malformed views request `"command"`. This is not a sixth
+required `ViewerHost` method. The host owns switching, restoration, and failure
+handling; callback errors follow the existing host-error cleanup contract.
 
 ## Embed with viewer-owned terminal control
 
@@ -563,11 +594,13 @@ values are untrusted: control and format characters are rendered as visible
 Simple mode is an orientation view, not a privacy boundary. Verbose mode can
 show every field in a valid record; search covers all text. The embedding
 application is responsible for authorizing,
-selecting, retaining, and redacting snapshot data. The library performs no
+selecting, retaining, and redacting snapshot data. The snapshot engine performs no
 filesystem or network I/O, telemetry, or persistence; viewer prompt drafts and
-frames exist only while the view is open. The standalone adapter performs
-only its explicit bounded file
-or standard-input read.
+frames exist only while the view is open. The standalone adapter reads only the
+explicit bounded file or standard input. An owned interactive terminal may query
+and temporarily select its desktop input source; Linux adapters may read existing
+input-method configuration and invoke installed input-method tools. They do not
+change saved desktop configuration or the source JSONL.
 
 ## Design and verification
 

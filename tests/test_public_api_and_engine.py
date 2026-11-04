@@ -18,6 +18,30 @@ from jsonl_viewer import ViewerSpec, view_jsonl
 from tests.support import FakeHost, without_caret
 
 
+class _InputModeHost(FakeHost):
+    """Observe optional mode changes at the host's physical-read boundary."""
+
+    def __init__(self, events, **kwargs):
+        super().__init__(events, **kwargs)
+        self.mode_lookups = 0
+        self.mode_updates = []
+        self.read_modes = []
+        self.current_mode = None
+
+    @property
+    def set_input_mode(self):
+        self.mode_lookups += 1
+        return self._set_input_mode
+
+    def _set_input_mode(self, mode):
+        self.current_mode = mode
+        self.mode_updates.append(mode)
+
+    def read_event(self):
+        self.read_modes.append(self.current_mode)
+        return super().read_event()
+
+
 def _source() -> bytes:
     records = (
         {
@@ -457,6 +481,98 @@ class KeyInputTests(unittest.TestCase):
         self.assertEqual(set(methods), {"terminal_size", "color_enabled", "present", "read_event", "close_view"})
         for name, member in methods.items():
             self.assertEqual(tuple(inspect.signature(member).parameters), ("self", "frame") if name == "present" else ("self",))
+
+    def test_optional_input_mode_tracks_only_search_drafts_before_reads(self):
+        source = b"".join((json.dumps(value, ensure_ascii=False) + "\n").encode()
+                          for value in ({"content": "개요"}, {"content": "two"}))
+        events = ("idle", "text\t/", "key\tenter", "text\t개요", "key\tenter",
+                  "text\tg", "text\t2", "key\tenter", "text\t?", "key\tescape", "close")
+        host = _InputModeHost(events)
+        view_jsonl(source, self.spec, host)
+        self.assertEqual(host.mode_lookups, 1)
+        self.assertEqual(host.mode_updates, ["command", "text", "command"])
+        self.assertEqual(host.read_modes, ["command", "command", "text", "text", "text",
+                                           "command", "command", "command", "command", "command", "command"])
+        self.assertTrue(any("Search all text='개요'" in frame for frame in host.frames))
+        self.assertTrue(any("Search query must not be empty." in frame for frame in host.frames))
+        self.assertEqual(host.close_calls, 1)
+
+    def test_optional_input_mode_keeps_help_goto_and_bad_snapshots_in_command(self):
+        cases = ((b"", ("text\t/", None)),
+                 (b"{bad}\n", ("text\t/", "text\tg", None)),
+                 (self.source, ("text\t?", "text\t/", "text\tg", "key\tescape", "close")),
+                 (self.source, ("text\tg", "text\twrong", "key\tenter", "key\tescape", "close")))
+        for source, events in cases:
+            with self.subTest(source=source[:10], events=events):
+                host = _InputModeHost(events)
+                view_jsonl(source, self.spec, host)
+                self.assertEqual(host.mode_updates, ["command"])
+                self.assertEqual(host.read_modes, ["command"] * len(events))
+                self.assertEqual(host.close_calls, 1)
+
+    def test_failed_semantic_search_keeps_text_mode_until_draft_cancel(self):
+        from unittest import mock
+        from jsonl_viewer._search import SearchLimitError
+
+        host = _InputModeHost(("text\t/", "text\t개요", "key\tenter", "idle", "key\tescape", "close"))
+        with mock.patch("jsonl_viewer.engine.find_matches", side_effect=SearchLimitError("Refine the query.")):
+            view_jsonl(self.source, self.spec, host)
+        self.assertEqual(host.mode_updates, ["command", "text", "command"])
+        self.assertEqual(host.read_modes, ["command", "text", "text", "text", "text", "command"])
+        self.assertTrue(any("Refine the query." in frame and "Search query:" in frame
+                            and "개요" in frame for frame in host.frames))
+        self.assertEqual(host.close_calls, 1)
+
+    def test_optional_input_mode_failure_still_returns_host_ownership(self):
+        class LookupFailure(FakeHost):
+            @property
+            def set_input_mode(self):
+                raise RuntimeError("mode lookup failed")
+
+        class CallbackFailure(_InputModeHost):
+            def _set_input_mode(self, mode):
+                super()._set_input_mode(mode)
+                if mode == "text":
+                    raise RuntimeError("mode callback failed")
+
+        for host, message in ((LookupFailure(), "mode lookup failed"),
+                              (CallbackFailure(("text\t/",)), "mode callback failed")):
+            with self.subTest(message=message), self.assertRaisesRegex(RuntimeError, message):
+                view_jsonl(self.source, self.spec, host)
+            self.assertEqual(host.close_calls, 1)
+
+    def test_non_english_navigation_has_guidance_without_transliteration(self):
+        from jsonl_viewer._model import ViewState
+
+        for event in ("text\tㅓ", "line\tㅓ"):
+            with self.subTest(event=event):
+                state, closed = self.step(ViewState(), event)
+                self.assertFalse(closed)
+                self.assertEqual(state.selected_index, 0)
+                self.assertIsNone(state.prompt)
+                self.assertIn("English", state.message)
+        state, closed = self.step(ViewState(), "text\t/개요")
+        self.assertFalse(closed)
+        self.assertEqual(state.prompt.buffer, "개요")
+
+    def test_non_english_navigation_preserves_following_batched_search_input(self):
+        from jsonl_viewer._model import ViewState
+
+        batched, closed = self.step(ViewState(), "text\tㅓ/개요")
+        self.assertFalse(closed)
+        separate, closed = self.step(ViewState(), "text\tㅓ")
+        self.assertFalse(closed)
+        separate, closed = self.step(separate, "text\t/개요")
+        self.assertFalse(closed)
+        self.assertEqual(batched, separate)
+        self.assertEqual(batched.prompt.buffer, "개요")
+        batched, closed = self.step(batched, "key\tenter")
+        self.assertFalse(closed)
+        separate, closed = self.step(separate, "key\tenter")
+        self.assertFalse(closed)
+        self.assertEqual(batched, separate)
+        self.assertIsNone(batched.prompt)
+        self.assertEqual(batched.search.query, "개요")
 
     def test_prompt_editing_controls_never_enter_committed_query(self) -> None:
         cases = (

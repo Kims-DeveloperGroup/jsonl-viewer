@@ -575,6 +575,34 @@ after that cleanup; no buffered keyboard input is flushed to hide mouse reports.
 Transient-only calls refuse unsupported terminals before presenting source content.
 Native emulator reporting overrides remain outside application control.
 
+## Command input language (0.6.5)
+
+The engine derives input context from viewer state. Navigation, help, go-to,
+empty, and malformed views use `command`; only a search-query draft uses `text`.
+An optional host `set_input_mode(mode)` capability receives the initial context
+and changes before the next event read. Existing five-method hosts remain valid;
+the engine neither controls the desktop nor infers context from rendered text.
+
+For an owned local interactive terminal, the source controller captures the exact
+entry input source once. Command entry selects an enabled English source; search
+entry restores the saved source. Search validation errors retain text mode, and
+submission or cancellation returns to command mode. Draft text remains literal
+Unicode. Non-English navigation input has no action and receives English-keyboard
+guidance in the existing error/status footer. No new layout or color role is used.
+
+macOS source reads first service pending input-source notifications with one
+nonblocking default-mode CoreFoundation run-loop poll, so an already-English
+decision uses fresh state. Linux adapters use configured or unambiguous installed
+IBus/Fcitx5 tools with bounded calls. Remote, multiplexed, background, redirected,
+or unsupported sessions keep manual selection. Switching happens on context
+transitions, preserving manual choices within a context without per-key polling.
+
+Input-source restoration is attempted independently of screen/termios cleanup on
+every owned-view exit and before termination-signal redelivery. Source-control
+failures remain best effort and cannot replace a primary input or terminal error.
+The terminal owner discards its saved source with the rest of the per-view state;
+it neither rewrites input nor saves desktop preferences.
+
 ## Portable owned-screen restoration (0.6.4)
 
 The terminal owner repaints visible rows with absolute cursor positioning and
