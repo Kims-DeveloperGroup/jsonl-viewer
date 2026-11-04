@@ -91,9 +91,7 @@ class IBusInputSourceAdapter:
 
 
 def _fcitx_english_keyboard(name: str) -> bool:
-    return name in {"keyboard-us", "keyboard-gb"} or name.startswith(
-        ("keyboard-us-", "keyboard-gb-")
-    )
+    return name in {"keyboard-us", "keyboard-gb"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,9 +132,7 @@ def _fcitx_groups() -> dict[str, _FcitxGroup]:
                     break
                 members.append(member)
                 layout = parser.get(member_section, "Layout", fallback="") or default_layout
-                if _fcitx_english_keyboard(member) and re.fullmatch(
-                    r"(?:us|gb)(?:\([A-Za-z0-9_+-]+\))?", layout,
-                ):
+                if _fcitx_english_keyboard(member) and layout in {"us", "gb"}:
                     english_keyboards.add(member)
                 offset += 1
             if name in groups:

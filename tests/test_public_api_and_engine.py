@@ -555,6 +555,25 @@ class KeyInputTests(unittest.TestCase):
         self.assertFalse(closed)
         self.assertEqual(state.prompt.buffer, "개요")
 
+    def test_non_english_navigation_preserves_following_batched_search_input(self):
+        from jsonl_viewer._model import ViewState
+
+        batched, closed = self.step(ViewState(), "text\tㅓ/개요")
+        self.assertFalse(closed)
+        separate, closed = self.step(ViewState(), "text\tㅓ")
+        self.assertFalse(closed)
+        separate, closed = self.step(separate, "text\t/개요")
+        self.assertFalse(closed)
+        self.assertEqual(batched, separate)
+        self.assertEqual(batched.prompt.buffer, "개요")
+        batched, closed = self.step(batched, "key\tenter")
+        self.assertFalse(closed)
+        separate, closed = self.step(separate, "key\tenter")
+        self.assertFalse(closed)
+        self.assertEqual(batched, separate)
+        self.assertIsNone(batched.prompt)
+        self.assertEqual(batched.search.query, "개요")
+
     def test_prompt_editing_controls_never_enter_committed_query(self) -> None:
         cases = (
             ("wrong", ("ctrl_u",), "", 0),

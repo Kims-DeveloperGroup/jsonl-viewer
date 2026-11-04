@@ -239,7 +239,8 @@ def _transition(
             }
             for index, character in enumerate(payload):
                 if not character.isascii():
-                    return _input_error(state, _COMMAND_LANGUAGE_MESSAGE), False
+                    state = _input_error(state, _COMMAND_LANGUAGE_MESSAGE)
+                    continue
                 state, closed = action(state, bindings.get(character, "unknown"))
                 if closed:
                     return state, True

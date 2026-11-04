@@ -310,6 +310,37 @@ class LinuxInputSourceTests(unittest.TestCase):
             self.assertIsNone(adapter.current_source())
             self.assertEqual(helper.call_args_list, [mock.call("/tool/fcitx5-remote", "--check")])
 
+    def test_fcitx_english_requires_exact_keyboard_and_plain_english_layout(self):
+        cases = (("keyboard-us", "us", "", True),
+                 ("keyboard-gb", "gb", "", True),
+                 ("keyboard-us", "gb", "", True),
+                 ("keyboard-gb", "us", "", True),
+                 ("keyboard-us-rus", "us", "", False),
+                 ("keyboard-gb-rus", "gb", "", False),
+                 ("keyboard-us-dvorak", "us", "", False),
+                 ("keyboard-gb-extd", "gb", "", False),
+                 ("keyboard-us", "us", "us(rus)", False),
+                 ("keyboard-gb", "gb", "gb(rus)", False),
+                 ("keyboard-us", "us(rus)", "", False),
+                 ("keyboard-gb", "gb(rus)", "", False))
+        for name, default_layout, item_layout, english in cases:
+            profile = (f"[Groups/0]\nName=Default\nDefault Layout={default_layout}\n"
+                       f"[Groups/0/Items/0]\nName={name}\nLayout={item_layout}\n")
+            answers = {(): "1", ("-q",): "Default", ("-n",): name}
+
+            def reply(_executable, *arguments):
+                self.assertEqual(arguments[0], "--check")
+                return answers[arguments[1:]]
+
+            with self.subTest(name=name, default_layout=default_layout, item_layout=item_layout), \
+                    mock.patch.dict(linux_sources.os.environ, {"XDG_CONFIG_HOME": "/virtual/ime"}), \
+                    mock.patch.object(linux_sources.Path, "open", mock.mock_open(read_data=profile)), \
+                    mock.patch.object(linux_sources, "_run_helper", side_effect=reply):
+                adapter = linux_sources.Fcitx5InputSourceAdapter("/tool/fcitx5-remote")
+                source = adapter.current_source()
+                self.assertEqual(source, InputSourceState(("fcitx5", "Default", name, "1"), english))
+                self.assertEqual(adapter.english_source(), source if english else None)
+
     def test_framework_selection_rejects_ambiguity_and_missing_explicit_tools(self):
         cases = (({}, {"ibus": "/tool/ibus", "fcitx5-remote": "/tool/fcitx5"}),
                  ({"GTK_IM_MODULE": "ibus"}, {"ibus": None, "fcitx5-remote": "/tool/fcitx5"}),
