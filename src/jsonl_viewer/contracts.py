@@ -175,6 +175,14 @@ class ViewerHost(Protocol):
     use a readable inverse-video character cell.
     Prompts and their logical cursors are rendered in ordinary complete frames;
     hosts never acquire a second input lifecycle or edit a prompt buffer.
+
+    A host may additionally expose ``set_input_mode(mode)`` to observe input
+    context. This optional capability is resolved once per call and notified
+    before the first input and only when the context changes. ``mode`` is
+    ``"text"`` for a search-query draft and ``"command"`` for navigation,
+    help, goto, and other viewer states. Search validation errors retain text
+    mode. The host owns any resulting keyboard-source changes and restoration.
+    Existing five-method hosts require no additional method or resource work.
     """
 
     def terminal_size(self) -> tuple[int, int]:

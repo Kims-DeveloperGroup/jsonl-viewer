@@ -95,7 +95,9 @@ class OwnedTerminalTests(unittest.TestCase):
 
     def test_owned_line_fallback_uses_keys_without_mutating_spec_or_closing_streams(self):
         input_stream, output_stream = io.StringIO("g 2\nq\nTAIL\n"), io.StringIO()
-        view_jsonl(_SOURCE, _SPEC, terminal=ViewerTerminal(input_stream, output_stream, no_color=True))
+        with mock.patch.object(_terminal, "_desktop_input_source_adapter") as factory:
+            view_jsonl(_SOURCE, _SPEC, terminal=ViewerTerminal(input_stream, output_stream, no_color=True))
+        factory.assert_not_called()
         self.assertIn("Moved to source line 2.", output_stream.getvalue())
         self.assertNotIn("\x1b", output_stream.getvalue())
         self.assertEqual(_SPEC.input_protocol, "semantic")
@@ -175,9 +177,12 @@ class OwnedTerminalTests(unittest.TestCase):
     def test_default_signal_cleanup_restores_before_redelivery_and_ignores_repetition(self):
         for number in (signal.SIGTERM, signal.SIGHUP):
             terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
-            with self.subTest(number=number), _acquired(terminal) as (host, termios, _, handlers, saved):
+            sources = mock.Mock()
+            with self.subTest(number=number), mock.patch.object(_terminal, "InputSourceLifecycle", return_value=sources), \
+                    _acquired(terminal) as (host, termios, _, handlers, saved):
                 def redeliver(delivered):
                     self.assertEqual(delivered, number)
+                    sources.stop.assert_called()
                     self.assertTrue(terminal.output_stream.getvalue().endswith(_LEAVE))
                     self.assertEqual(termios.tcsetattr.call_args.args, (17, 1, saved))
                     self.assertEqual(_terminal.signal.getsignal(number), signal.SIG_DFL)
@@ -192,6 +197,68 @@ class OwnedTerminalTests(unittest.TestCase):
                         raise
                 self.assertEqual(failure.exception.number, number)
                 _terminal.signal.raise_signal.assert_called_once_with(number)
+
+    def test_owned_input_mode_uses_one_source_owner_and_restores_on_close(self):
+        terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
+        sources = mock.Mock()
+        with mock.patch.object(_terminal, "InputSourceLifecycle", return_value=sources) as owner, \
+                _acquired(terminal) as (host, _, _, _, _):
+            owner.assert_called_once_with(_terminal._desktop_input_source_adapter)
+            sources.start.assert_not_called()
+            with host:
+                sources.start.assert_called_once_with(terminal.input_stream, terminal.output_stream, live=True)
+                for mode in ("command", "text", "command"):
+                    host.set_input_mode(mode)
+                self.assertEqual(sources.set_input_mode.call_args_list,
+                                 [mock.call("command"), mock.call("text"), mock.call("command")])
+                host.close_view()
+                sources.stop.assert_called()
+                host.close_view()
+        self.assertFalse(terminal.input_stream.closed)
+        self.assertFalse(terminal.output_stream.closed)
+
+    def test_source_restoration_runs_despite_screen_and_termios_cleanup_failures(self):
+        for failure_kind in ("screen", "termios"):
+            terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
+            sources = mock.Mock()
+            with self.subTest(failure=failure_kind), \
+                    mock.patch.object(_terminal, "InputSourceLifecycle", return_value=sources), \
+                    _acquired(terminal) as (host, termios, _, _, _):
+                with host:
+                    failure = OSError(f"{failure_kind} cleanup failed")
+                    if failure_kind == "screen":
+                        patch = mock.patch.object(terminal.output_stream, "write", side_effect=failure)
+                    else:
+                        patch = mock.patch.object(termios, "tcsetattr", side_effect=failure)
+                    with patch, self.assertRaisesRegex(OSError, f"{failure_kind} cleanup failed"):
+                        host.close_view()
+                    sources.stop.assert_called()
+
+    def test_source_cleanup_failure_preserves_primary_error_and_terminal_cleanup(self):
+        terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
+        sources = mock.Mock()
+        sources.stop.side_effect = OSError("source cleanup failed")
+        with mock.patch.object(_terminal, "InputSourceLifecycle", return_value=sources), \
+                _acquired(terminal) as (host, termios, _, _, saved):
+            primary = RuntimeError("primary viewer failure")
+            with self.assertRaises(RuntimeError) as caught, host:
+                raise primary
+            self.assertIs(caught.exception, primary)
+            sources.stop.assert_called()
+            self.assertTrue(terminal.output_stream.getvalue().endswith(_LEAVE))
+            self.assertEqual(termios.tcsetattr.call_args.args, (17, 1, saved))
+
+    def test_partial_terminal_acquisition_still_releases_the_source_owner(self):
+        terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
+        sources = mock.Mock()
+        with mock.patch.object(_terminal, "InputSourceLifecycle", return_value=sources), \
+                _acquired(terminal) as (host, termios, tty, _, saved):
+            tty.setcbreak.side_effect = RuntimeError("partial cbreak")
+            with self.assertRaisesRegex(RuntimeError, "partial cbreak"):
+                host.__enter__()
+            sources.start.assert_called_once_with(terminal.input_stream, terminal.output_stream, live=True)
+            sources.stop.assert_called()
+            self.assertEqual(termios.tcsetattr.call_args.args, (17, 1, saved))
 
     def test_close_view_restores_resources_before_context_exit_and_is_idempotent(self):
         terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())

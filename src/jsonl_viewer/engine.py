@@ -16,6 +16,7 @@ from .contracts import ViewerHost, ViewerSpec
 _MAX_EVENT_CHARACTERS = 8_192
 _MAX_QUERY_CHARACTERS = 1_024
 _MAX_GOTO_CHARACTERS = 128
+_COMMAND_LANGUAGE_MESSAGE = "Commands use English; switch your keyboard input to English."
 
 
 def _input_error(state: ViewState, message: str) -> ViewState:
@@ -221,7 +222,10 @@ def _transition(
             if not _safe_input(payload, allow_tab=True):
                 return _input_error(state, "Line input contains unsupported controls."), False
             # Ordinary-line hosts submit complete commands and never own drafts.
-            return action(state, _line_action(payload))
+            event = _line_action(payload)
+            if event == "unknown" and not payload.isascii():
+                return _input_error(state, _COMMAND_LANGUAGE_MESSAGE), False
+            return action(state, event)
         if kind == "text":
             if not _safe_input(payload):
                 return _input_error(state, "Text input contains unsupported controls."), False
@@ -234,6 +238,8 @@ def _transition(
                 "c": "clear_search", "/": "begin_search", "g": "begin_goto",
             }
             for index, character in enumerate(payload):
+                if not character.isascii():
+                    return _input_error(state, _COMMAND_LANGUAGE_MESSAGE), False
                 state, closed = action(state, bindings.get(character, "unknown"))
                 if closed:
                     return state, True
@@ -721,6 +727,8 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
     closed = False
     active_failure: BaseException | None = None
     try:
+        mode_notifier = getattr(host, "set_input_mode", None)
+        input_mode = None
         columns, rows = host.terminal_size()
         color = bool(host.color_enabled())
         host.present(
@@ -745,6 +753,12 @@ def view_jsonl(source: bytes, spec: ViewerSpec, host: ViewerHost) -> None:
         cursor_visible = True
         present_needed = True
         while not closed:
+            desired_mode = ("text" if state.prompt is not None
+                            and state.prompt.kind == "search_query" else "command")
+            if desired_mode != input_mode:
+                if callable(mode_notifier):
+                    mode_notifier(desired_mode)
+                input_mode = desired_mode
             current_geometry = (*host.terminal_size(), bool(host.color_enabled()))
             if rendered is None or current_geometry != geometry:
                 columns, rows, color = current_geometry

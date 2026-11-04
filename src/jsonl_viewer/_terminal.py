@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import Any, Callable
 
 from ._cell_layout import clusters as _clusters, text_cells as _text_cells
+from ._input_sources import InputSourceAdapter, InputSourceLifecycle
 from ._mouse import decode_sgr
 from .contracts import ViewerSpec, ViewerTerminal
 from .engine import view_jsonl
@@ -94,6 +95,48 @@ class _TerminalTermination(BaseException):
         super().__init__(number)
 
 
+def _local_desktop_terminal(input_stream, output_stream) -> bool:
+    """Require one local foreground TTY before changing desktop input state."""
+    if any(os.environ.get(name) for name in (
+        "SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY", "MOSH_CONNECTION", "MOSH_KEY",
+        "WSL_DISTRO_NAME", "WSL_INTEROP", "TMUX", "STY",
+    )):
+        return False
+    try:
+        input_fd, output_fd = input_stream.fileno(), output_stream.fileno()
+        if not (input_stream.isatty() and output_stream.isatty()
+                and os.isatty(input_fd) and os.isatty(output_fd)
+                and os.ttyname(input_fd) == os.ttyname(output_fd)
+                and os.tcgetpgrp(input_fd) == os.getpgrp()):
+            return False
+    except (AttributeError, OSError, ValueError):
+        return False
+    if sys.platform == "darwin":
+        return any(os.environ.get(name) for name in (
+            "TERM_PROGRAM", "TERM_SESSION_ID", "ITERM_SESSION_ID", "KITTY_WINDOW_ID",
+            "ALACRITTY_WINDOW_ID", "WEZTERM_PANE",
+        ))
+    if sys.platform.startswith("linux"):
+        return bool((os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+                    and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:"))
+    return False
+
+
+def _desktop_input_source_adapter(input_stream, output_stream) -> InputSourceAdapter | None:
+    """Load only the applicable native adapter during an owned live call."""
+    if not _local_desktop_terminal(input_stream, output_stream):
+        return None
+    if sys.platform == "darwin":
+        from ._input_sources_macos import MacOSInputSourceAdapter
+
+        return MacOSInputSourceAdapter()
+    if sys.platform.startswith("linux"):
+        from ._input_sources_linux import linux_input_source_adapter
+
+        return linux_input_source_adapter()
+    return None
+
+
 class _TerminalHost:
     """Acquire resources for one view; never close its supplied streams."""
 
@@ -124,6 +167,7 @@ class _TerminalHost:
         self._pending_csi: tuple[str, int] | None = None
         self._discard_mouse = False
         self._mouse_received = 0
+        self._input_sources = InputSourceLifecycle(_desktop_input_source_adapter)
 
     def __enter__(self) -> _TerminalHost:
         supported = (termios is not None and tty is not None
@@ -144,6 +188,7 @@ class _TerminalHost:
             return self
         try:
             self._install_signal_handlers()
+            self._input_sources.start(self._input, self._output, live=True)
             # A partially completed tty mutation also requires restoration.
             self._attributes_changed = True
             tty.setcbreak(self._descriptor, termios.TCSANOW)
@@ -200,6 +245,13 @@ class _TerminalHost:
         self._restoring = True
         failures: list[BaseException] = []
         try:
+            try:
+                self._input_sources.stop()
+            except Exception:
+                # Desktop source control is optional even during restoration.
+                pass
+            except BaseException as failure:
+                failures.append(failure)
             if self._terminal_started:
                 self._terminal_started = False
                 trailer = _LEAVE
@@ -240,6 +292,9 @@ class _TerminalHost:
             self._restoration_failed = True
             if active_failure is None:
                 raise failures[0]
+
+    def set_input_mode(self, mode: str) -> None:
+        self._input_sources.set_input_mode(mode)
 
     def _physical_size(self) -> tuple[int, int]:
         try:

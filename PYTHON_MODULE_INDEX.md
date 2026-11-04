@@ -14,9 +14,9 @@ Source root: `src/`
 
 Package root: `src/jsonl_viewer/`
 
-Importable production units indexed: 13.
+Importable production units indexed: 16.
 
-Direct internal dependency edges indexed: 26.
+Direct internal dependency edges indexed: 31.
 
 Directed internal dependency cycles indexed: 0.
 
@@ -28,6 +28,9 @@ Directed internal dependency cycles indexed: 0.
 jsonl_viewer -> contracts
              -> engine -> contracts/_input/_mouse/_model/_render/_search
              -> _terminal -> contracts/engine/_mouse/_cell_layout
+                         -> _input_sources/_input_sources_macos/_input_sources_linux
+
+_input_sources_macos/_input_sources_linux -> _input_sources
 
 _mouse -> _model
 _render -> contracts/_model/_json/_cell_layout
@@ -263,10 +266,16 @@ unit imports Story or any third-party runtime package.
 - **Responsibility:** Own one terminal lifecycle and bounded physical input
   transport for standalone or library-owned viewing.
 - **Supported surface:** None; facade uses private `view_owned`.
-- **Direct internal dependencies:** `_cell_layout`, `_mouse`, `contracts`, and `engine`.
+- **Direct internal dependencies:** `_cell_layout`, `_mouse`, `_input_sources`,
+  platform-lazy `_input_sources_macos`/`_input_sources_linux`, `contracts`, and `engine`.
 - **State/resources:** Owns no-flush cbreak/echo suppression, saved current termios,
   alternate screen, cursor visibility, SGR tracking, output-stream geometry, and
-  cleanup. Enables 1006 before 1000; disables 1000 before 1006. Repaint batches
+  cleanup. It also owns one optional input-source lifecycle for supported local
+  foreground desktop TTYs, skipping remote/multiplexed/background sessions.
+  The optional engine mode capability selects English for commands and restores
+  the exact entry source for search. Source cleanup runs independently of screen
+  and termios restoration, before default termination is redelivered.
+  Enables 1006 before 1000; disables 1000 before 1006. Repaint batches
   absolute row positioning and line erasure; physical output geometry caps
   environment overrides. Overflow clipping preserves SGR and combining clusters;
   only the last physical row reserves its bottom-right cell to prevent scrolling.
@@ -287,6 +296,39 @@ unit imports Story or any third-party runtime package.
   stay inert. Unsupported terminals use bounded line
   fallback unless transient-only ownership fails before rendering.
 - **Verification:** Terminal ownership, physical mouse, standalone/packaging tests.
+
+### `jsonl_viewer._input_sources`
+
+- **Source:** `src/jsonl_viewer/_input_sources.py`
+- **Responsibility:** Own one view's entry source, English source, and mode transitions.
+- **Supported surface:** Internal immutable `InputSourceState`, adapter protocol, and lifecycle.
+- **Direct internal dependencies:** None.
+- **State/resources:** Injected adapters operate only at live acquisition, mode changes,
+  and cleanup. Optional failures preserve viewer input and terminal exceptions;
+  construction/import perform no I/O. No per-key or idle polling.
+- **Verification:** Input-source lifecycle and owned-terminal tests; README.
+
+### `jsonl_viewer._input_sources_macos`
+
+- **Source:** `src/jsonl_viewer/_input_sources_macos.py`
+- **Responsibility:** Bind native TIS/CoreFoundation source selection for one owned view.
+- **Supported surface:** Internal `MacOSInputSourceAdapter`.
+- **Direct internal dependencies:** `_input_sources`.
+- **State/resources:** Explicit construction binds frameworks; each current-source
+  observation refreshes the run loop once. Owned references are released, borrowed
+  source identities stay content-free, and English requires language plus capability.
+- **Verification:** Fake-native cache, binding, and reference-lifetime tests; README.
+
+### `jsonl_viewer._input_sources_linux`
+
+- **Source:** `src/jsonl_viewer/_input_sources_linux.py`
+- **Responsibility:** Adapt existing IBus/Fcitx5 desktop state without daemon activation.
+- **Supported surface:** Internal framework adapters and conservative factory.
+- **Direct internal dependencies:** `_input_sources`.
+- **State/resources:** Explicit/unique framework discovery; bounded Fcitx profile reads,
+  64-KiB helper output and 250-ms helper deadlines. State preserves source/group/
+  activation and verifies English layouts. No import-time I/O or polling.
+- **Verification:** Fake-framework selection, restoration, helper-bound tests; README.
 
 ### `jsonl_viewer._mouse`
 
@@ -315,6 +357,8 @@ unit imports Story or any third-party runtime package.
 - **State/resources:** Validates values/transport shape without I/O. A host retains
   complete terminal lifecycle ownership; a terminal adapter transfers one view's
   lifecycle while its streams remain caller-owned and are never closed.
+  Five-method hosts may opt into documented `set_input_mode(command|text)`
+  notifications without changing the required protocol or constructor signatures.
 - **Verification:** Public API, host ownership, terminal transport tests; README.
 
 ### `jsonl_viewer.engine`
@@ -344,6 +388,10 @@ unit imports Story or any third-party runtime package.
   rebases the character cursor and preferred column when gutter digits or compact
   geometry change. All ordered input
   events are retained; no blocking-host read-ahead or terminal buffering is introduced.
+  An optional host mode capability is resolved once and notified only on changes
+  before the next read: search-query drafts use text, all other states command.
+  Invalid search submissions retain their draft and mode; non-English navigation
+  receives guidance without transliteration or a mapped command.
 - **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
   cached frame variants without rebuilding projections. Real input restores the
   cursor; geometry/color changes invalidate the cache. Prompt/help views remain
