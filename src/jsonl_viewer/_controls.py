@@ -712,5 +712,3 @@ def _semantic_transition(
         ), False
 
     return _message(state, "Unknown event; press ? for help.", error=True), False
-
-

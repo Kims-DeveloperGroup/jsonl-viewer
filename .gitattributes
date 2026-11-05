@@ -1,0 +1,2 @@
+# Byte-exact terminal frames retain blank painted columns at row ends.
+docs/samples/*.txt whitespace=-blank-at-eol
