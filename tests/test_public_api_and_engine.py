@@ -14,6 +14,8 @@ from pathlib import Path
 
 import jsonl_viewer
 from jsonl_viewer import ViewerSpec, view_jsonl
+from jsonl_viewer.inspection import Inspection
+from jsonl_viewer._render import _text_cells
 
 from tests.support import FakeHost, without_caret
 
@@ -140,6 +142,22 @@ class PublicApiTests(unittest.TestCase):
             with self.subTest(values=values):
                 with self.assertRaisesRegex(ValueError, message):
                     ViewerSpec("s", "c", "a", **values)
+        long_id, long_subject = "c" * 512, "界" * 512
+        maximum = ViewerSpec("s", long_id, "a", conversation_label="L" * 512,
+                             conversation_subject=long_subject)
+        self.assertEqual(maximum.display_context[1].value, long_id + " — " + long_subject)
+        for inspection in (None, Inspection()):
+            with self.subTest(inspection=inspection):
+                observed = dataclasses.replace(maximum, inspection=inspection)
+                host = FakeHost(("close",), size=(140, 24), color=False)
+                source = b"{}\n"
+                view_jsonl(source, observed, host)
+                self.assertEqual(host.close_calls, 1)
+                self.assertEqual(observed.conversation_id, long_id)
+                self.assertEqual(observed.conversation_subject, long_subject)
+                self.assertEqual(source, b"{}\n")
+                self.assertTrue(all(_text_cells(line) <= 140 for frame in host.frames
+                                    for line in frame.splitlines()))
 
     def test_clean_import_has_no_filesystem_or_terminal_side_effect(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -472,8 +490,14 @@ class KeyInputTests(unittest.TestCase):
 
         legacy = ViewerSpec("s", "c", "a", "t", "r", "v", "title", "Scope", "Subject")
         self.assertEqual(legacy.input_protocol, "semantic")
-        self.assertEqual(list(inspect.signature(ViewerSpec).parameters)[-1], "input_protocol")
+        self.assertEqual(tuple(inspect.signature(ViewerSpec).parameters), (
+            "session_id", "conversation_id", "agent_id", "date_time_field", "request_type_field",
+            "content_field", "title", "conversation_label", "conversation_subject", "input_protocol",
+            "context", "inspection",
+        ))
         self.assertEqual(inspect.signature(ViewerSpec).parameters["input_protocol"].default, "semantic")
+        self.assertEqual(inspect.signature(ViewerSpec).parameters["context"].default, ())
+        self.assertIsNone(inspect.signature(ViewerSpec).parameters["inspection"].default)
         for invalid in (None, True, 1, "", "KEYS", "other"):
             with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "input_protocol"):
                 ViewerSpec("s", "c", "a", input_protocol=invalid)
@@ -515,7 +539,7 @@ class KeyInputTests(unittest.TestCase):
         from jsonl_viewer._search import SearchLimitError
 
         host = _InputModeHost(("text\t/", "text\t개요", "key\tenter", "idle", "key\tescape", "close"))
-        with mock.patch("jsonl_viewer.engine.find_matches", side_effect=SearchLimitError("Refine the query.")):
+        with mock.patch("jsonl_viewer._controls.find_matches", side_effect=SearchLimitError("Refine the query.")):
             view_jsonl(self.source, self.spec, host)
         self.assertEqual(host.mode_updates, ["command", "text", "command"])
         self.assertEqual(host.read_modes, ["command", "text", "text", "text", "text", "command"])

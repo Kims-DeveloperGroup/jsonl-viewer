@@ -160,6 +160,8 @@ class StandaloneTests(unittest.TestCase):
     def _start_pty(
         self,
         path: Path,
+        *,
+        legacy_context: bool = True,
     ) -> tuple[subprocess.Popen[bytes], int]:
         if not hasattr(os, "openpty") or _terminal.termios is None:
             self.skipTest("POSIX PTY support is unavailable")
@@ -194,6 +196,8 @@ class StandaloneTests(unittest.TestCase):
             "pty-agent",
             "--no-color",
         ]
+        if not legacy_context:
+            command = [sys.executable, "-m", "jsonl_viewer", str(path), "--no-color"]
         try:
             process = subprocess.Popen(
                 command,
@@ -313,6 +317,53 @@ class StandaloneTests(unittest.TestCase):
                 process.wait(timeout=1)
         os.close(master)
 
+    def test_raw_pty_generic_panels_tab_search_and_terminal_cleanup(self) -> None:
+        if not hasattr(os, "openpty") or _terminal.termios is None:
+            self.skipTest("POSIX PTY support is unavailable")
+        import termios as system_termios
+
+        source = '{"level":"error","message":"timeout 단어"}\n'.encode()
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "audit.jsonl"
+            path.write_bytes(source)
+            process, master = self._start_pty(path, legacy_context=False)
+            original = self._pty_original_attributes
+            output = bytearray()
+            cursor = 0
+
+            def wait_for(needle):
+                nonlocal cursor
+                index = self._pty_read_until(master, output, needle, start=cursor)
+                cursor = index + len(needle)
+
+            try:
+                wait_for(b"Focus: Detail")
+                self._pty_write(master, b"f")
+                wait_for(b"changes apply only with Apply")
+                self._pty_write(master, b"\x1b")
+                wait_for(b"Focus: Detail")
+                self._pty_write(master, b"\t")
+                wait_for(b"Focus: List")
+                self._pty_write(master, b"\x1b[Z")
+                wait_for(b"Focus: Detail")
+                self._pty_write(master, b"/")
+                wait_for(b"literal text")
+                self._pty_write(master, "timeout 단어".encode())
+                wait_for("단어".encode())
+                self._pty_write(master, b"\r")
+                wait_for(b"Occurrence 1/1")
+                self._pty_write(master, b"q")
+                wait_for(b"\x1b[?25h\x1b[?1049l")
+                self._pty_finish(process, master, output)
+                self.assertEqual(process.returncode, 0)
+                self.assertEqual(system_termios.tcgetattr(master), original)
+                self.assertEqual(path.read_bytes(), source)
+                self.assertNotIn(b"Session:", output)
+                self.assertEqual(output.count(b"\x1b[?1049h"), 1)
+                self.assertEqual(output.count(b"\x1b[?1049l"), 1)
+            finally:
+                self._pty_cleanup(process, master)
+
     def test_no_color_environment_overrides_a_capable_terminal(self) -> None:
         class TerminalBuffer(io.StringIO):
             def isatty(self) -> bool:
@@ -337,7 +388,7 @@ class StandaloneTests(unittest.TestCase):
             (b"\x17", "key\tctrl_w"), (b"\x08", "key\tbackspace"),
             (b"\x7f", "key\tbackspace"), (b"\r", "key\tenter"),
             (b"\n", "key\tenter"), (b"\x03", "key\tinterrupt"),
-            (b"\x04", "key\teof"), (b"\t", "key\tunknown"),
+            (b"\x04", "key\teof"), (b"\t", "key\ttab"),
         ]
         for raw, expected in cases:
             with self.subTest(raw=raw):
@@ -358,7 +409,7 @@ class StandaloneTests(unittest.TestCase):
             b"[A": "up", b"OB": "down", b"[C": "right", b"OD": "left",
             b"[H": "home", b"OF": "end", b"[3~": "delete",
             b"[5~": "page_up", b"[6~": "page_down",
-            b"[Z": "unknown_escape", b"OP": "unknown_escape",
+            b"[Z": "shift_tab", b"OP": "unknown_escape",
             b"[" + b"0" * 30 + b"Z": "unknown_escape",
             b"[" + b"0" * 31 + b"Z": "unknown_escape",
         }
@@ -1004,7 +1055,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.6.5")
+        self.assertEqual(project["version"], "0.7.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
@@ -1057,8 +1108,8 @@ class PackagingBoundaryTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
-        self.assertEqual(len(modules), 16)
-        self.assertEqual(sum(len(value) for value in graph.values()), 31)
+        self.assertEqual(len(modules), 22)
+        self.assertEqual(sum(len(value) for value in graph.values()), 59)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -1066,8 +1117,8 @@ class PackagingBoundaryTests(unittest.TestCase):
         index = (ROOT / "PYTHON_MODULE_INDEX.md").read_text(encoding="utf-8")
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
-        self.assertIn("Importable production units indexed: 16.", index)
-        self.assertIn("Direct internal dependency edges indexed: 31.", index)
+        self.assertIn("Importable production units indexed: 22.", index)
+        self.assertIn("Direct internal dependency edges indexed: 59.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
@@ -1094,15 +1145,21 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "_input_sources_linux.py",
                 "_input_sources_macos.py",
                 "_cell_layout.py",
+                "_browser.py",
+                "_browser_render.py",
+                "_catalog.py",
+                "_controls.py",
                 "_json.py",
                 "_model.py",
                 "_mouse.py",
+                "_query.py",
                 "_render.py",
                 "_search.py",
                 "_standalone.py",
                 "_terminal.py",
                 "contracts.py",
                 "engine.py",
+                "inspection.py",
                 "py.typed",
             },
         )

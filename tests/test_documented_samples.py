@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 
 from jsonl_viewer import ViewerSpec, view_jsonl
+from jsonl_viewer.inspection import (
+    MISSING, Context, Facet, Group, Inspection, Option, SearchScope, Section, Target,
+)
 
 from tests.support import FakeHost
 
@@ -156,8 +159,48 @@ def sample_frames() -> dict[str, str]:
         "tiny-terminal.txt": (_ordinary_source(), ("close",), (28, 6)),
         "plain-no-color.txt": (_ordinary_source(), ("close",), (64, 10)),
     }
-    return {filename: _frame(source, events, size) + "\n"
-            for filename, (source, events, size) in cases.items()}
+    frames = {filename: _frame(source, events, size) + "\n"
+              for filename, (source, events, size) in cases.items()}
+    frames.update(_generic_frames())
+    return frames
+
+
+def _generic_frames() -> dict[str, str]:
+    """Reproduce independent audit previews through the public host loop."""
+    records = (
+        {"trace": "a", "kind": "open", "level": "info", "message": "ready"},
+        {"trace": "a", "kind": "read", "level": "error", "message": "timeout"},
+        {"message": "independent", "schema": "customer_account"},
+        {"trace": "a", "kind": "read", "level": "warn", "message": "retry"},
+        {"trace": "a", "kind": "write", "level": "info", "message": "saved"},
+        {"trace": "a", "kind": "close", "level": "info", "message": "done"},
+    )
+    source = b"".join(json.dumps(record, separators=(",", ":")).encode() + b"\n" for record in records)
+    spec = ViewerSpec(context=(Context("Dataset", "Audit events"),), input_protocol="keys",
+                      inspection=Inspection(
+                          groups=(Group("trace-a", "Trace A", (1, 2, 4, 5, 6), sections=(
+                              Section("open", "Open", (1,)), Section("reads", "Reads", (2, 4)),
+                              Section("writes", "Writes", (5,)), Section("close", "Close", (6,))),
+                              values=(("level", "error"),)),),
+                          facets=(Facet("level", "Level", (Option("info", "Info"), Option("error", "Error"),
+                                                            Option(MISSING, "Missing")), path=("level",)),),
+                          scopes=(SearchScope("messages", "Messages", tuple(Target(i, ("message",))
+                                                                            for i in range(1, 7))),)))
+    cases = {
+        "generic-inspection.txt": ((None,), (140, 28)),
+        "generic-filter-draft.txt": (("text\tf", "key\tenter", "key\tdown", "key\tdown", "key\tspace",
+                                       "key\tenter", None), (80, 24)),
+        "generic-scoped-search.txt": (("search\ttimeout", "text\t/", "key\ttab", "key\tright", "key\ttab",
+                                        "key\tenter", None), (140, 28)),
+    }
+    frames = {}
+    for name, (events, size) in cases.items():
+        host = FakeHost(events, size=size, color=False)
+        view_jsonl(source, spec, host)
+        if host.close_calls != 1:
+            raise AssertionError("Sample host ownership was not restored")
+        frames[name] = host.frames[-1] + "\n"
+    return frames
 
 
 class DocumentedSampleTests(unittest.TestCase):

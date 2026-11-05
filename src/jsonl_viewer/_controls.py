@@ -1,0 +1,714 @@
+"""Pure JSON cursor, prompt, and validated event transitions."""
+
+from __future__ import annotations
+
+import unicodedata
+from dataclasses import replace
+
+from ._mouse import hit_test, parse_mouse
+from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState, VisibleCharacter
+from ._render import RenderSession, render_frame
+from ._search import SearchLimitError, find_matches
+from .contracts import ViewerSpec
+
+
+_MAX_EVENT_CHARACTERS = 8_192
+_MAX_QUERY_CHARACTERS = 1_024
+_MAX_GOTO_CHARACTERS = 128
+_COMMAND_LANGUAGE_MESSAGE = "Commands use English; switch your keyboard input to English."
+
+
+def _input_error(state: ViewState, message: str) -> ViewState:
+    if state.prompt is not None:
+        return replace(state, prompt=replace(state.prompt, error=message))
+    return _message(state, message, error=True)
+
+
+def _safe_input(value: str, *, allow_tab: bool = False) -> bool:
+    return all(
+        (allow_tab and character == "\t")
+        or (
+            unicodedata.category(character) not in {"Cc", "Cf", "Cs"}
+            and character not in {"\u2028", "\u2029"}
+        )
+        for character in value
+    )
+
+
+def _line_action(value: str) -> str:
+    """Interpret literal ordinary-line transport inside the viewer boundary."""
+
+    command = value.strip()
+    mapping = {
+        "q": "close", "quit": "close", "j": "cursor_down", "down": "down",
+        "k": "cursor_up", "up": "up", "pgdn": "page_down", "pgup": "page_up",
+        "n": "next_match", "N": "previous_match", "m": "toggle_mode",
+        "h": "cursor_left", "l": "cursor_right", "J": "next_sibling", "K": "previous_sibling", "?": "help", "help": "help", "fold": "toggle_fold", "esc": "cancel",
+        "c": "clear_search", "clear": "clear_search",
+        "left": "scroll_left", "right": "scroll_right",
+    }
+    if command in mapping:
+        return mapping[command]
+    if command.startswith("g "):
+        line = command[2:].strip()
+        if line and "\t" not in line:
+            return "goto\t" + line
+    if command == "//" or command.startswith("// "):
+        return "search\t" + command[2:].strip()
+    if command == "/" or command.startswith("/ "):
+        return "search\t" + command[1:].strip()
+    return "unknown"
+
+
+def _edit_prompt(prompt: PromptState, key: str) -> PromptState:
+    """Edit code points without sharing terminal or application line state."""
+
+    buffer, cursor = prompt.buffer, prompt.cursor
+    if key in {"home", "ctrl_a"}:
+        cursor = 0
+    elif key in {"end", "ctrl_e"}:
+        cursor = len(buffer)
+    elif key == "left":
+        cursor = max(0, cursor - 1)
+    elif key == "right":
+        cursor = min(len(buffer), cursor + 1)
+    elif key == "backspace" and cursor:
+        buffer = buffer[:cursor - 1] + buffer[cursor:]
+        cursor -= 1
+    elif key == "delete":
+        buffer = buffer[:cursor] + buffer[cursor + 1:]
+    elif key == "ctrl_u":
+        buffer, cursor = buffer[cursor:], 0
+    elif key == "ctrl_k":
+        buffer = buffer[:cursor]
+    elif key == "ctrl_w":
+        start = cursor
+        while start and buffer[start - 1].isspace():
+            start -= 1
+        while start and not buffer[start - 1].isspace():
+            start -= 1
+        buffer, cursor = buffer[:start] + buffer[cursor:], start
+    else:
+        return prompt
+    return replace(prompt, buffer=buffer, cursor=cursor, error=None)
+
+
+def _insert_prompt(state: ViewState, text: str) -> ViewState:
+    assert state.prompt is not None
+    prompt = state.prompt
+    limit = {
+        "search_query": _MAX_QUERY_CHARACTERS,
+        "goto": _MAX_GOTO_CHARACTERS,
+    }[prompt.kind]
+    if len(prompt.buffer) + len(text) > limit:
+        return _input_error(state, f"Input is limited to {limit} characters.")
+    buffer = prompt.buffer[:prompt.cursor] + text + prompt.buffer[prompt.cursor:]
+    return replace(
+        state,
+        prompt=replace(prompt, buffer=buffer, cursor=prompt.cursor + len(text), error=None),
+    )
+
+
+def _submit_prompt(state: ViewState, snapshot: Snapshot) -> tuple[ViewState, str | None]:
+    assert state.prompt is not None
+    prompt = state.prompt
+    value = prompt.buffer.strip()
+    if prompt.kind == "search_query":
+        if not value:
+            return _input_error(state, "Search query must not be empty."), None
+        return replace(state, prompt=None), f"search\t{value}"
+    try:
+        valid = int(value, 10) > 0
+    except ValueError:
+        valid = False
+    if not valid:
+        return _input_error(state, "Go-to line must be a positive integer."), None
+    return replace(state, prompt=None), "goto\t" + value
+
+
+def _has_hidden_match(
+    search: SearchState,
+    record_index: int,
+    snapshot: Snapshot,
+    spec: ViewerSpec,
+) -> bool:
+    if not spec.primary_fields:
+        return False
+    value = snapshot.records[record_index].value
+    if not isinstance(value, dict):
+        return False
+    hidden = set(value).difference(spec.primary_fields)
+    hit = search.current_occurrence
+    return bool(hidden) and hit is not None and (
+        not hit.path or hit.path[0] in hidden
+    )
+
+
+def _message(state: ViewState, text: str, *, error: bool = False) -> ViewState:
+    return replace(state, message=text, message_is_error=error)
+
+
+def _clear_message(state: ViewState) -> ViewState:
+    return replace(state, message=None, message_is_error=False)
+
+
+def _transition(
+    state: ViewState,
+    event: object,
+    snapshot: Snapshot,
+    spec: ViewerSpec,
+    *,
+    page_size: int,
+    selected_line_count: int,
+    malformed: bool = False,
+    rendered: RenderResult | None = None,
+    session: RenderSession | None = None,
+) -> tuple[ViewState, bool]:
+    """Validate transport before applying context-sensitive viewer behavior."""
+
+    rendered_state = state
+
+    def projection_key(current: ViewState) -> tuple:
+        return (current.selected_index, current.record_line_offset, current.mode,
+                current.search, current.folds, current.help_visible, current.focus_container, current.focus_property, current.horizontal_offset, current.cursor,
+                current.reveal_cursor, current.reveal_match)
+
+    def action(current: ViewState, value: str | None) -> tuple[ViewState, bool]:
+        nonlocal rendered, rendered_state
+        if (rendered is not None and value in {
+                "cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold",
+                "page_up", "page_down", "next_sibling", "previous_sibling", "scroll_left", "scroll_right",
+            } and projection_key(current) != projection_key(rendered_state)):
+            # A text envelope may combine mode/fold/navigation and movement.
+            # Refresh its structural positions before consuming another cursor key.
+            rendered = render_frame(spec, current, snapshot=snapshot, diagnostic=None,
+                                    columns=rendered.columns, rows=rendered.rows, color=rendered.color, session=session)
+            current = _accept_frame(current, rendered)
+            rendered_state = current
+        return _semantic_transition(
+            current, value, snapshot, spec,
+            page_size=rendered.body_rows if rendered is not None else page_size,
+            selected_line_count=rendered.selected_line_count if rendered is not None else selected_line_count,
+            malformed=malformed, rendered=rendered, session=session,
+        )
+
+    if event is None:
+        return action(state, None)
+    if type(event) is not str:
+        return _input_error(state, "Unsupported host event; press ? for help."), False
+    if spec.input_protocol == "keys" and event.startswith("mouse\t"):
+        mouse = parse_mouse(event)
+        if (mouse is None or rendered is None or state.prompt is not None
+                or state.help_visible or malformed
+                or not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows)):
+            return state, False
+        if mouse.action in {"cursor_up", "cursor_down"}:
+            return action(state, mouse.action)
+        if mouse.action == "click":
+            cell = hit_test(mouse, rendered)
+            if cell is not None:
+                return replace(state, cursor=cell.position,
+                               preferred_column=cell.position.column,
+                               focus_container=None, focus_property=None,
+                               reveal_match=False, reveal_cursor=False,
+                               message=None, message_is_error=False), False
+        return state, False
+    if len(event) > _MAX_EVENT_CHARACTERS + len("text\t"):
+        return _input_error(state, "Unsupported host event; press ? for help."), False
+    kind, separator, payload = event.partition("\t")
+    if spec.input_protocol == "keys" and separator and kind in {"text", "key", "line"}:
+        if len(payload) > _MAX_EVENT_CHARACTERS:
+            return _input_error(state, "Host input is too long."), False
+        if kind == "line":
+            if not _safe_input(payload, allow_tab=True):
+                return _input_error(state, "Line input contains unsupported controls."), False
+            # Ordinary-line hosts submit complete commands and never own drafts.
+            event = _line_action(payload)
+            if event == "unknown" and not payload.isascii():
+                return _input_error(state, _COMMAND_LANGUAGE_MESSAGE), False
+            return action(state, event)
+        if kind == "text":
+            if not _safe_input(payload):
+                return _input_error(state, "Text input contains unsupported controls."), False
+            if state.prompt is not None:
+                return _insert_prompt(state, payload), False
+            bindings = {
+                "q": "close", "j": "cursor_down", "k": "cursor_up", " ": "page_down",
+                "b": "page_up", "n": "next_match", "N": "previous_match",
+                "m": "toggle_mode", "h": "cursor_left", "l": "cursor_right", "J": "next_sibling", "K": "previous_sibling", "?": "help",
+                "c": "clear_search", "/": "begin_search", "g": "begin_goto",
+            }
+            for index, character in enumerate(payload):
+                if not character.isascii():
+                    state = _input_error(state, _COMMAND_LANGUAGE_MESSAGE)
+                    continue
+                state, closed = action(state, bindings.get(character, "unknown"))
+                if closed:
+                    return state, True
+                if state.prompt is not None:
+                    return _insert_prompt(state, payload[index + 1:]), False
+            return state, False
+        if payload == "eof" or (payload == "interrupt" and state.prompt is not None):
+            return action(state, "close")
+        if payload == "interrupt":
+            return action(state, "cancel")
+        prompt = state.prompt
+        if prompt is not None:
+            if payload in {"escape", "unknown_escape"}:
+                return replace(state, prompt=None), False
+            if payload == "enter":
+                state, submitted = _submit_prompt(state, snapshot)
+                if submitted is None:
+                    return state, False
+                result, closed = action(state, submitted)
+                if result.message_is_error and not closed:
+                    result = replace(state, prompt=replace(prompt, error=result.message))
+                return result, closed
+            return replace(state, prompt=_edit_prompt(prompt, payload)), False
+        bindings = {
+            "up": "up", "down": "down", "page_up": "page_up",
+            "page_down": "page_down", "escape": "cancel",
+            "unknown_escape": "unknown",
+            "enter": "toggle_fold", "left": "scroll_left", "right": "scroll_right",
+        }
+        if payload in bindings:
+            return action(state, bindings[payload])
+        return state, False
+    if len(event) > _MAX_EVENT_CHARACTERS:
+        return _input_error(state, "Unsupported host event; press ? for help."), False
+    # Old hosts keep their closed semantic vocabulary in either protocol mode.
+    if event in {"begin_search", "begin_goto"}:
+        event = "unknown"
+    return action(state, event)
+
+
+def _record_notice(index: int, count: int) -> str | None:
+    return ("Only record." if count == 1 else "First record." if index == 0 else
+            "Last record." if index == count - 1 else None)
+
+
+def _accept_frame(state: ViewState, frame: RenderResult) -> ViewState:
+    delta = frame.gutter_columns - state.gutter_columns if state.gutter_columns else 0
+    return replace(state, record_line_offset=frame.record_line_offset,
+                   cursor=frame.cursor if frame.characters else state.cursor,
+                   preferred_column=state.preferred_column + delta
+                   if state.preferred_column is not None else None,
+                   gutter_columns=frame.gutter_columns,
+                   horizontal_offset=frame.horizontal_offset,
+                   reveal_cursor=False, focus_container=None)
+
+
+def _navigation_probe(state: ViewState, rendered: RenderResult,
+                      snapshot: Snapshot, spec: ViewerSpec,
+                      index: int, offset: int, session: RenderSession | None = None) -> tuple[ViewState, RenderResult]:
+    # Keep retained key reveal for character movement. A non-null cursor prevents
+    # it from changing the requested viewport offset during a probe.
+    probe = replace(state, selected_index=index, record_line_offset=offset,
+                    cursor=state.cursor or rendered.cursor, focus_container=None,
+                    gutter_columns=state.gutter_columns or rendered.gutter_columns,
+                    reveal_match=False, reveal_cursor=False,
+                    horizontal_offset=state.horizontal_offset if index == state.selected_index else 0,
+                    message=None, message_is_error=False)
+    frame = render_frame(spec, probe, snapshot=snapshot, diagnostic=None,
+                         columns=rendered.columns, rows=rendered.rows, color=rendered.color, session=session)
+    return _accept_frame(probe, frame), frame
+
+
+def _row_destination(frame: RenderResult, index: int, row: int,
+                     event: str, preferred: int) -> VisibleCharacter | None:
+    cells = [cell for cell in frame.logical_characters
+             if cell.position.record_index == index and cell.position.line_index == row]
+    if not cells:
+        return None
+    if event == "cursor_left":
+        return cells[-1]
+    if event == "cursor_right":
+        return cells[0]
+    return min(cells, key=lambda cell: (abs(cell.position.column - preferred),
+                                       cell.position.column))
+
+
+def _cursor_page(state: ViewState, event: str, current: VisibleCharacter,
+                 rendered: RenderResult, snapshot: Snapshot, spec: ViewerSpec,
+                 preferred: int, session: RenderSession | None = None) -> ViewState:
+    backward = event in {"cursor_left", "cursor_up"}
+    index = current.position.record_index
+    rows = dict(rendered.navigable_rows).get(index, ())
+    adjacent = [row for row in rows if (row < current.position.line_index if backward
+                                      else row > current.position.line_index)]
+    crossing = not adjacent
+    if crossing:
+        index = (index + (-1 if backward else 1)) % len(snapshot.records)
+        _, initial = _navigation_probe(state, rendered, snapshot, spec, index, 0, session)
+        rows = dict(initial.navigable_rows).get(index, ())
+        if not rows:
+            return state
+        target = rows[-1] if backward else rows[0]
+    else:
+        target = adjacent[-1] if backward else adjacent[0]
+    offset = max(0, target - rendered.body_rows + 1) if backward else target
+    probe, frame = _navigation_probe(state, rendered, snapshot, spec, index, offset, session)
+    if rendered.gutter_columns and frame.gutter_columns:
+        preferred += frame.gutter_columns - rendered.gutter_columns
+    destination = _row_destination(frame, index, target, event, preferred)
+    if destination is None:
+        return state
+    if event in {"cursor_left", "cursor_right"}:
+        preferred = destination.position.column
+    return replace(probe, cursor=destination.position, preferred_column=preferred, reveal_cursor=True,
+                   message=_record_notice(index, len(snapshot.records)) if crossing else None)
+
+
+def _page_transition(state: ViewState, event: str, rendered: RenderResult,
+                     snapshot: Snapshot, spec: ViewerSpec, session: RenderSession | None = None) -> ViewState:
+    backward = event == "page_up"
+    step = max(1, rendered.body_rows - 1)
+    index = state.selected_index
+    offset = state.record_line_offset + (-step if backward else step)
+    nav_rows = dict(rendered.navigable_rows).get(index, ())
+    crossing = (state.record_line_offset == 0 if backward else
+                offset >= rendered.selected_line_count or
+                bool(nav_rows) and offset > nav_rows[-1])
+    # Page commands retain their first-cell column reset and clear key reveal.
+    cleared = replace(state, focus_property=None, preferred_column=None)
+    if crossing:
+        index = (index + (-1 if backward else 1)) % len(snapshot.records)
+        _, initial = _navigation_probe(cleared, rendered, snapshot, spec, index, 0, session)
+        nav_rows = dict(initial.navigable_rows).get(index, ())
+        offset = max(0, nav_rows[-1] - rendered.body_rows + 1) if backward and nav_rows else 0
+    probe, frame = _navigation_probe(cleared, rendered, snapshot, spec, index, max(0, offset), session)
+    cells = [cell for cell in frame.logical_characters if cell.position.record_index == index]
+    if not cells:
+        # Skip annotation-only vertical gaps using bounded row metadata. Logical
+        # candidates remain available even when the retained pan hides the row.
+        nav_rows = dict(frame.navigable_rows).get(index, ())
+        candidates = [row for row in nav_rows if (row < offset if backward else row >= offset)]
+        if not candidates:
+            return state
+        target = candidates[-1] if backward else candidates[0]
+        offset = max(0, target - rendered.body_rows + 1) if backward else target
+        probe, frame = _navigation_probe(cleared, rendered, snapshot, spec, index, offset, session)
+        cells = [cell for cell in frame.logical_characters if cell.position.record_index == index]
+        if not cells:
+            return state
+    target = cells[-1].position.line_index if backward else cells[0].position.line_index
+    visible = [cell for cell in frame.characters if cell.position.record_index == index
+               and cell.position.line_index == target]
+    destination = visible[0] if visible else next(cell for cell in cells if cell.position.line_index == target)
+    return replace(probe, cursor=destination.position, preferred_column=None,
+                   reveal_cursor=not bool(visible),
+                   message=_record_notice(index, len(snapshot.records)) if crossing else None)
+
+
+def _cursor_transition(state: ViewState, event: str, rendered: RenderResult | None,
+                       snapshot: Snapshot, spec: ViewerSpec, session: RenderSession | None = None) -> ViewState:
+    if rendered is None or not rendered.characters:
+        return state
+    characters = rendered.logical_characters
+    cursor = state.cursor or rendered.cursor
+    current = next((cell for cell in characters if cell.position == cursor), characters[0])
+    if event == "toggle_fold":
+        container = next((item for item in rendered.containers
+                          if item.identity == current.container), None)
+        if container is None or not container.nonempty:
+            return state
+        folds = state.folds.symmetric_difference((container.identity,))
+        return replace(state, folds=folds, cursor=None, preferred_column=None,
+                       focus_container=container.identity, focus_property=None, reveal_match=False,
+                       message=None, message_is_error=False)
+    rows = sorted({cell.screen_row for cell in characters})
+    preferred = current.position.column if state.preferred_column is None else state.preferred_column
+    if event in {"cursor_left", "cursor_right"}:
+        index = characters.index(current)
+        index += -1 if event == "cursor_left" else 1
+        if not 0 <= index < len(characters):
+            return _cursor_page(state, event, current, rendered, snapshot, spec, preferred, session)
+        destination = characters[index]
+        preferred = destination.position.column
+    else:
+        index = rows.index(current.screen_row)
+        index += -1 if event == "cursor_up" else 1
+        if not 0 <= index < len(rows):
+            return _cursor_page(state, event, current, rendered, snapshot, spec, preferred, session)
+        row = [cell for cell in characters if cell.screen_row == rows[index]]
+        destination = min(row, key=lambda cell: (abs(cell.position.column - preferred), cell.position.column))
+    return replace(state, cursor=destination.position, preferred_column=preferred,
+                   focus_container=None, reveal_match=False, reveal_cursor=True,
+                   message=None, message_is_error=False)
+
+
+def _scroll_transition(state: ViewState, event: str, rendered: RenderResult | None) -> ViewState:
+    if rendered is None:
+        return state
+    step = max(1, rendered.body_width // 2)
+    offset = min(rendered.max_horizontal_offset, max(0, rendered.horizontal_offset
+                 + (-step if event == "scroll_left" else step)))
+    return replace(state, horizontal_offset=offset, reveal_cursor=False, reveal_match=False,
+                   focus_container=None, focus_property=None, message=None, message_is_error=False)
+
+
+def _sibling_transition(state: ViewState, event: str, rendered: RenderResult | None) -> ViewState:
+    if rendered is None:
+        return state
+    cell = next((cell for cell in rendered.characters if cell.position == state.cursor), None)
+    if cell is None:
+        return state
+    owner = next((item for item in rendered.properties if item.identity == cell.property), None)
+    root_entry = cell.property is None and cell.container == FoldIdentity(cell.position.record_index, ()) and cell.delimiter is not None
+    if owner is None and not root_entry:
+        return state
+    siblings = [item for item in rendered.properties
+                if item.identity.record_index == cell.position.record_index
+                and item.parent == (() if owner is None else owner.parent)]
+    if not siblings:
+        return state
+    if owner is None:
+        index = 0 if event == "next_sibling" else len(siblings) - 1
+    else:
+        index = (siblings.index(owner) + (1 if event == "next_sibling" else -1)) % len(siblings)
+    target = siblings[index]
+    message = (
+        "Only sibling." if len(siblings) == 1 else
+        "First sibling." if index == 0 else
+        "Last sibling." if index == len(siblings) - 1 else None
+    )
+    return replace(state, selected_index=target.identity.record_index,
+                   cursor=None, preferred_column=None, focus_container=None,
+                   focus_property=target.identity, reveal_match=False,
+                   message=message, message_is_error=False)
+
+
+def _unfold_match(state: ViewState, search: SearchState) -> frozenset[FoldIdentity]:
+    hit = search.current_occurrence
+    if hit is None:
+        return state.folds
+    return frozenset(fold for fold in state.folds
+                     if fold.record_index != hit.record_index
+                     or hit.path[:len(fold.path)] != fold.path
+                     or (hit.kind == "key" and hit.path == fold.path))
+
+
+def _semantic_transition(
+    state: ViewState,
+    event: str | None,
+    snapshot: Snapshot,
+    spec: ViewerSpec,
+    *,
+    page_size: int,
+    selected_line_count: int,
+    malformed: bool = False,
+    rendered: RenderResult | None = None,
+    session: RenderSession | None = None,
+) -> tuple[ViewState, bool]:
+    if event == "idle":
+        return state, False
+    if event is None or event == "close":
+        return state, True
+    if malformed and event not in {"help", "cancel"}:
+        return _message(state, "Malformed input is read-only; press q to close."), False
+
+    if state.prompt is not None:
+        if event == "cancel":
+            return replace(state, prompt=None), False
+        return state, False
+
+    if state.help_visible:
+        if event in {"help", "cancel"}:
+            return replace(state, help_visible=False, message=None), False
+        if event == "close":
+            return state, True
+        return state, False
+
+    if event == "help":
+        return replace(state, help_visible=True, message=None), False
+    if event == "cancel":
+        if state.message in {
+            "First sibling.", "Last sibling.", "Only sibling.",
+            "First record.", "Last record.", "Only record.",
+        }:
+            return _clear_message(state), False
+        if state.search is not None:
+            return replace(state, search=None, message="Search cleared."), False
+        if state.message is not None:
+            return _clear_message(state), False
+        return state, True
+    if event == "clear_search":
+        return replace(state, search=None, message="Search cleared."), False
+
+    if event in {"scroll_left", "scroll_right"}:
+        return _scroll_transition(state, event, rendered), False
+    if event in {"next_sibling", "previous_sibling"}:
+        return _sibling_transition(state, event, rendered), False
+    if not snapshot.records:
+        return _message(state, "The immutable snapshot has no records."), False
+
+    if event in {"begin_search", "begin_goto"}:
+        kind = "search_query" if event == "begin_search" else "goto"
+        return replace(state, prompt=PromptState(kind)), False
+
+    if event in {"cursor_left", "cursor_right", "cursor_up", "cursor_down", "toggle_fold"}:
+        return _cursor_transition(state, event, rendered, snapshot, spec, session), False
+    if event in {"page_up", "page_down"}:
+        if rendered is not None:
+            return _page_transition(state, event, rendered, snapshot, spec, session), False
+        state = replace(state, reveal_match=False)
+        step = max(1, page_size - 1)
+        offset = None
+        if event == "page_up" and state.record_line_offset > 0:
+            offset = max(0, state.record_line_offset - step)
+        elif event == "page_down" and state.record_line_offset + step < selected_line_count:
+            offset = state.record_line_offset + step
+        if offset is not None:
+            return replace(
+                state, record_line_offset=offset,
+                cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+                message=None, message_is_error=False,
+            ), False
+        event = "up" if event == "page_up" else "down"
+
+    if event in {"up", "down"}:
+        state = replace(state, reveal_match=False)
+        direction = -1 if event == "up" else 1
+        count = len(snapshot.records)
+        selected = (state.selected_index + direction) % count
+        message = (
+            "Only record." if count == 1 else
+            "First record." if selected == 0 else
+            "Last record." if selected == count - 1 else None
+        )
+        return replace(
+            state,
+            selected_index=selected,
+            record_line_offset=0,
+            horizontal_offset=0, reveal_cursor=False,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+            message=message, message_is_error=False,
+        ), False
+
+    if event == "toggle_mode":
+        if (
+            state.mode is ViewMode.VERBOSE
+            and state.search is not None
+            and state.search.current_record_index is not None
+            and _has_hidden_match(
+                state.search, state.search.current_record_index, snapshot, spec
+            )
+        ):
+            return _message(
+                state,
+                "Verbose mode is required for the selected hidden-field match.",
+            ), False
+        mode = ViewMode.VERBOSE if state.mode is ViewMode.SIMPLE else ViewMode.SIMPLE
+        return replace(
+            state,
+            mode=mode,
+            record_line_offset=0,
+            horizontal_offset=0, reveal_cursor=False,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+            reveal_match=False,
+            message=f"Switched to {mode.value} mode.",
+        ), False
+
+    if event in {"next_match", "previous_match"}:
+        search = state.search
+        if search is None or not search.occurrences:
+            return _message(state, "No search matches are active."), False
+        assert search.current_index is not None
+        delta = 1 if event == "next_match" else -1
+        current = (search.current_index + delta) % len(search.occurrences)
+        selected = search.occurrences[current].record_index
+        search = replace(search, current_index=current)
+        promote = state.mode is ViewMode.SIMPLE and _has_hidden_match(
+            search, selected, snapshot, spec
+        )
+        return replace(
+            state,
+            selected_index=selected,
+            record_line_offset=0,
+            horizontal_offset=0, reveal_cursor=False,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+            mode=ViewMode.VERBOSE if promote else state.mode,
+            search=search,
+            reveal_match=True, folds=_unfold_match(state, search),
+            message=(
+                "Hidden-field match selected; switched to Verbose mode." if promote else None
+            ),
+            message_is_error=False,
+        ), False
+
+    if event.startswith("goto\t"):
+        raw_line = event.partition("\t")[2]
+        try:
+            source_line = int(raw_line, 10)
+        except ValueError:
+            return _message(
+                state, "Go-to line must be a positive integer.", error=True
+            ), False
+        if source_line <= 0:
+            return _message(
+                state, "Go-to line must be a positive integer.", error=True
+            ), False
+        for index, record in enumerate(snapshot.records):
+            if record.source_line == source_line:
+                return replace(
+                    state,
+                    selected_index=index,
+                    record_line_offset=0,
+                    horizontal_offset=0, reveal_cursor=False,
+                    cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+                    reveal_match=False,
+                    message=f"Moved to source line {source_line}.",
+                ), False
+        return _message(
+            state, f"Source line {source_line} is not a JSONL record."
+        ), False
+
+    if event.startswith("search\t"):
+        parts = event.split("\t")
+        if len(parts) != 2:
+            return _message(
+                state, "Search requires only a query; field search was removed.", error=True
+            ), False
+        _, query = parts
+        if not query:
+            return _message(state, "Search query must not be empty.", error=True), False
+        if len(query) > _MAX_QUERY_CHARACTERS:
+            return _message(state, "Search query is too long.", error=True), False
+        if not _safe_input(query):
+            return _message(state, "Search query contains unsupported controls.", error=True), False
+        try:
+            occurrences = find_matches(snapshot, query)
+        except SearchLimitError as exc:
+            return _message(state, str(exc), error=True), False
+        search = SearchState(
+            query=query,
+            occurrences=occurrences,
+            current_index=0 if occurrences else None,
+        )
+        if not occurrences:
+            return replace(
+                state,
+                search=search,
+                message="No matches in all text.",
+                message_is_error=False,
+            ), False
+        mode = state.mode
+        message = None
+        selected = occurrences[0].record_index
+        if mode is ViewMode.SIMPLE and _has_hidden_match(search, selected, snapshot, spec):
+            mode = ViewMode.VERBOSE
+            message = "Hidden-field match selected; switched to Verbose mode."
+        return replace(
+            state,
+            selected_index=selected,
+            record_line_offset=0,
+            horizontal_offset=0, reveal_cursor=False,
+            cursor=None, preferred_column=None, focus_container=None, focus_property=None,
+            mode=mode,
+            search=search,
+            reveal_match=True, folds=_unfold_match(state, search),
+            message=message,
+            message_is_error=False,
+        ), False
+
+    return _message(state, "Unknown event; press ? for help.", error=True), False

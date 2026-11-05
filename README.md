@@ -11,7 +11,8 @@ or terminal-driver implementations.
 
 ## Capabilities
 
-- a four-name public API: `ViewerSpec`, `ViewerHost`, `ViewerTerminal`, and `view_jsonl`;
+- a four-name root facade: `ViewerSpec`, `ViewerHost`, `ViewerTerminal`, and `view_jsonl`,
+  with immutable descriptors in the public `jsonl_viewer.inspection` module;
 - Simple and Verbose views, with configurable date/time, request-type, and
   content fields ordered first;
 - recursive, bounded expansion of string values that contain complete strict
@@ -35,6 +36,31 @@ or terminal-driver implementations.
 
 There is no writer API, persistence, live tail, network access, replay, retry,
 or arbitrary search-expression language.
+
+## Generic inspection in 0.7.0
+
+Open ordinary JSONL without identity headers:
+
+```bash
+jsonl-viewer audit.jsonl
+```
+
+`ViewerSpec()` is the equivalent generic library entry. It shows ordinary
+record fields rather than requiring a particular three-field projection.
+Optional `Context`, `Group`, `Section`, `Facet`, and `SearchScope` descriptors
+add contextual labels, related-record browsing, typed filters and explicit
+literal-search ranges. They are inert data, not application plugins or runtime
+callbacks. Groups can have any number of members or sections; ungrouped records
+remain independent. All JSON root types stay valid.
+
+The [inspection guide](docs/inspection.md) defines source references, typed
+Missing/null values, filter composition, scope coverage, modal apply/cancel,
+counts, focus, responsive layout and independent acceptance. Legacy populated
+session/conversation/agent headers without an inspection descriptor retain their
+display and projection behavior. Supplying `Inspection` explicitly opts into
+full-record inspection even with those display headers; Simple still bounds
+string previews, but does not hide fields through the historical three-field
+projection. Header labels do not define the generic engine's data model.
 
 ## Preview
 
@@ -106,7 +132,13 @@ cursor folding, search through folds, tiny terminals, and plain / `NO_COLOR` out
 
 ```bash
 python -m pip install jsonl-viewer
-jsonl-viewer exchanges.jsonl \
+jsonl-viewer audit.jsonl
+```
+
+Existing header arguments remain available as display-only compatibility inputs:
+
+```bash
+jsonl-viewer audit.jsonl \
   --session session-01 \
   --conversation debate-full-id \
   --conversation-label Debate \
@@ -176,7 +208,9 @@ Press `/`, type a phrase at `Search query:`, and press Enter. For example,
 nested JSON stored inside strings. Search includes keys, scalar values, every
 JSON root type, hidden fields, and complete values beyond display previews.
 Queries are literal, case-insensitive substrings; there are no regular
-expressions, wildcards, or field selectors.
+expressions, wildcards, or field-selector query syntax. An explicit inspection
+scope can select source targets through bounded data descriptors without
+changing the query language. The default scope remains all original text.
 
 ### Move through keyword occurrences
 
@@ -521,7 +555,7 @@ contains printable Unicode; literal line input may also contain tab separators.
 The host preserves command text and leaves its interpretation to the viewer.
 Physical key names are `enter`, `escape`, `unknown_escape`, `backspace`,
 `delete`, `left`, `right`, `home`, `end`, `up`, `down`, `page_up`, `page_down`,
-`ctrl_a`, `ctrl_e`, `ctrl_u`, `ctrl_k`, `ctrl_w`, `interrupt`, `eof`, and
+`tab`, `shift_tab`, `ctrl_a`, `ctrl_e`, `ctrl_u`, `ctrl_k`, `ctrl_w`, `interrupt`, `eof`, and
 `unknown`. Goto drafts are bounded to 128 characters; search query drafts to
 1,024. Drafts and their logical cursors arrive in
 ordinary complete frames, so the host needs no prompt buffer or second input
@@ -540,6 +574,14 @@ next_sibling | previous_sibling | idle
 goto<TAB>POSITIVE_SOURCE_LINE
 search<TAB>NONEMPTY_QUERY
 ```
+
+Inspection also accepts `filters` / `begin_filter`, `focus_next`,
+`focus_previous`, `section_next`, and `section_previous`. Physical Tab and
+Shift+Tab select focus; `[` and `]` select arbitrary configured sections.
+`a` opens prepared annotations without adding their text to source search.
+See the [inspection controls](docs/inspection.md#main-controls) for modal
+selection and commit behavior.
+
 
 `None` means EOF/close in either protocol. These semantic events are also
 accepted in `"keys"` mode. Unknown semantic events produce a transient help

@@ -559,6 +559,8 @@ def _project_record(
     value = record.value
     if not isinstance(value, dict):
         return value, 0, VERBOSE_STRING_PREVIEW_BYTES
+    if not spec.primary_fields:
+        return value, 0, (VERBOSE_STRING_PREVIEW_BYTES if mode is ViewMode.VERBOSE else SIMPLE_CONTENT_PREVIEW_BYTES)
     ordered: dict[str, JSONValue] = {}
     for field in spec.primary_fields:
         if field in value:
@@ -625,51 +627,24 @@ def record_line_count(record: Record, spec: ViewerSpec, mode: ViewMode) -> int:
     return len(lines)
 
 
-def _header_lines(
-    spec: ViewerSpec,
-    state: ViewState,
-    *,
-    width: int,
-) -> list[tuple[str, str]]:
+def _header_lines(spec: ViewerSpec, state: ViewState, *, width: int) -> list[tuple[str, str]]:
     title = _neutralize_text(spec.title).upper()
-    session = _neutralize_text(spec.session_id)
-    conversation_label = _neutralize_text(spec.conversation_label)
-    conversation_id = _neutralize_text(spec.conversation_id)
-    conversation = f"{conversation_label}: {conversation_id}"
-    if spec.conversation_subject is not None:
-        subject = _neutralize_text(spec.conversation_subject)
-        conversation = f"{conversation} — {subject}"
-    agent = _neutralize_text(spec.agent_id)
     mode = state.mode.value.upper()
+    context = spec.display_context
+    full = " • ".join(f"{_neutralize_text(c.label)}: {_neutralize_text(c.value)}" for c in context)
     if width >= 100:
-        return [
-            (
-                _clip_text(
-                    f"{title} • READ ONLY • {mode} | Session: {session} | "
-                    f"{conversation} | Agent: {agent}",
-                    width,
-                ),
-                "chrome",
-            )
-        ]
-    if width >= 48:
-        return [
-            (_clip_text(f"{title} • READ ONLY • {mode}", width), "chrome"),
-            (
-                _clip_text(
-                    f"Session: {session} • {conversation} • Agent: {agent}",
-                    width,
-                ),
-                "chrome",
-            ),
-        ]
-    return [
-        (_clip_text(f"READ ONLY • {mode}", width), "chrome"),
-        (
-            _clip_text(f"S:{session} • {conversation} • A:{agent}", width),
-            "chrome",
-        ),
-    ]
+        joined = " | ".join(f"{_neutralize_text(c.label)}: {_neutralize_text(c.value)}" for c in context)
+        text = f"{title} • READ ONLY • {mode}" + (" | " + joined if joined else "")
+        return [(_clip_text(text, width), "chrome")]
+    first = f"{title} • READ ONLY • {mode}" if width >= 48 else f"READ ONLY • {mode}"
+    if width < 48:
+        full = " • ".join(
+            f"{_neutralize_text(c.short_label or c.label)}:{'' if c.short_label else ' '}{_neutralize_text(c.value)}"
+            for c in context
+        )
+    return [(_clip_text(first, width), "chrome")] + ([(_clip_text(full, width), "chrome")] if context else [])
+
+
 
 
 def _help_body(width: int) -> list[tuple[str, str]]:
@@ -1169,6 +1144,8 @@ def render_frame(
     rows: int,
     color: bool,
     session: RenderSession | None = None,
+    visible_indices: tuple[int, ...] | None = None,
+    chrome: bool = True,
 ) -> RenderResult:
     session = session or RenderSession()
     session.bind(spec, snapshot)
@@ -1178,7 +1155,9 @@ def render_frame(
                 and snapshot is not None and bool(snapshot.records))
     caret_rows = int(has_data and not color)
     footer_budget = 1 if caret_rows and height == MIN_ROWS and state.prompt is None else 2
-    header = _header_lines(spec, state, width=width)
+    header = _header_lines(spec, state, width=width) if chrome else []
+    if not chrome:
+        footer_budget = 0
     if has_data:
         header = header[:max(1, height - footer_budget - caret_rows - 1)]
     available_body_rows = max(0, height - len(header) - footer_budget - caret_rows)
@@ -1203,7 +1182,8 @@ def render_frame(
         else:
             assert snapshot is not None and snapshot.records
             remaining = available_body_rows
-            for index in range(state.selected_index, len(snapshot.records)):
+            visible = range(state.selected_index, len(snapshot.records)) if visible_indices is None else (i for i in visible_indices if i >= state.selected_index)
+            for index in visible:
                 record = snapshot.records[index]
                 projection = session.projection(record, index, spec, state)
                 logical_count = len(projection.lines)

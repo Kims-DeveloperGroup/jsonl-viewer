@@ -14,9 +14,9 @@ Source root: `src/`
 
 Package root: `src/jsonl_viewer/`
 
-Importable production units indexed: 16.
+Importable production units indexed: 22.
 
-Direct internal dependency edges indexed: 31.
+Direct internal dependency edges indexed: 59.
 
 Directed internal dependency cycles indexed: 0.
 
@@ -25,20 +25,22 @@ Directed internal dependency cycles indexed: 0.
 ## Current dependency direction
 
 ```text
-jsonl_viewer -> contracts
-             -> engine -> contracts/_input/_mouse/_model/_render/_search
-             -> _terminal -> contracts/engine/_mouse/_cell_layout
-                         -> _input_sources/_input_sources_macos/_input_sources_linux
-
-_input_sources_macos/_input_sources_linux -> _input_sources
-
-_mouse -> _model
-_render -> contracts/_model/_json/_cell_layout
-_search -> _model/_json
-_json -> _model
-_input -> _model
-
-__main__ -> _standalone -> jsonl_viewer/contracts/_input
+jsonl_viewer -> contracts / engine / lazy _terminal
+__main__ -> _standalone -> jsonl_viewer / contracts / _input
+engine -> contracts / _input / _model / _render / _controls / _browser
+_browser -> contracts / _catalog / _query / _browser_render / _controls
+         -> _model / _mouse / _render / _search
+_browser_render -> contracts / _catalog / _model / _render / _cell_layout
+_catalog -> inspection / _model / _json
+_query -> inspection / _catalog / _model / _search
+_controls -> contracts / _model / _mouse / _render / _search
+contracts -> inspection
+_render -> contracts / _model / _json / _cell_layout
+_search -> inspection / _model / _json
+_json / _input / _mouse -> _model
+_terminal -> contracts / engine / _mouse / _cell_layout
+          -> _input_sources / platform _input_sources_macos / _input_sources_linux
+_input_sources_macos / _input_sources_linux -> _input_sources
 ```
 
 The facade and standalone entry points depend inward on the stable generic
@@ -47,8 +49,8 @@ immutable private state, pure search, and deterministic rendering. Search and
 rendering depend on shared strict bounded JSON expansion and immutable path
 types, with separate call-local traversal budgets. Pure engine/model/contracts/render
 modules never depend on the terminal owner; the facade imports it lazily only
-for an owned call. The graph is acyclic and no production
-unit imports Story or any third-party runtime package.
+for an owned call. The graph is acyclic. Inspection descriptors contain only immutable built-in data;
+no production unit imports an embedding application or third-party runtime package.
 
 ## Package and module entries
 
@@ -109,6 +111,8 @@ unit imports Story or any third-party runtime package.
   geometry, compact logical navigation candidates for viewport rows,
   full-record navigable row indices, gutter geometry, horizontal bounds, sibling metadata, and
   deterministic visible/idle frame text. No module state, I/O, or lifecycle ownership.
+- **Inspection state:** `BrowserState`, `QueryResult`, `BrowserFrame` and `BrowserHit` hold
+  committed/draft conditions, original-index results and renderer-owned hit geometry only.
 - **Verification:** Engine, cursor/folding, rendering, search, and sample tests;
   `docs/design-system.md` describes the behavior.
 
@@ -183,6 +187,8 @@ unit imports Story or any third-party runtime package.
   the immutable snapshot record count and cleared on rebind or view close. Fixed
   record/line gutters show each record label once per frame; geometry chooses
   aligned normal or compact columns and a content-free `Too narrow` state.
+  The internal `visible_indices`/`chrome` pane boundary keeps the original snapshot,
+  record indexes and cumulative source/display-line prefixes while composing detail panes.
   It performs no terminal or filesystem I/O. Rendering reorders/project fields by
   `ViewerSpec` and recursively traverses complete string-encoded JSON containers
   accepted by `_json`, without mutating source/search values. Shared
@@ -347,65 +353,96 @@ unit imports Story or any third-party runtime package.
 ### `jsonl_viewer.contracts`
 
 - **Source:** `src/jsonl_viewer/contracts.py`
-- **Responsibility:** Define immutable generic embedding contracts.
-- **Supported surface:** Frozen `ViewerSpec`, frozen `ViewerTerminal`, and the
-  five-method structural `ViewerHost` through the root facade. Spec keeps bounded
-  generic headers, primary fields, and semantic/keys protocol. Keys additionally
-  accepts bounded mouse envelopes. The terminal adapter supplies input/output
-  streams, optional buffered character reader, and strict boolean `no_color`.
-- **Direct internal dependencies:** None.
-- **State/resources:** Validates values/transport shape without I/O. A host retains
-  complete terminal lifecycle ownership; a terminal adapter transfers one view's
-  lifecycle while its streams remain caller-owned and are never closed.
-  Five-method hosts may opt into documented `set_input_mode(command|text)`
-  notifications without changing the required protocol or constructor signatures.
-- **Verification:** Public API, host ownership, terminal transport tests; README.
+- **Responsibility:** Immutable view/transport contracts and legacy-header compatibility conversion.
+- **Supported surface:** Root `ViewerSpec`, `ViewerTerminal`, five-method `ViewerHost`.
+  New optional Context/Inspection values have an intentional public `inspection` submodule.
+- **Direct internal dependencies:** `inspection`.
+- **State/resources:** No I/O or ownership acquisition. Header-free specifications show full records;
+  explicit Inspection opts into full-record browsing even with historical display headers.
+  Historical three-header calls without Inspection preserve their projection and behavior.
+  Optional host input-mode notification remains backward-compatible.
+- **Verification:** Public API/host/terminal tests and inspection contracts/standalone tests.
 
 ### `jsonl_viewer.engine`
 
 - **Source:** `src/jsonl_viewer/engine.py`
-- **Responsibility:** Coordinate one transient read-only view through the host.
-  Reveal adjacent cursor pages using bounded row metadata and constant render
-  probes; page commands land on the last/first row according to direction.
-- **Supported surface:** Private host-engine `view_jsonl(source, spec, host)`
-  accepts exact immutable bytes, returns None, and persists no view state.
-- **Direct internal dependencies:** `_input`, `_mouse`, `_model`, `_render`, `_search`,
-  `contracts`.
-- **State/resources:** Main-view character movement, record/page navigation,
-  structural folding, sibling-property navigation, search and prompt editing stay
-  engine-owned. Left/Right pan by half the body width; `h/l` cross complete
-  projected rows and reveal logical destinations before crossing pages.
-  Record selection, goto, and mode reset horizontal position; within-record
-  paging and resize preserve/clamp it. Panning relocates an offscreen cursor
-  without reversing the pan, and search/key/fold navigation reveals its target.
-  `J/K` cycle sibling identities in rendered property order, focus the key,
-  and report endpoint notices; folds and occurrence counts remain unchanged.
-  Up/Down cycle source records, reset viewport/cursor, and report first/last/only
-  record notices; paging scrolls within a record before using that transition. Hidden
-  folded descendants and Simple-mode exclusions are not navigation targets.
-  The engine creates one lexical renderer session per view call, passes it through
-  batched transitions/navigation probes, and discards it on return. Frame adoption
-  rebases the character cursor and preferred column when gutter digits or compact
-  geometry change. All ordered input
-  events are retained; no blocking-host read-ahead or terminal buffering is introduced.
-  An optional host mode capability is resolved once and notified only on changes
-  before the next read: search-query drafts use text, all other states command.
-  Invalid search submissions retain their draft and mode; non-English navigation
-  receives guidance without transliteration or a mapped command.
-- **Blink ownership:** Hosts deliver 500-ms `idle` events. The engine alternates
-  cached frame variants without rebuilding projections. Real input restores the
-  cursor; geometry/color changes invalidate the cache. Prompt/help views remain
-  steady. Hosts without idle events retain static emphasis.
-- **Mouse behavior:** Keys-protocol wheel presses reuse cursor-up/down; left
-  presses update the logical cursor using the last painted full-cluster cell
-  without folding. Prompts, help, malformed snapshots, and invalid reports ignore
-  mouse input. Existing keyboard and semantic behavior remain intact.
-- **Compatibility:** Five host signatures stay stable.
-  Existing semantic events, prompt literal input, bounded transport validation,
-  search-driven ancestor unfolding, and immutable source handling remain intact.
-  Batched text refreshes logical/horizontal geometry before subsequent navigation.
-- **Lifecycle:** Loading precedes parsing; host closure is guaranteed in finally.
-  An active failure takes precedence over secondary closure failures.
-  No terminal driver, filesystem, thread, network, replay, or live-tail ownership.
-- **Verification:** Public API/engine, cursor/folding, search, deterministic sample,
-  and standalone integration tests; README and design-system behavior contract.
+- **Responsibility:** Coordinate one immutable snapshot through the selected host-driven view.
+- **Supported surface:** Private `view_jsonl(source, spec, host)`; source/return/close contracts unchanged.
+- **Direct internal dependencies:** `contracts`, `_input`, `_model`, `_render`, `_controls`, `_browser`.
+- **State/resources:** Owns one parse diagnostic and the once-only host close boundary for both
+  compatibility record mode and generic inspection mode. Legacy navigation stays in `_controls`;
+  generic committed/draft state stays in `_browser`. Renderer sessions remain call-local.
+  No terminal mode, file, network, thread, callback, or persistence ownership.
+- **Verification:** Existing engine/cursor/navigation/cache tests; inspection UI and lifecycle tests.
+
+## Generic inspection subsystem
+
+The inspection subsystem consumes bounded immutable data. It owns no consumer
+identity, lifecycle, status semantics, preset detection or executable callback.
+
+### `jsonl_viewer.inspection`
+
+- **Source:** `src/jsonl_viewer/inspection.py`
+- **Responsibility:** Declare bounded immutable generic inspection descriptors.
+- **Supported surface:** Intentional public submodule exposing Context, Group,
+  Section, Facet/Option, SearchScope/Target/DecodeJson, Inspection and Missing.
+- **Direct internal dependencies:** None.
+- **State/resources:** Inert values and incremental metadata validation; no I/O.
+- **Verification/docs:** Inspection contract tests and `docs/inspection.md`.
+
+### `jsonl_viewer._catalog`
+
+- **Source:** `src/jsonl_viewer/_catalog.py`
+- **Responsibility:** Bind generic descriptors to original snapshot references.
+- **Supported surface:** Internal `bind_catalog`; no consumer import contract.
+- **Direct internal dependencies:** `inspection`, `_model`, `_json`.
+- **State/resources:** View-local indexes and bounded shared selector-prefix
+  resolution; original records remain unchanged. Original typed targets and
+  explicitly declared unavailable metadata are retained separately from eager
+  resolution diagnostics; query coverage is recomputed for selected targets.
+- **Verification/docs:** Inspection query/contract tests and all-root cases;
+  `docs/inspection.md` describes the generic binding contract.
+
+### `jsonl_viewer._query`
+
+- **Source:** `src/jsonl_viewer/_query.py`
+- **Responsibility:** Calculate typed filters and source-referenced literal results.
+- **Supported surface:** Internal `evaluate`; no consumer import contract.
+- **Direct internal dependencies:** `inspection`, `_catalog`, `_model`, `_search`.
+- **State/resources:** Pure candidate results; committed state is never mutated. Scoped queries
+  delegate one original-record traversal to `_search`, preserving typed selector
+  representation and original depth; no independent ordering decode occurs.
+- **Verification/docs:** Inspection query/source-span cases; `docs/inspection.md`.
+
+### `jsonl_viewer._controls`
+
+- **Source:** `src/jsonl_viewer/_controls.py`
+- **Responsibility:** Apply validated JSON navigation and prompt transitions.
+- **Supported surface:** Internal transition helpers; no consumer import contract.
+- **Direct internal dependencies:** `contracts`, `_model`, `_mouse`, `_render`, `_search`.
+- **State/resources:** Immutable cursor/fold/page/prompt changes; no host or
+  terminal acquisition. Historical private engine aliases remain test-only.
+- **Verification/docs:** Existing engine/navigation/cache tests and design system.
+
+### `jsonl_viewer._browser_render`
+
+- **Source:** `src/jsonl_viewer/_browser_render.py`
+- **Responsibility:** Present generic inspection chrome and semantic detail panes.
+- **Supported surface:** Internal `render_browser`; no consumer import contract.
+- **Direct internal dependencies:** `contracts`, `_catalog`, `_model`, `_render`, `_cell_layout`.
+- **State/resources:** Deterministic bounded frames and renderer-owned hit regions.
+- **Verification/docs:** Inspection UI/Unicode/plain/resize tests and generic samples.
+
+### `jsonl_viewer._browser`
+
+- **Source:** `src/jsonl_viewer/_browser.py`
+- **Responsibility:** Coordinate transient generic inspection interactions.
+- **Supported surface:** Internal controller; no consumer import contract.
+- **Direct internal dependencies:** `contracts`, `_catalog`, `_query`,
+  `_browser_render`, `_controls`, `_model`, `_mouse`, `_render`, `_search`.
+- **State/resources:** Call-local list/detail/modal drafts, prepared-data host
+  interaction only; no terminal acquisition or close ownership. Descriptor-free
+  viewing starts in detail for source-visible one-shot output; explicit
+  Inspection starts in the list. The engine owns the outer close boundary.
+- **Verification/docs:** Inspection UI/mouse/keyboard/lifecycle tests;
+  `docs/inspection.md` and generic design samples.
