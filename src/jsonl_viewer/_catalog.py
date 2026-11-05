@@ -9,7 +9,7 @@ from ._json import Expansion, ExpansionBudget, expand_json_string
 from ._model import JSONPath, JSONValue, Snapshot
 from .inspection import (
     Context, DecodeJson, Facet, Group, Inspection, MISSING, MAX_FACETS,
-    MAX_OPTIONS, Option, Scalar, scalar_key,
+    MAX_OPTIONS, Option, Scalar, Target, scalar_key,
 )
 
 
@@ -38,6 +38,8 @@ class BoundScope:
     label: str
     roots: tuple[tuple[int, JSONPath, JSONValue], ...]
     unavailable: tuple[tuple[int, str], ...] = ()
+    targets: tuple[Target, ...] = ()
+    declared_unavailable: tuple[tuple[int, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,11 +177,13 @@ def bind_catalog(snapshot: Snapshot, description: Inspection | None) -> Catalog:
     for scope in description.scopes:
         roots: list[tuple[int, JSONPath, JSONValue]] = []
         unavailable: list[tuple[int, str]] = []
+        declared_unavailable: list[tuple[int, str]] = []
         root_ids: set[tuple[int, tuple]] = set()
         for ref, reason in scope.unavailable:
             if ref not in refs:
                 raise ValueError("scope contains an unknown record reference")
             unavailable.append((refs[ref], reason))
+            declared_unavailable.append((refs[ref], reason))
         for target in scope.targets:
             if target.record not in refs:
                 raise ValueError("scope contains an unknown record reference")
@@ -222,5 +226,6 @@ def bind_catalog(snapshot: Snapshot, description: Inspection | None) -> Catalog:
             elif (index, target.path) not in root_ids:
                 roots.append((index, tuple(path), value))
                 root_ids.add((index, target.path))
-        scopes.append(BoundScope(scope.id, scope.label, tuple(roots), tuple(unavailable)))
+        scopes.append(BoundScope(scope.id, scope.label, tuple(roots), tuple(unavailable),
+                                 scope.targets, tuple(declared_unavailable)))
     return Catalog(tuple(items), tuple(completed_facets), tuple(scopes), tuple(record_items), notices)

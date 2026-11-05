@@ -191,22 +191,32 @@ def _detail_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: 
                   spec: ViewerSpec, frame: BrowserFrame, session: RenderSession) -> BrowserState:
     if frame.detail is None:
         return state
-    detail, _ = _transition(state.detail, event, snapshot, spec,
+    action = event
+    if event.startswith("text\t"):
+        action = {"h":"cursor_left", "j":"cursor_down", "k":"cursor_up", "l":"cursor_right",
+                  "m":"toggle_mode", "J":"next_sibling", "K":"previous_sibling",
+                  " ":"page_down", "b":"page_up"}.get(event[5:], event)
+    elif event.startswith("mouse\t"):
+        mouse = parse_mouse(event)
+        if mouse is not None and mouse.action in {"cursor_up", "cursor_down"}:
+            action = mouse.action
+    action = {"left":"scroll_left", "right":"scroll_right"}.get(action, action)
+    detail, _ = _transition(state.detail, action, snapshot, spec,
                             page_size=frame.detail.body_rows,
                             selected_line_count=frame.detail.selected_line_count,
                             rendered=frame.detail, session=session)
     allowed = tuple(record for index in state.result.items for record in catalog.items[index].records)
     if detail.selected_index not in allowed:
-        forward = event not in {"up", "page_up", "cursor_up", "cursor_left", "text\th", "text\tk"}
+        forward = action not in {"up", "page_up", "cursor_up", "cursor_left"}
         candidates = [i for i in allowed if i > state.detail.selected_index] if forward else [i for i in allowed if i < state.detail.selected_index]
         index = (min(candidates) if forward else max(candidates)) if candidates else (min(allowed) if forward else max(allowed))
         offset, cursor = 0, None
-        if event in {"page_up", "cursor_up", "cursor_left", "text\th", "text\tk", "text\tb"}:
+        if action in {"page_up", "cursor_up", "cursor_left"}:
             projection = session.projection(snapshot.records[index], index, spec, detail)
             last = projection.navigable_rows[-1] if projection.navigable_rows else 0
             offset = max(0, len(projection.lines) - frame.detail.body_rows)
             column = detail.preferred_column
-            if event in {"cursor_left", "text\th"}:
+            if action == "cursor_left":
                 column = max(0, sum(_text_cells(segment.text) for segment in projection.lines[last].segments) - 1)
             cursor = CursorPosition(index, last, column or 0)
         detail = replace(detail, selected_index=index, cursor=cursor, record_line_offset=offset,
@@ -367,7 +377,9 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
                        section=(state.section + (1 if key == "]" else -1)) % count, focus="detail"), False
     if state.focus == "list" and key in {"up", "down", "page_up", "page_down"}:
         return _move_item(state, catalog, -1 if key in {"up", "page_up"} else 1), False
-    if key in {"up", "down", "page_up", "page_down", "cursor_left", "cursor_right",
+    if key in {"left", "right"}:
+        detail_event = "scroll_" + key
+    elif key in {"up", "down", "page_up", "page_down", "cursor_left", "cursor_right",
                "cursor_up", "cursor_down", "toggle_fold", "next_sibling", "previous_sibling",
                "scroll_left", "scroll_right"}:
         detail_event = key
@@ -388,7 +400,7 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
 def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                  diagnostic: InputDiagnostic | None = None) -> None:
     """Run without acquiring or closing the caller-owned host."""
-    catalog = bind_catalog(snapshot, spec.inspection)
+    catalog = bind_catalog(snapshot, None if diagnostic is not None else spec.inspection)
     filters = tuple(frozenset() for _ in catalog.facets)
     state = BrowserState(filters=filters, draft_filters=filters,
                          result=evaluate(snapshot, catalog, filters, None),

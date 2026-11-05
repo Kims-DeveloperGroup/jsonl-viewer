@@ -5,31 +5,11 @@ from __future__ import annotations
 from dataclasses import replace
 
 from ._catalog import Catalog
-from ._json import Expansion, ExpansionBudget, expand_json_string
 from ._model import JSONPath, JSONValue, Occurrence, QueryResult, Record, SearchState, Snapshot
-from ._search import MAX_OCCURRENCES, SearchLimitError, find_matches
+from ._search import MAX_OCCURRENCES, SearchLimitError, find_matches, find_scoped_matches
 from .inspection import scalar_key
 
 
-def _path_ranks(value: JSONValue) -> dict[JSONPath, int]:
-    ranks: dict[JSONPath, int] = {}
-    budget = ExpansionBudget()
-
-    def visit(current: JSONValue, path: JSONPath) -> None:
-        ranks.setdefault(path, len(ranks))
-        if isinstance(current, dict):
-            for key, child in current.items():
-                visit(child, path + (key,))
-        elif isinstance(current, list):
-            for index, child in enumerate(current):
-                visit(child, path + (index,))
-        elif isinstance(current, str):
-            expanded = expand_json_string(current, display_depth=len(path) + 1, budget=budget)
-            if isinstance(expanded, Expansion):
-                visit(expanded.value, path)
-
-    visit(value, ())
-    return ranks
 
 
 def evaluate(
@@ -92,21 +72,10 @@ def evaluate(
             add(index, (), snapshot.records[index].value)
     else:
         scope = catalog.scopes[scope_index]
-        covered: dict[int, set[JSONPath]] = {}
-        for index, path, value in sorted(scope.roots, key=lambda row: (row[0], len(row[1]))):
-            if index in eligible:
-                paths = covered.setdefault(index, set())
-                if any(path[:length] in paths for length in range(len(path) + 1)):
-                    continue
-                paths.add(path)
-                add(index, path, value)
-        unavailable = tuple(dict.fromkeys(row for row in scope.unavailable if row[0] in eligible))
-        ranks = {index: _path_ranks(snapshot.records[index].value)
-                 for index in {hit.record_index for hit in occurrences}}
-        occurrences.sort(key=lambda hit: (
-            hit.record_index, ranks[hit.record_index].get(hit.path, 0),
-            0 if hit.kind == "key" else 1, hit.start,
-        ))
+        scoped, current_unavailable = find_scoped_matches(snapshot, query, scope.targets, eligible)
+        occurrences.extend(scoped)
+        declared = tuple(row for row in scope.declared_unavailable if row[0] in eligible)
+        unavailable = tuple(dict.fromkeys(declared + current_unavailable))
     search = SearchState(query, tuple(occurrences), 0 if occurrences else None)
     matching = {catalog.record_items[hit.record_index] for hit in occurrences}
     result_items = tuple(index for index in filtered if index in matching)

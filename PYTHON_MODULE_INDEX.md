@@ -32,11 +32,11 @@ _browser -> contracts / _catalog / _query / _browser_render / _controls
          -> _model / _mouse / _render / _search
 _browser_render -> contracts / _catalog / _model / _render / _cell_layout
 _catalog -> inspection / _model / _json
-_query -> inspection / _catalog / _model / _json / _search
+_query -> inspection / _catalog / _model / _search
 _controls -> contracts / _model / _mouse / _render / _search
 contracts -> inspection
 _render -> contracts / _model / _json / _cell_layout
-_search -> _model / _json
+_search -> inspection / _model / _json
 _json / _input / _mouse -> _model
 _terminal -> contracts / engine / _mouse / _cell_layout
           -> _input_sources / platform _input_sources_macos / _input_sources_linux
@@ -397,7 +397,9 @@ identity, lifecycle, status semantics, preset detection or executable callback.
 - **Supported surface:** Internal `bind_catalog`; no consumer import contract.
 - **Direct internal dependencies:** `inspection`, `_model`, `_json`.
 - **State/resources:** View-local indexes and bounded shared selector-prefix
-  resolution; original records remain unchanged.
+  resolution; original records remain unchanged. Original typed targets and
+  explicitly declared unavailable metadata are retained separately from eager
+  resolution diagnostics; query coverage is recomputed for selected targets.
 - **Verification/docs:** Inspection query/contract tests and all-root cases;
   `docs/inspection.md` describes the generic binding contract.
 
@@ -406,8 +408,10 @@ identity, lifecycle, status semantics, preset detection or executable callback.
 - **Source:** `src/jsonl_viewer/_query.py`
 - **Responsibility:** Calculate typed filters and source-referenced literal results.
 - **Supported surface:** Internal `evaluate`; no consumer import contract.
-- **Direct internal dependencies:** `inspection`, `_catalog`, `_model`, `_json`, `_search`.
-- **State/resources:** Pure candidate results; committed state is never mutated.
+- **Direct internal dependencies:** `inspection`, `_catalog`, `_model`, `_search`.
+- **State/resources:** Pure candidate results; committed state is never mutated. Scoped queries
+  delegate one original-record traversal to `_search`, preserving typed selector
+  representation and original depth; no independent ordering decode occurs.
 - **Verification/docs:** Inspection query/source-span cases; `docs/inspection.md`.
 
 ### `jsonl_viewer._controls`
