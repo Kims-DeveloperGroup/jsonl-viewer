@@ -21,6 +21,12 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `malformed-input.txt`
 - `tiny-terminal.txt`
 - `plain-no-color.txt`
+- `generic-inspection.txt` — identity-free audit groups, four arbitrary sections,
+  and an independent record
+- `generic-filter-draft.txt` — a field selection returned to an unapplied filter
+  draft while the committed search remains unchanged
+- `generic-scoped-search.txt` — a literal message-range hit, original source
+  identity, related nonmatching record, and current occurrence position
 
 `tests/test_documented_samples.py` reconstructs every frame through the public
 API and compares it byte for byte. ANSI is code-native rather than stored as

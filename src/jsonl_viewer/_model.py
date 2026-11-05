@@ -167,3 +167,57 @@ class RenderResult:
     max_horizontal_offset: int = 0
     body_width: int = 74
     gutter_columns: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class QueryResult:
+    filtered: tuple[int, ...]
+    items: tuple[int, ...]
+    search: SearchState | None
+    matching_records: int = 0
+    unavailable: tuple[tuple[int, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserState:
+    filters: tuple[frozenset[int], ...] = ()
+    query: str | None = None
+    scope: int = -1
+    result: QueryResult | None = None
+    selected: int = 0
+    section: int = 0
+    focus: str = "list"
+    detail: ViewState = ViewState()
+    panel: str | None = None
+    panel_index: int = 0
+    field: int = 0
+    draft_filters: tuple[frozenset[int], ...] = ()
+    draft_options: frozenset[int] = frozenset()
+    draft_query: PromptState = PromptState("search_query")
+    draft_scope: int = -1
+    reset_all: bool = False
+    error: str | None = None
+    notice: str | None = None
+    diagnostic: InputDiagnostic | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserHit:
+    kind: str
+    index: int
+    row: int
+    column: int
+    width: int
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserFrame:
+    text: str
+    detail: RenderResult | None = None
+    detail_row: int = 0
+    detail_column: int = 0
+    hits: tuple[BrowserHit, ...] = ()
+    columns: int = 80
+    rows: int = 24
+    color: bool = False
+    body_row: int = 0

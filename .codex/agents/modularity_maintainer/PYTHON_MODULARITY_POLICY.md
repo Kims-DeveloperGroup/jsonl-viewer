@@ -147,8 +147,22 @@ It is descriptive current-state navigation, not a plan or history.
 - Provider/source-controlled text MUST be safely neutralized before terminal
   rendering. Unicode cell clipping and truncation markers MUST be deterministic
   and source-preserving.
-- Search MUST use bounded literal full-text substring matching only; field/path
-  selectors and arbitrary expression/evaluation languages are prohibited.
+- Search query text MUST remain bounded literal substring text. User query
+  field/path syntax and arbitrary expression/evaluation languages are prohibited.
+- A caller MAY supply immutable, bounded SearchScope descriptors selecting
+  explicit source references, key/index paths, and strict DecodeJson steps.
+  These are data selections, never executable predicates, provider parsers,
+  runtime callbacks, or a scripting/configuration language. Original all-text
+  search MUST retain its source semantics and MUST NOT include synthetic labels.
+- Group, section, facet, scope, and context descriptors MUST remain generic
+  values. The engine MUST NOT encode an embedding application's lifecycle,
+  expected event roles, status enums, completeness, schemas, or authority rules.
+  Those meanings belong to the caller; descriptor labels are opaque text.
+- This narrowly scoped descriptor allowance implements Issue #43's accepted
+  contract. It affects the generic library/CLI and legacy facade; source-ref,
+  limit, scoped-search, and legacy regression tests contain it. Retire the
+  allowance if explicit SearchScope support is removed; it grants no authority
+  for expression queries, dynamic loading, network access, or persistence.
 
 ## Verification and change workflow
 

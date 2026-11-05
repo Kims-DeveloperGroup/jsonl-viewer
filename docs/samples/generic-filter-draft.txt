@@ -1,0 +1,24 @@
+JSONL Viewer · READ ONLY
+Filters — changes apply only with Apply
+Search: None in All text — unchanged
+> Level: [Error]
+  [Apply]
+  [Reset filters]
+  [Reset all]
+  [Cancel]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Changes not applied
+↑/↓ move · Enter choose · Tab actions · Esc cancel

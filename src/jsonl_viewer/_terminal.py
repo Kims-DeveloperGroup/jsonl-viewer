@@ -446,7 +446,7 @@ class _TerminalHost:
         if received > 32:
             return _INVALID_MOUSE if resumed else "key\tunknown_escape"
         key = {
-            "[A": "up", "OA": "up", "[B": "down", "OB": "down",
+            "[Z": "shift_tab", "[A": "up", "OA": "up", "[B": "down", "OB": "down",
             "[C": "right", "OC": "right", "[D": "left", "OD": "left",
             "[H": "home", "OH": "home", "[1~": "home", "[7~": "home",
             "[F": "end", "OF": "end", "[4~": "end", "[8~": "end",
@@ -489,6 +489,7 @@ class _TerminalHost:
         if character == "\x1b":
             return self._escape_event()
         controls = {
+            "\t": "tab",
             "\r": "enter", "\n": "enter", "\x08": "backspace", "\x7f": "backspace",
             "\x01": "ctrl_a", "\x05": "ctrl_e", "\x15": "ctrl_u", "\x0b": "ctrl_k", "\x17": "ctrl_w",
         }

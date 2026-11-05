@@ -651,57 +651,40 @@ application's GUI.
 6. The adapter restores its terminal. The file bytes remain unchanged; frame,
    prompt-draft, and viewer state are discarded.
 
-## End-to-end Story-hosted `/exchanges` scenario
+## End-to-end embedded audit scenario
 
-This is a hosting use case. Story owns the surrounding application flow and
-supplies generic inputs through the viewer's public contract:
+An embedding application prepares one immutable snapshot and optional generic
+inspection descriptors before opening the viewer. No application runtime object,
+lookup callback, schema validator or lifecycle rule crosses the boundary.
 
-1. In a Story session, the user enters `/exchanges` with no identifier
-   arguments. Story opens a scope picker whose rows use the full label
-   `Conversation FULL_ID — subject` or `Debate FULL_ID — subject`.
-2. Canceling that picker returns to Story without opening the viewer. After a
-   scope is chosen, Story opens its agent picker; canceling there returns to
-   the prior Story surface without constructing a view.
-3. Story acquires the selected agent's bounded immutable JSONL bytes and builds
-   a generic `ViewerSpec`. It supplies the Story session ID, exact agent ID,
-   full selected scope ID as `conversation_id`, exact kind as
-   `conversation_label`, and subject as `conversation_subject`. The viewer
-   header therefore reads
-   `Conversation: FULL_ID — subject` or `Debate: FULL_ID — subject`;
-   Story does not concatenate the kind or subject into the
-   ID. The package does not interpret those generic values and shortens them
-   only through content-safe responsive width clipping. Each supplied header
-   string is limited to 512 characters.
-4. An integration using 0.6.0 may lend `ViewerTerminal` streams and its
-   persistent character reader to `view_jsonl(..., terminal=terminal,
-   transient_only=True)`. Story keeps its lobby echo guard and pauses its input
-   operations; jsonl-viewer owns the viewer's raw mode, alternate screen, mouse
-   reporting, physical decoding and cleanup. The engine owns cursor movement,
-   key bindings, search/goto drafts and cancellation. The injected `ViewerHost`
-   path remains available to integrations retaining their own terminal ownership.
-   Adopting applications update dependency and exact public-signature checks.
-5. A provider exchange whose `content` string is a complete JSON object is
-   displayed as derived structure; a complete encoded `response_text` object
-   inside it expands recursively. The literal expansion cues and footer counts
-   distinguish that view from the unchanged source string.
-6. The user confirms session/scope/agent context, presses `/`, and submits
-   a full-text query. The viewer searches bounded decoded children, focuses
-   each occurrence as `⟦keyword⟧`, reports `i/N occurrences`, and owns
-   `n`/`N` traversal and hidden-hit Verbose promotion. The user can go to
-   a source line, switch mode, inspect help, or use Escape to dismiss help,
-   search, then status; an Escape with nothing transient closes.
-7. Long nested string leaves receive independent retained/full byte markers;
-   their parent objects, keys, siblings, and closing structure remain present
-   and pageable. If a safety bound rejects an expansion, the user sees the
-   reason and the bounded original string rather than a partial object.
-8. On `q`, EOF, final Escape, interruption or failure, the library closes
-   the view, disables its mouse modes and restores the saved terminal/screen.
-   Story resumes its guarded lobby input after cleanup, without another screen
-   lifecycle or an ECHO-enabled input gap. Ordinary wheel input inside the view
-   moves its cursor instead of terminal history; left presses target JSON cells.
-9. Story owns the pickers, labels, snapshot location, and retention policy. No
-   request, response, picker choice, or viewer state is modified or persisted
-   by the viewer package.
+1. The host selects its audit dataset outside the viewer and supplies original
+   bytes plus exact source references. Optional Context values describe the
+   dataset. A generic view also works without context or grouping.
+2. Group descriptors may connect noncontiguous audit events. Repeated event kinds
+   and any number of detail sections are ordinary data. Records outside groups
+   remain independent items rather than one implicit missing-key group.
+3. The application supplies level/backend facets and message search ranges using
+   inert labels, typed scalar values, and explicit selectors. The viewer knows
+   their selection mechanics, not what those values mean to the application.
+4. The user searches a phrase in a named range and selects a matching item. All
+   related source records remain accessible. Item traversal and occurrence
+   traversal are separate; full source identities remain stable.
+5. The user opens a facet field, modifies its draft, cancels only that field, and
+   then applies another change. Whole-panel cancellation restores prior committed
+   conditions, selection and scroll. Reset actions require Apply.
+6. Narrow layouts alternate list and detail through focus switching. Resize,
+   plain/NO_COLOR and Unicode input preserve data and draft state. Missing ranges,
+   incomplete coverage and empty results remain distinct.
+7. An injected ViewerHost retains complete terminal ownership. A viewer-owned
+   call can instead receive ViewerTerminal and transient_only=True; the existing
+   terminal adapter owns acquisition and restoration exactly once.
+8. Closing or failing discards view state and returns the terminal. The host
+   remains responsible for its data selection and retention. The library neither
+   persists conditions nor performs application work.
+
+See [Generic inspection](inspection.md) for the public descriptor example and
+independent acceptance. Application-specific profiles and workflows belong in
+that application's own documentation and repository.
 
 ## Circular record traversal
 

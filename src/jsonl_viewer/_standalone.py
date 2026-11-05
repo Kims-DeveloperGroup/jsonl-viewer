@@ -19,10 +19,10 @@ def _parser() -> argparse.ArgumentParser:
         description="View one immutable strict UTF-8 JSONL snapshot.",
     )
     parser.add_argument("path", help="JSONL path, or - to snapshot standard input")
-    parser.add_argument("--session", required=True, help="header session value")
+    parser.add_argument("--session", required=False, help="header session value")
     parser.add_argument(
         "--conversation",
-        required=True,
+        required=False,
         help="header conversation/scope ID",
     )
     parser.add_argument(
@@ -34,7 +34,7 @@ def _parser() -> argparse.ArgumentParser:
         "--conversation-subject",
         help="optional header scope subject",
     )
-    parser.add_argument("--agent", required=True, help="header agent value")
+    parser.add_argument("--agent", required=False, help="header agent value")
     parser.add_argument("--date-time-field", default="timestamp")
     parser.add_argument("--request-type-field", default="request_type")
     parser.add_argument("--content-field", default="content")

@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Protocol, TextIO
 
+from .inspection import Context, Inspection
+
 
 _MAX_HEADER_VALUE_CHARACTERS = 512
 _MAX_FIELD_CHARACTERS = 128
@@ -30,15 +32,16 @@ def _validate_field(value: object, *, label: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ViewerSpec:
-    """Describe one generic immutable view with unrestricted literal search.
+    """Describe an immutable view with optional generic inspection metadata.
 
-    Primary display fields identify exact top-level keys supplied by the
-    embedding application; search always covers full text.
+    With no historical identity headers, every JSON field remains visible in
+    Simple mode. Context and inspection descriptors are inert values. Legacy
+    three-header calls retain their projection and terminal behavior.
     """
 
-    session_id: str
-    conversation_id: str
-    agent_id: str
+    session_id: str | None = None
+    conversation_id: str | None = None
+    agent_id: str | None = None
     date_time_field: str = "timestamp"
     request_type_field: str = "request_type"
     content_field: str = "content"
@@ -46,16 +49,27 @@ class ViewerSpec:
     conversation_label: str = "Conversation"
     conversation_subject: str | None = None
     input_protocol: str = "semantic"
+    context: tuple[Context, ...] = ()
+    inspection: Inspection | None = None
 
     def __post_init__(self) -> None:
         if type(self.input_protocol) is not str or self.input_protocol not in {
             "semantic", "keys"
         }:
             raise ValueError("input_protocol must be 'semantic' or 'keys'")
+        legacy = (self.session_id, self.conversation_id, self.agent_id)
+        if any(value is not None for value in legacy):
+            if any(value is None for value in legacy):
+                raise ValueError("legacy headers require all three values")
+            for value in legacy:
+                _validate_header_value(value, label="legacy header")
+        if type(self.context) is not tuple or len(self.context) > 64 or any(
+            type(item) is not Context for item in self.context
+        ):
+            raise TypeError("context must be a bounded tuple of Context values")
+        if self.inspection is not None and type(self.inspection) is not Inspection:
+            raise TypeError("inspection must be an Inspection or None")
         for attribute, label in (
-            ("session_id", "session_id"),
-            ("conversation_id", "conversation_id"),
-            ("agent_id", "agent_id"),
             ("title", "title"),
             ("conversation_label", "conversation_label"),
         ):
@@ -90,14 +104,33 @@ class ViewerSpec:
         object.__setattr__(self, "content_field", primary[2])
 
     @property
-    def primary_fields(self) -> tuple[str, str, str]:
+    def primary_fields(self) -> tuple[str, ...]:
         """Return the exact Simple-mode field priority."""
 
         return (
             self.date_time_field,
             self.request_type_field,
             self.content_field,
-        )
+        ) if self.session_id is not None and self.inspection is None else ()
+
+    @property
+    def display_context(self) -> tuple[Context, ...]:
+        """Convert historical header inputs at the compatibility boundary."""
+        if self.session_id is None:
+            return self.context
+        subject = self.conversation_id
+        if self.conversation_subject is not None:
+            subject = f"{subject} — {self.conversation_subject}"
+        return (
+            Context("Session", self.session_id, "S"),
+            Context(self.conversation_label, subject),
+            Context("Agent", self.agent_id, "A"),
+        ) + self.context
+
+    @property
+    def inspection_enabled(self) -> bool:
+        """Keep selection of the compatibility path outside reusable engines."""
+        return self.inspection is not None or self.session_id is None
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +190,7 @@ class ViewerHost(Protocol):
     Key names are ``enter``, ``escape``, ``unknown_escape``, ``backspace``,
     ``delete``, ``left``, ``right``, ``home``, ``end``, ``up``, ``down``,
     ``page_up``, ``page_down``, ``ctrl_a``, ``ctrl_e``, ``ctrl_u``, ``ctrl_k``,
-    ``ctrl_w``, ``interrupt``, ``eof``, and ``unknown``. Hosts decode physical
+    ``ctrl_w``, ``tab``, ``shift_tab``, ``space``, ``interrupt``, ``eof``, and ``unknown``. Hosts decode physical
     controls and bounded escape sequences without applying viewer actions.
     EOF closes the view. Interrupt closes an active prompt's view and otherwise
     applies semantic cancel. Bare or unsupported Escape cancels only
