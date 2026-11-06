@@ -3,26 +3,26 @@ Dataset: Audit events
 Search: 'timeout' | In: Messages · / Edit · c Clear
 Filters(0): All · f Edit
 Groups/records: 2 total · 2 filtered · 1 matched · 1 records · 1 occurrences
-> Trace A                                      │ Open | [Reads] | Writes | Close | 
-  R2 ('message',): ⟦timeout⟧                   │ group:trace-a · a annotations
-                                               │ @ R2 L 7 │ {
-                                               │ @    L 8 │   "trace": "a",
-                                               │ @    L 9 │   "kind": "read",
-                                               │ @    L10 │   "level": "error",
-                                               │ @    L11 │   "message": "⟦timeout⟧"
-                                               │                           ^
-                                               │ @    L12 │ }
-                                               │ 
-                                               │   R4 L17 │ {
-                                               │      L18 │   "trace": "a",
-                                               │      L19 │   "kind": "read",
-                                               │      L20 │   "level": "warn",
-                                               │      L21 │   "message": "retry"
-                                               │      L22 │ }
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-Occurrence 1/1 · Focus: List · 
-Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close
+Open | [Reads] | Writes | Close | 
+group:trace-a · a annotations
+@ R2 L 7 │ {
+@    L 8 │   "trace": "a",
+@    L 9 │   "kind": "read",
+@    L10 │   "level": "error",
+@    L11 │   "message": "⟦timeout⟧"
+                          ^
+@    L12 │ }
+
+  R4 L17 │ {
+     L18 │   "trace": "a",
+     L19 │   "kind": "read",
+     L20 │   "level": "warn",
+     L21 │   "message": "retry"
+     L22 │ }
+
+
+
+
+
+Occurrence 1/1 · Focus: Detail · 
+Single · v layout · Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close

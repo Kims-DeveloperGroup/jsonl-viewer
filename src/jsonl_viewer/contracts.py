@@ -216,6 +216,8 @@ class ViewerHost(Protocol):
     help, goto, and other viewer states. Search validation errors retain text
     mode. The host owns any resulting keyboard-source changes and restoration.
     Existing five-method hosts require no additional method or resource work.
+    Generic inspection additionally accepts the semantic ``toggle_layout``
+    event in its main view. Layout remains private, per-view state.
     """
 
     def terminal_size(self) -> tuple[int, int]:

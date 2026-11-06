@@ -672,7 +672,10 @@ lookup callback, schema validator or lifecycle rule crosses the boundary.
 5. The user opens a facet field, modifies its draft, cancels only that field, and
    then applies another change. Whole-panel cancellation restores prior committed
    conditions, selection and scroll. Reset actions require Apply.
-6. Narrow layouts alternate list and detail through focus switching. Resize,
+6. Single opens in full-width detail and alternates list/detail through focus
+   switching at every width. Main-view `v` selects optional Split, with a fixed
+   left list at 120 columns and 12 rows or larger. Compact fallback preserves
+   that preference and widening restores Split. Focus/layout changes and resize,
    plain/NO_COLOR and Unicode input preserve data and draft state. Missing ranges,
    incomplete coverage and empty results remain distinct.
 7. An injected ViewerHost retains complete terminal ownership. A viewer-owned

@@ -186,7 +186,8 @@ class BrowserState:
     result: QueryResult | None = None
     selected: int = 0
     section: int = 0
-    focus: str = "list"
+    focus: str = "detail"
+    layout: str = "single"
     detail: ViewState = ViewState()
     panel: str | None = None
     panel_index: int = 0
