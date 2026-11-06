@@ -36,6 +36,7 @@ class PaintedClick:
     row_contains: str
     target: str
     button: int = 0
+    checkpoint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,8 @@ class InteractiveHost(FakeHost):
             self._size = event
             return "idle"
         if isinstance(event, PaintedClick):
-            for row, line in enumerate(strip_ansi(self.frames[-1]).splitlines(), 1):
+            frame = self.checkpoints[event.checkpoint] if event.checkpoint else self.frames[-1]
+            for row, line in enumerate(strip_ansi(frame).splitlines(), 1):
                 if event.row_contains in line and event.target in line:
                     column = _text_cells(line[:line.index(event.target)]) + 1
                     return f"mouse\t{event.button}\t{column}\t{row}\tpress"

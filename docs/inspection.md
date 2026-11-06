@@ -7,7 +7,8 @@ label is ordinary caller-supplied data.
 
 The ordinary record view starts in source detail, so a one-shot file/stdin view
 shows the original value even at compact widths. Explicit inspection profiles
-start with list focus. The ordinary record view accepts every JSON root. Grouping and contextual
+also start in full-width detail, with the first retained record selected.
+The ordinary record view accepts every JSON root. Grouping and contextual
 metadata are optional. A generic view needs no session, conversation, or agent
 identity. Legacy display headers remain a compatibility input rather than a
 requirement of the inspection model.
@@ -149,6 +150,10 @@ occurrences and synchronizes the list, detail section, and focused source
 position. Manual detail navigation can inspect related nonmatching data while
 retaining the query. The next occurrence command reveals its next source hit.
 
+Selecting a different item starts at its first retained record, or its first
+current match while searching. Returning to the list and pressing Enter on the
+unchanged item retains the detail position, selected section and JSON state.
+
 ## Filter drafts
 
 Opening filters copies the committed conditions into a draft. Editing a field
@@ -187,8 +192,9 @@ input behavior remain available.
 | `/` | Edit the query and named scope. |
 | `f` | Open the filter draft. |
 | Tab / Shift+Tab | Switch list/detail focus or move modal focus. |
+| `v` | Switch Single/Split layout in the main view. |
 | Up / Down in the list | Select an item. |
-| Enter in the list | Open its detail or first current match. |
+| Enter in the list | Open the selected item's current detail without resetting its position. |
 | Up / Down in detail | Traverse eligible source records. |
 | `[` / `]` | Select arbitrary detail sections. |
 | `n` / `N` | Reveal the next/previous source occurrence. |
@@ -207,9 +213,23 @@ that local edit; Escape at panel level cancels the entire panel.
 
 ## Geometry, input, and ownership
 
-At 120 terminal cells and above, show list and detail side by side. At narrower
-widths, show one region at a time with focus switching. Resize preserves
-committed state and modal drafts. Panels and option lists scroll internally;
+Single is the default layout: the focused list or detail uses the entire width,
+regardless of terminal size. Tab or Shift+Tab switches screens, and Enter in the
+list opens its detail. There are no separate click-switch buttons. Up/Down selects
+items in the list and traverses eligible source records in detail.
+
+Press `v` in the main view to choose Split. At least 120 columns and 12 rows show
+the existing left list beside detail; the list uses `min(48, columns // 3)` cells
+and remains visible while detail has focus. Smaller terminals show only the
+focused screen without losing the Split preference; widening restores the split.
+The existing footer shows the selected layout and shortcut without another row.
+
+Layout and focus changes preserve the selected record, section, JSON cursor,
+folds, scroll position and committed conditions. Resize reflows the current view
+without resetting those conditions or modal drafts. The letter `v` remains literal
+text while editing a search; modals do not change layout. Layout preference is
+discarded on close, so each new view starts in Single/detail. Panels and option
+lists scroll internally;
 insufficient geometry must not commit a draft automatically.
 
 Keep active-filter counts visible even when the full summary does not fit.

@@ -107,6 +107,7 @@ def _modal(spec: ViewerSpec, catalog: Catalog, state: BrowserState,
         title = "Help"
         entries = [(text, "annotation", -1) for text in (
             "Tab / Shift+Tab: change list/detail focus", "Up/Down: items or original records",
+            "v: toggle Single/Split layout in the main view",
             "Enter: open detail or fold JSON", "h/j/k/l: JSON cursor; J/K: sibling keys",
             "[/]: previous/next detail section", "/: edit literal search and scope",
             "f: filter draft; Apply commits all changes", "n/N: next/previous occurrence",
@@ -175,7 +176,7 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
         if row < len(header):
             hits.append(BrowserHit(kind, 0, row, 0, width))
     body_height = max(1, height - len(header) - 2)
-    split = width >= 120 and height >= 12
+    split = state.layout == "split" and width >= 120 and height >= 12
     show_detail = split or state.focus == "detail"
     left_width = min(48, width // 3) if split else width
     right_width = width - left_width - 3 if split else width
@@ -242,12 +243,17 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
             body.append(_pad(left, left_width) + " │ " + right)
         else:
             body.append(right if show_detail and result.items else left)
+        if split or not show_detail:
+            hits.append(BrowserHit("list_area", -1, len(header) + row, 0, left_width))
     notice = state.error or state.notice or state.detail.message or (catalog.notices[0] if catalog.notices else "")
     if result.unavailable:
         notice = f"Search coverage incomplete: {len(result.unavailable)} target(s) · " + result.unavailable[0][1]
     position = _occurrence(state)
+    layout = "Split" if state.layout == "split" else "Single"
+    if state.layout == "split" and not split:
+        layout = "Split→Single"
     footer = [_fit((position + " · " if position else "") + f"Focus: {state.focus.title()} · {notice}", width),
-              _fit("Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close", width)]
+              _fit(layout + " · v layout · Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close", width)]
     return BrowserFrame("\n".join(header + body + footer), detail_frame,
                         len(header) + detail_top, left_width + 3 if split else 0, tuple(hits),
                         width, height, color, len(header))

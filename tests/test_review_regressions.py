@@ -141,7 +141,7 @@ class BrowserInputReviewTests(unittest.TestCase):
     def test_physical_horizontal_keys_pan_detail_and_still_edit_search_drafts(self):
         payload = "left-window-" + "A" * 80 + "middle-window-" + "B" * 80 + "right-window"
         source = jsonl({"payload": payload, "target": "abcd"})
-        host = self._view(source, ("key\ttab", "key\tdown", Checkpoint("initial"),
+        host = self._view(source, ("key\tdown", Checkpoint("initial"),
                                   *("key\tright" for _ in range(10)), Checkpoint("right"),
                                   *("key\tleft" for _ in range(10)), Checkpoint("left"),
                                   "text\t/", "text\tac", "key\tleft", "text\tb",

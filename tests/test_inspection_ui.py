@@ -47,6 +47,164 @@ class InspectionUiTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(source).digest(), digest)
         return host
 
+    def test_single_starts_at_first_record_after_an_empty_section_and_reaches_scalar(self):
+        source = jsonl({"message": "first-retained"}, {"message": "second-retained"}, "orphan-root")
+        spec = ViewerSpec(inspection=Inspection(groups=(Group("bundle", "Bundle", (1, 2),
+                            sections=(Section("empty", "Empty"), Section("body", "Body", (1, 2)))),)),
+                          input_protocol="keys")
+        host = self._view((Checkpoint("initial"), _key("down"), Checkpoint("second"),
+                           _key("tab"), _key("down"), _key("enter"), Checkpoint("scalar")),
+                          source=source, spec=spec)
+        self.assertIn("Single ·", host.checkpoints["initial"])
+        self.assertIn("Focus: Detail", host.checkpoints["initial"])
+        self.assertIn("[Body]", host.checkpoints["initial"])
+        self.assertNotIn("[Empty]", host.checkpoints["initial"])
+        self.assertIn("first-retained", host.checkpoints["initial"])
+        self.assertIn("second-retained", host.checkpoints["second"])
+        self.assertIn("orphan-root", host.checkpoints["scalar"])
+        self.assertIn("Focus: Detail", host.checkpoints["scalar"])
+
+    def test_layout_commands_remember_split_across_both_compact_thresholds(self):
+        for command in (_text("v"), "line\tv", "toggle_layout"):
+            with self.subTest(command=command):
+                spec = ViewerSpec(inspection=Inspection(), input_protocol="keys")
+                host = self._view((Checkpoint("initial"), command, Checkpoint("split"),
+                                   (119, 12), Checkpoint("compact_detail"), (120, 12),
+                                   _key("tab"), (119, 12), Checkpoint("narrow"),
+                                   (120, 11), Checkpoint("short"), (120, 12), Checkpoint("restored"),
+                                   command, Checkpoint("single_list"), _key("enter"),
+                                   (200, 32), Checkpoint("detail")),
+                                  source=jsonl("layout-marker"), spec=spec, size=(120, 12))
+                self.assertIn("Single ·", host.checkpoints["initial"])
+                self.assertIn("Split ·", host.checkpoints["split"])
+                self.assertIn("Split→Single", host.checkpoints["compact_detail"])
+                self.assertIn("Focus: Detail", host.checkpoints["compact_detail"])
+                for name in ("narrow", "short"):
+                    self.assertIn("Split→Single", host.checkpoints[name])
+                    self.assertIn("Focus: List", host.checkpoints[name])
+                    self.assertNotIn(" │ ", host.checkpoints[name])
+                self.assertIn("Split ·", host.checkpoints["restored"])
+                self.assertIn("Focus: List", host.checkpoints["restored"])
+                self.assertIn("Single ·", host.checkpoints["single_list"])
+                self.assertIn("Focus: Detail", host.checkpoints["detail"])
+                self.assertIn("layout-marker", host.checkpoints["detail"])
+
+    def test_tab_enter_and_layout_roundtrips_preserve_the_current_detail(self):
+        records = list(audit_records())
+        records[6] = dict(records[6], padding="x" * 220,
+                          fold_me={"value": "fold-sentinel"}, rows=list(range(40)))
+        host = self._view((*_severity_error(), *_search("timeout", messages=True),
+                           _text("n"), _text("n"), _text("]"), Checkpoint("written"),
+                           PaintedClick('"fold_me"', '"fold_me"'), _key("enter"),
+                           Checkpoint("folded"), *("cursor_down" for _ in range(28)),
+                           "scroll_right", Checkpoint("before"), _key("tab"), Checkpoint("list"),
+                           _key("enter"), Checkpoint("entered"), _text("v"), _text("v"),
+                           Checkpoint("toggled"), (119, 32), (200, 32), Checkpoint("resized")),
+                          source=jsonl(*records))
+        self.assertIn("[Written]", host.checkpoints["written"])
+        self.assertIn("saved", host.checkpoints["written"])
+        self.assertIn("fold-sentinel", host.checkpoints["written"])
+        self.assertNotIn("fold-sentinel", host.checkpoints["folded"])
+        self.assertNotEqual(without_caret(host.checkpoints["folded"]),
+                            without_caret(host.checkpoints["before"]))
+        self.assertIn("Focus: List", host.checkpoints["list"])
+        for name in ("entered", "toggled", "resized"):
+            self.assertEqual(host.checkpoints["before"], host.checkpoints[name], name)
+            self.assertIn("Occurrence 3/3", host.checkpoints[name])
+            self.assertIn("Severity=Error", host.checkpoints[name])
+            self.assertIn("In: Messages", host.checkpoints[name])
+
+    def test_single_detail_uses_full_width_and_has_no_hidden_list_clicks(self):
+        wide = "FULL_WIDTH_" + "x" * 145 + "_TAIL"
+        source = jsonl({"message": wide}, {"message": "second-source"})
+        spec = ViewerSpec(inspection=Inspection(groups=(Group("first", "First item", (1,)),
+                                                        Group("second", "Second item", (2,)))),
+                          input_protocol="keys")
+        for color in (False, True):
+            with self.subTest(color=color):
+                host = self._view((Checkpoint("single"), _text("v"), Checkpoint("split"),
+                                   _text("v"), PaintedClick("Second item", "Second item", checkpoint="split"),
+                                   Checkpoint("replayed"), _text("v"),
+                                   PaintedClick("Second item", "Second item"), Checkpoint("clicked"),
+                                   _key("enter"), _text("v"), Checkpoint("selected")),
+                                  source=source, spec=spec, color=color)
+                single, split, replayed, selected = (strip_ansi(host.checkpoints[name])
+                                                    for name in ("single", "split", "replayed", "selected"))
+                self.assertIn("_TAIL", single)
+                self.assertNotIn("_TAIL", split)
+                self.assertNotIn("Second item", single)
+                self.assertIn("first · a annotations", replayed)
+                self.assertIn("_TAIL", replayed)
+                self.assertNotIn("second-source", replayed)
+                self.assertIn("Focus: List", strip_ansi(host.checkpoints["clicked"]))
+                self.assertIn("second · a annotations", selected)
+                self.assertIn("second-source", selected)
+                self.assertIn("Focus: Detail", selected)
+                self.assertTrue(all(_text_cells(line) <= 200 for line in selected.splitlines()))
+                if not color:
+                    self.assertNotIn("\x1b", host.checkpoints["single"])
+
+    def test_height_resize_preserves_deep_logical_cursor_and_inspection_state(self):
+        records = list(audit_records())
+        records[6] = dict(records[6], fold_me={"value": "fold-sentinel"},
+                          fields={f"field_{index:02}": f"anchor-{index:02}" for index in range(30)})
+
+        def cursor_anchor(frame, *, split):
+            lines = strip_ansi(frame).splitlines()
+            if split:
+                lines = [line.partition(" │ ")[2] if " │ " in line else line for line in lines]
+            caret = next(index for index, line in enumerate(lines) if line.strip() == "^")
+            self.assertGreater(caret, 0)
+            source_row = lines[caret - 1]
+            column = lines[caret].index("^")
+            self.assertIn('"field_20"', source_row)
+            self.assertEqual(source_row[column:column + len("anchor-20")], "anchor-20")
+
+        for split in (False, True):
+            with self.subTest(split=split):
+                host = self._view((*((_text("v"),) if split else ()), *_severity_error(),
+                                   *_search("timeout", messages=True), _text("n"), _text("n"),
+                                   _text("]"), PaintedClick('"fold_me"', "{"),
+                                   _key("enter"), Checkpoint("folded"),
+                                   PaintedClick('"field_20"', "anchor-20"), Checkpoint("deep"),
+                                   (200, 14), Checkpoint("compact"),
+                                   (200, 50), Checkpoint("restored"), "goto\t7", Checkpoint("fold_check")),
+                                  source=jsonl(*records), size=(200, 50))
+                self.assertIn('"fold_me"', host.checkpoints["folded"])
+                self.assertNotIn("fold-sentinel", host.checkpoints["folded"])
+                for name in ("deep", "compact", "restored"):
+                    frame = host.checkpoints[name]
+                    cursor_anchor(frame, split=split)
+                    self.assertIn("[Written]", frame)
+                    self.assertIn("Severity=Error", frame)
+                    self.assertIn("In: Messages", frame)
+                    self.assertIn("Occurrence 3/3", frame)
+                    self.assertIn("Focus: Detail", frame)
+                    self.assertIn("Split ·" if split else "Single ·", frame)
+                self.assertIn('"fold_me"', host.checkpoints["fold_check"])
+                self.assertNotIn("fold-sentinel", host.checkpoints["fold_check"])
+
+    def test_modal_v_is_text_or_inert_and_empty_results_keep_layout_controls(self):
+        host = self._view((Checkpoint("initial"), _text("/"), _text("v"), Checkpoint("draft"),
+                           "toggle_layout", Checkpoint("inert"), _key("escape"), Checkpoint("cancelled"),
+                           _text("f"), Checkpoint("filters"), _text("v"), "toggle_layout",
+                           Checkpoint("filters_inert"), _key("escape"),
+                           *_search("no-such-layout-match"), Checkpoint("empty_single"),
+                           _text("v"), Checkpoint("empty_split"), _key("tab"), _text("v"),
+                           Checkpoint("empty_list")))
+        self.assertIn("v│", host.checkpoints["draft"])
+        self.assertEqual(host.checkpoints["draft"], host.checkpoints["inert"])
+        self.assertEqual(host.checkpoints["initial"], host.checkpoints["cancelled"])
+        self.assertEqual(host.checkpoints["filters"], host.checkpoints["filters_inert"])
+        line = self._view((_text("/"), "line\tv", Checkpoint("committed")))
+        self.assertIn("Search: 'v'", line.checkpoints["committed"])
+        self.assertIn("Single ·", line.checkpoints["committed"])
+        for name, layout in (("empty_single", "Single ·"), ("empty_split", "Split ·"),
+                             ("empty_list", "Single ·")):
+            self.assertIn("No text matches", host.checkpoints[name])
+            self.assertIn("0 matched", host.checkpoints[name])
+            self.assertIn(layout, host.checkpoints[name])
+
     def test_scope_counts_occurrence_navigation_and_arbitrary_sections(self):
         host = self._view((*_search("timeout", messages=True), Checkpoint("first"),
                            _text("n"), Checkpoint("second"), _text("n"), Checkpoint("third"),
@@ -177,15 +335,16 @@ class InspectionUiTests(unittest.TestCase):
     def test_resize_preserves_draft_and_compact_focus_navigation(self):
         host = self._view((_text("f"), _key("enter"), *(_key("down") for _ in range(3)),
                            _key("space"), _key("enter"), Checkpoint("wide_draft"), (48, 14),
-                           Checkpoint("narrow_draft"), _key("escape"), Checkpoint("list"),
-                           _key("tab"), Checkpoint("detail"), _key("shift_tab"), Checkpoint("list_again")))
+                           Checkpoint("narrow_draft"), _key("escape"), Checkpoint("detail"),
+                           _key("tab"), Checkpoint("list"), _key("shift_tab"), Checkpoint("detail_again")))
         self.assertIn("Severity: [Error]", host.checkpoints["wide_draft"])
         self.assertIn("Severity: [Error]", host.checkpoints["narrow_draft"])
         self.assertIn("Focus: List", host.checkpoints["list"])
         self.assertIn("Focus: Detail", host.checkpoints["detail"])
         self.assertIn('"trace": "alpha"', host.checkpoints["detail"])
-        self.assertIn("Trace Alpha", host.checkpoints["list_again"])
-        for name in ("narrow_draft", "list", "detail", "list_again"):
+        self.assertIn("Trace Alpha", host.checkpoints["list"])
+        self.assertEqual(host.checkpoints["detail"], host.checkpoints["detail_again"])
+        for name in ("narrow_draft", "list", "detail", "detail_again"):
             self.assertTrue(all(_text_cells(line) <= 48 for line in host.checkpoints[name].splitlines()))
 
     def test_plain_and_ansi_frames_keep_equivalent_counts_and_readable_focus(self):
@@ -254,7 +413,7 @@ class InspectionUiTests(unittest.TestCase):
         source = jsonl({"message": "header"}, {"message": "tail-only-unsectioned"})
         spec = ViewerSpec(inspection=Inspection(groups=(Group("bundle", "Bundle", (1, 2),
                             sections=(Section("header", "Header", (1,)),)),)), input_protocol="keys")
-        host = self._view((_key("tab"), _key("down"), Checkpoint("navigation"), "goto\t1", "goto\t2",
+        host = self._view((_key("down"), Checkpoint("navigation"), "goto\t1", "goto\t2",
                            Checkpoint("goto"), *_search("tail-only-unsectioned"), Checkpoint("search")),
                           source=source, spec=spec)
         for name in ("navigation", "goto", "search"):

@@ -18,7 +18,9 @@ from .contracts import ViewerHost, ViewerSpec
 def _select(state: BrowserState, catalog: Catalog, index: int, *, section: int | None = None,
             first_hit: bool = False, focus: str | None = None) -> BrowserState:
     item = catalog.items[index]
-    section_index = min(section if section is not None else 0, len(item.sections) - 1)
+    initial_section = next((i for i, candidate in enumerate(item.sections)
+                            if item.records[0] in candidate.records), 0)
+    section_index = min(section if section is not None else initial_section, len(item.sections) - 1)
     search = state.result.search if state.result else None
     member_set = frozenset(item.records)
     hit = next((h for h in search.occurrences if h.record_index in member_set), None) if search and first_hit else None
@@ -248,7 +250,9 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
         if frame.detail and row >= frame.detail_row and column >= frame.detail_column:
             return _detail_event(replace(state, focus="detail"), event.replace(
                 f"\t{mouse.column}\t{mouse.row}\t", f"\t{mouse.column-frame.detail_column}\t{mouse.row-frame.detail_row}\t"), snapshot, catalog, spec, frame, session)
-        return _move_item(replace(state, focus="list"), catalog, -1 if key == "up" else 1)
+        if hit is not None and hit.kind in {"item", "list_area"}:
+            return _move_item(replace(state, focus="list"), catalog, -1 if key == "up" else 1)
+        return state
     if hit is not None:
         if hit.kind == "field":
             return _open_field(state, hit.index)
@@ -311,6 +315,8 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
             return replace(state, notice="Unsupported line input."), False
         aliases = {"f":"filters", "filters":"filters", "tab":"focus_next", "shift-tab":"focus_previous",
                    "enter":"enter", "space":"space", "[":"section_previous", "]":"section_next", "a":"a"}
+        if state.panel is None:
+            aliases["v"] = "toggle_layout"
         action = aliases.get(command.strip(), _line_action(command))
         if action == "unknown" and state.panel == "search" and state.panel_index == 0:
             inserted, _ = _modal_key(state, "", command, snapshot, catalog)
@@ -325,7 +331,7 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
         key = {"cancel":"escape", "help":"?", "clear_search":"c", "next_match":"n",
                "previous_match":"N", "filters":"f", "begin_filter":"f",
                "focus_next":"tab", "focus_previous":"shift_tab", "section_next":"]",
-               "section_previous":"[", "toggle_mode":"m"}.get(event, event)
+               "section_previous":"[", "toggle_mode":"m", "toggle_layout":"v"}.get(event, event)
     if state.panel:
         return _modal_key(state, key, text, snapshot, catalog)
     if text is not None:
@@ -362,7 +368,12 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     if key in {"a", "?"}:
         return replace(state, panel="annotations" if key == "a" and state.result.items else "help", panel_index=0), False
     if key in {"tab", "shift_tab"}:
-        return replace(state, focus="detail" if state.focus == "list" else "list"), False
+        focus = "detail" if state.focus == "list" else "list"
+        detail = replace(state.detail, reveal_cursor=True) if focus == "detail" else state.detail
+        return replace(state, focus=focus, detail=detail), False
+    if key == "v":
+        layout = "split" if state.layout == "single" else "single"
+        return replace(state, layout=layout, detail=replace(state.detail, reveal_cursor=True)), False
     if key == "c":
         return _commit(state, snapshot, catalog, state.filters, None, state.scope), False
     if key in {"n", "N"}:
@@ -385,7 +396,7 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
         detail_event = key
     elif key == "enter":
         if state.focus == "list":
-            return _select(state, catalog, state.selected, first_hit=state.query is not None, focus="detail"), False
+            return replace(state, focus="detail", detail=replace(state.detail, reveal_cursor=True)), False
         detail_event = "toggle_fold"
     elif len(key) == 1:
         detail_event = "text\t" + key if spec.input_protocol == "keys" else {
@@ -397,6 +408,29 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     return _detail_event(state, detail_event, snapshot, catalog, spec, frame, session), False
 
 
+def _retain_detail_cursor(state: BrowserState, frame: BrowserFrame, catalog: Catalog) -> BrowserState:
+    """Keep an existing logical cursor inside a resized or refocused viewport."""
+    detail = state.detail
+    cursor = detail.cursor
+    if (frame.detail is None or state.panel or not detail.reveal_cursor or cursor is None
+            or detail.reveal_match or detail.focus_container is not None):
+        return state
+    if any((cell.position.record_index, cell.position.line_index)
+           == (cursor.record_index, cursor.line_index)
+           for cell in frame.detail.logical_characters):
+        return state
+    item = catalog.items[state.selected]
+    section = item.sections[min(state.section, len(item.sections) - 1)]
+    if cursor.record_index not in section.records:
+        return state
+    offset = cursor.line_index
+    if (cursor.record_index != detail.selected_index
+            or cursor.line_index >= frame.detail.record_line_offset):
+        offset = max(0, cursor.line_index - frame.detail.body_rows + 1)
+    return replace(state, detail=replace(detail, selected_index=cursor.record_index,
+                                        record_line_offset=offset))
+
+
 def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                  diagnostic: InputDiagnostic | None = None) -> None:
     """Run without acquiring or closing the caller-owned host."""
@@ -404,13 +438,13 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
     filters = tuple(frozenset() for _ in catalog.facets)
     state = BrowserState(filters=filters, draft_filters=filters,
                          result=evaluate(snapshot, catalog, filters, None),
-                         focus="detail" if spec.inspection is None else "list",
                          diagnostic=diagnostic)
     if state.result.items:
         state = _select(state, catalog, state.result.items[0])
     session = RenderSession()
     notifier = getattr(host, "set_input_mode", None)
     input_mode = None
+    geometry: tuple[int, int] | None = None
     while True:
         desired = "text" if state.panel == "search" and state.panel_index == 0 else "command"
         if desired != input_mode:
@@ -418,8 +452,17 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                 notifier(desired)
             input_mode = desired
         columns, rows = host.terminal_size()
+        if geometry is not None and geometry != (columns, rows):
+            state = replace(state, detail=replace(state.detail, reveal_cursor=True))
+        geometry = (columns, rows)
+        color = bool(host.color_enabled())
         frame = render_browser(spec, state, snapshot, catalog, columns=columns, rows=rows,
-                               color=bool(host.color_enabled()), session=session)
+                               color=color, session=session)
+        retained = _retain_detail_cursor(state, frame, catalog)
+        if retained is not state:
+            state = retained
+            frame = render_browser(spec, state, snapshot, catalog, columns=columns, rows=rows,
+                                   color=color, session=session)
         if frame.detail is not None and not state.panel:
             state = replace(state, detail=_accept_frame(state.detail, frame.detail))
         host.present(frame.text)

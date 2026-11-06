@@ -62,6 +62,13 @@ full-record inspection even with those display headers; Simple still bounds
 string previews, but does not hide fields through the historical three-field
 projection. Header labels do not define the generic engine's data model.
 
+In 0.7.1, inspection opens directly on full-width detail. Tab/Shift+Tab switches
+between separate list and detail screens; Enter in the list opens detail.
+Up/Down traverses source records in detail and selects items in the list.
+Press `v` to select the optional Split layout: at least 120 columns and 12 rows
+retain a fixed left list beside detail. Compact terminals keep one screen visible
+and restore Split when enlarged. Layout selection lasts only for the current view.
+
 ## Preview
 
 The left gutter distinguishes `R` (record number) from `L` (formatted JSON line
@@ -576,8 +583,10 @@ search<TAB>NONEMPTY_QUERY
 ```
 
 Inspection also accepts `filters` / `begin_filter`, `focus_next`,
-`focus_previous`, `section_next`, and `section_previous`. Physical Tab and
+`focus_previous`, `section_next`, `section_previous`, and `toggle_layout`.
+Physical Tab and
 Shift+Tab select focus; `[` and `]` select arbitrary configured sections.
+Physical or ordinary-line `v` switches Single/Split in the main view only.
 `a` opens prepared annotations without adding their text to source search.
 See the [inspection controls](docs/inspection.md#main-controls) for modal
 selection and commit behavior.

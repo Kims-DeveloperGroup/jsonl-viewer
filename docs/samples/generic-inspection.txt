@@ -3,26 +3,26 @@ Dataset: Audit events
 Search: None | In: All text · / Edit · c Clear
 Filters(0): All · f Edit
 Groups/records: 2 total · 2 filtered
-> Trace A                                      │ [Open] | Reads | Writes | Close | 
-  5 record(s) · R1                             │ group:trace-a · a annotations
-  Record 3                                     │ > R1 L1 │ {
-  1 record(s) · R3                             │           ^
-                                               │ >    L2 │   "trace": "a",
-                                               │ >    L3 │   "kind": "open",
-                                               │ >    L4 │   "level": "info",
-                                               │ >    L5 │   "message": "ready"
-                                               │ >    L6 │ }
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-                                               │ 
-Focus: List · 
-Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close
+[Open] | Reads | Writes | Close | 
+group:trace-a · a annotations
+> R1 L1 │ {
+          ^
+>    L2 │   "trace": "a",
+>    L3 │   "kind": "open",
+>    L4 │   "level": "info",
+>    L5 │   "message": "ready"
+>    L6 │ }
+
+
+
+
+
+
+
+
+
+
+
+
+Focus: Detail · 
+Single · v layout · Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close
