@@ -162,8 +162,9 @@ effective Single/Split composition and painted hit regions; layout remains state
 
 ### `jsonl_viewer._browser`
 
-Source: `src/jsonl_viewer/_browser.py`. Coordinates generic input, drafts and
-per-view focus/layout through ViewerHost. It consumes prepared data only, does not
+Source: `src/jsonl_viewer/_browser.py`. Coordinates generic input, drafts,
+per-view focus/layout and retained cursor viewport acceptance through ViewerHost.
+It consumes prepared data only, does not
 acquire or close the host, and skips source-bound metadata on malformed input.
 
 ### `jsonl_viewer.engine`

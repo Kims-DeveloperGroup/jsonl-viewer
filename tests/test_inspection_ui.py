@@ -144,6 +144,46 @@ class InspectionUiTests(unittest.TestCase):
                 if not color:
                     self.assertNotIn("\x1b", host.checkpoints["single"])
 
+    def test_height_resize_preserves_deep_logical_cursor_and_inspection_state(self):
+        records = list(audit_records())
+        records[6] = dict(records[6], fold_me={"value": "fold-sentinel"},
+                          fields={f"field_{index:02}": f"anchor-{index:02}" for index in range(30)})
+
+        def cursor_anchor(frame, *, split):
+            lines = strip_ansi(frame).splitlines()
+            if split:
+                lines = [line.partition(" │ ")[2] if " │ " in line else line for line in lines]
+            caret = next(index for index, line in enumerate(lines) if line.strip() == "^")
+            self.assertGreater(caret, 0)
+            source_row = lines[caret - 1]
+            column = lines[caret].index("^")
+            self.assertIn('"field_20"', source_row)
+            self.assertEqual(source_row[column:column + len("anchor-20")], "anchor-20")
+
+        for split in (False, True):
+            with self.subTest(split=split):
+                host = self._view((*((_text("v"),) if split else ()), *_severity_error(),
+                                   *_search("timeout", messages=True), _text("n"), _text("n"),
+                                   _text("]"), PaintedClick('"fold_me"', "{"),
+                                   _key("enter"), Checkpoint("folded"),
+                                   PaintedClick('"field_20"', "anchor-20"), Checkpoint("deep"),
+                                   (200, 14), Checkpoint("compact"),
+                                   (200, 50), Checkpoint("restored"), "goto\t7", Checkpoint("fold_check")),
+                                  source=jsonl(*records), size=(200, 50))
+                self.assertIn('"fold_me"', host.checkpoints["folded"])
+                self.assertNotIn("fold-sentinel", host.checkpoints["folded"])
+                for name in ("deep", "compact", "restored"):
+                    frame = host.checkpoints[name]
+                    cursor_anchor(frame, split=split)
+                    self.assertIn("[Written]", frame)
+                    self.assertIn("Severity=Error", frame)
+                    self.assertIn("In: Messages", frame)
+                    self.assertIn("Occurrence 3/3", frame)
+                    self.assertIn("Focus: Detail", frame)
+                    self.assertIn("Split ·" if split else "Single ·", frame)
+                self.assertIn('"fold_me"', host.checkpoints["fold_check"])
+                self.assertNotIn("fold-sentinel", host.checkpoints["fold_check"])
+
     def test_modal_v_is_text_or_inert_and_empty_results_keep_layout_controls(self):
         host = self._view((Checkpoint("initial"), _text("/"), _text("v"), Checkpoint("draft"),
                            "toggle_layout", Checkpoint("inert"), _key("escape"), Checkpoint("cancelled"),

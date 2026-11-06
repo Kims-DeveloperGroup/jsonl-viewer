@@ -408,6 +408,29 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     return _detail_event(state, detail_event, snapshot, catalog, spec, frame, session), False
 
 
+def _retain_detail_cursor(state: BrowserState, frame: BrowserFrame, catalog: Catalog) -> BrowserState:
+    """Keep an existing logical cursor inside a resized or refocused viewport."""
+    detail = state.detail
+    cursor = detail.cursor
+    if (frame.detail is None or state.panel or not detail.reveal_cursor or cursor is None
+            or detail.reveal_match or detail.focus_container is not None):
+        return state
+    if any((cell.position.record_index, cell.position.line_index)
+           == (cursor.record_index, cursor.line_index)
+           for cell in frame.detail.logical_characters):
+        return state
+    item = catalog.items[state.selected]
+    section = item.sections[min(state.section, len(item.sections) - 1)]
+    if cursor.record_index not in section.records:
+        return state
+    offset = cursor.line_index
+    if (cursor.record_index != detail.selected_index
+            or cursor.line_index >= frame.detail.record_line_offset):
+        offset = max(0, cursor.line_index - frame.detail.body_rows + 1)
+    return replace(state, detail=replace(detail, selected_index=cursor.record_index,
+                                        record_line_offset=offset))
+
+
 def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                  diagnostic: InputDiagnostic | None = None) -> None:
     """Run without acquiring or closing the caller-owned host."""
@@ -432,8 +455,14 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
         if geometry is not None and geometry != (columns, rows):
             state = replace(state, detail=replace(state.detail, reveal_cursor=True))
         geometry = (columns, rows)
+        color = bool(host.color_enabled())
         frame = render_browser(spec, state, snapshot, catalog, columns=columns, rows=rows,
-                               color=bool(host.color_enabled()), session=session)
+                               color=color, session=session)
+        retained = _retain_detail_cursor(state, frame, catalog)
+        if retained is not state:
+            state = retained
+            frame = render_browser(spec, state, snapshot, catalog, columns=columns, rows=rows,
+                                   color=color, session=session)
         if frame.detail is not None and not state.panel:
             state = replace(state, detail=_accept_frame(state.detail, frame.detail))
         host.present(frame.text)
