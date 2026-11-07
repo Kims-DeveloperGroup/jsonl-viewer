@@ -83,7 +83,9 @@ bounded tuple/scalar/reference shapes and incremental metadata size without I/O.
 ### `jsonl_viewer._model`
 
 Source: `src/jsonl_viewer/_model.py`. Owns immutable snapshots, occurrences,
-logical cursor/fold/selection state, pending copy requests, query results and renderer hit geometry. BrowserState
+logical cursor/fold/selection state, pending copy requests, query results and renderer hit geometry.
+Selection edge intent is distinct from a changed logical endpoint. BodyLine/PaintedSpan
+retain only actual painted copyable segment ranges, never a document character map. BrowserState
 owns invocation-only focus/layout plus committed/draft conditions; no persistence.
 
 ## Bounded source and selection
@@ -148,7 +150,14 @@ Source: `src/jsonl_viewer/_render.py`. Owns JSON projections, semantic/plain rec
 frames and bounded RenderSession caches. Its visible-index/chrome pane boundary
 keeps the original snapshot, identities, cursor and cumulative line geometry.
 Body-relative sparse selection hits and cached row character prefixes support
-copy extraction and live counts without a document-wide character map. Search
+copy extraction and live counts without a document-wide character map. Painted
+spans exclude viewport ellipses and partial-wide-glyph padding; composed pane
+clipping trims paint/hit metadata while retaining logical navigation candidates.
+RenderSession additionally owns one current projection-context scalar count cache:
+at most one total per snapshot record (10,000 at the input bound) and four boundary
+prefixes, independent of full-projection LRU eviction. Mode, folds and active search
+occurrence changes clear that metadata; spec/snapshot rebinding also clears it.
+No historical query contexts or extra projection rows are retained there. Search
 brackets are presentation-only; existing bounded projection cues remain copyable.
 
 ### `jsonl_viewer._mouse`
@@ -169,7 +178,10 @@ README and design-system document the interaction.
 
 Source: `src/jsonl_viewer/_controls.py`. Applies validated JSON cursor, page, fold,
 sibling, prompt and captured-drag transitions using explicitly supplied state/render
-caches. Edge-idle transitions stay in the drag's frozen displayed-document order.
+caches. Out-of-body drag intent can start edge scrolling before an endpoint changes;
+each actual motion performs at most one step, and idle events continue stationary
+scrolling in the frozen displayed-document order. Intermediate probes retain the
+outer viewport's painted bounds before resolving endpoints.
 
 ### `jsonl_viewer._browser_render`
 

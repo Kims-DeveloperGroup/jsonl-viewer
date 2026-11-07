@@ -595,13 +595,27 @@ breaks, and existing expansion/truncation/fold cues are retained. Selection does
 not expose hidden source or bypass preview bounds. Output is displayed text,
 not a promise of valid exported JSON.
 
+Hit and edge metadata is clipped to the detail pane actually painted by the
+composed browser, including compact frames. Synthetic ellipsis and padding for
+partly clipped wide glyphs cannot start a selection or introduce an unpainted
+endpoint. Literal source ellipsis remains selectable. Motion outside a body
+edge expresses drag intent even when its clamped endpoint has not changed;
+motion confined to the same wide glyph is still not a completed drag.
+
+Selection counts retain bounded current-context scalar record totals separately
+from full projection caches. Repeated pointer motion revisits only endpoint or
+newly reached records rather than rebuilding all intervening selected records.
+Projection-context changes invalidate these totals; view closure discards them.
+
 Colored frames highlight selected body spans. Plain frames retain their caret
 geometry and report the selection range and character count in the footer.
 Blinking must not erase selection feedback. Active browser drags are captured
 before ordinary list/header/modal hit routing, including when motion or release
 reaches surrounding chrome.
 
-At a scrollable body edge the owned terminal uses 50 ms idle polling; each tick
+Each drag motion at a scrollable body edge can advance one bounded scroll step,
+so motion-only hosts can extend beyond the viewport. At a stationary edge the
+owned terminal uses 50 ms idle polling; each tick
 advances one projected row vertically and two body cells horizontally, clamped
 to document bounds and intact cluster boundaries. The stored pointer extends
 the range after scrolling even without another motion event. This precedes

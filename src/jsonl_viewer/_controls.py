@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from ._mouse import MouseEvent, hit_test, parse_mouse
 from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, TextSelection, ViewMode, ViewState, VisibleCharacter
-from ._render import RenderSession, render_frame, selection_character_count, selection_hit
+from ._render import RenderSession, clip_painted_frame, render_frame, selection_character_count, selection_hit
 from ._selection import clear_selection
 from ._search import SearchLimitError, find_matches
 from .contracts import ViewerSpec
@@ -155,7 +155,8 @@ def _clear_message(state: ViewState) -> ViewState:
 
 def _selection_edges(state: ViewState, frame: RenderResult) -> tuple[int, int]:
     selection = state.selection
-    if selection is None or not selection.dragging or not selection.moved or not frame.body_lines:
+    if (selection is None or not selection.dragging
+            or not (selection.moved or selection.edge_intent) or not frame.body_lines):
         return 0, 0
     top = min(line.screen_row for line in frame.body_lines)
     bottom = max(line.screen_row for line in frame.body_lines)
@@ -188,9 +189,15 @@ def _drag_pointer(state: ViewState, mouse: MouseEvent, snapshot: Snapshot,
     if hit is None:
         return state
     point, width = hit
+    lines = tuple(line for line in frame.body_lines if line.spans)
+    nearest = min(lines, key=lambda line: abs(line.screen_row - (mouse.row - 1)))
+    outside = (mouse.row - 1 < lines[0].screen_row or mouse.row - 1 > lines[-1].screen_row
+               or mouse.column - 1 < nearest.spans[0].screen_column
+               or mouse.column - 1 >= nearest.spans[-1].screen_column + nearest.spans[-1].cells)
     selection = replace(selection, extent=point, extent_width=width,
                         pointer_column=mouse.column - 1, pointer_row=mouse.row - 1,
                         moved=selection.moved or point != selection.anchor,
+                        edge_intent=selection.edge_intent or (mouse.action == "drag" and outside),
                         dragging=mouse.action != "release")
     if mouse.action == "release" and not selection.moved:
         return clear_selection(state)
@@ -215,8 +222,7 @@ def _drag_step(state: ViewState, snapshot: Snapshot, spec: ViewerSpec,
     projection = session.projection(snapshot.records[index], index, spec, state)
     if vertical > 0:
         last = frame.body_lines[-1]
-        final = session.projection(snapshot.records[records[-1]], records[-1], spec, state)
-        if (last.record_index, last.line_index) != (records[-1], len(final.lines) - 1):
+        if not (last.record_index == records[-1] and last.last_in_record):
             if offset + 1 < len(projection.lines):
                 offset += 1
             elif position + 1 < len(records):
@@ -238,10 +244,24 @@ def _drag_step(state: ViewState, snapshot: Snapshot, spec: ViewerSpec,
                            columns=frame.columns, rows=frame.rows, color=frame.color,
                            session=session, visible_indices=records,
                            chrome=bool(frame.body_lines[0].screen_row))
+    painted = clip_painted_frame(painted, frame.rows)
     updated = _accept_frame(updated, painted)
     return _drag_pointer(updated, MouseEvent(32, selection.pointer_column + 1,
                                              selection.pointer_row + 1, "press"),
                          snapshot, spec, painted, session)
+
+
+def drag_mouse(state: ViewState, mouse: MouseEvent, snapshot: Snapshot,
+               spec: ViewerSpec, frame: RenderResult,
+               session: RenderSession | None = None) -> ViewState:
+    """Consume one captured report with at most one motion-driven edge step."""
+    if mouse.action in {"drag", "release"}:
+        updated = _drag_pointer(state, mouse, snapshot, spec, frame, session)
+        return _drag_step(updated, snapshot, spec, frame, session) if mouse.action == "drag" else updated
+    if mouse.action in {"cursor_up", "cursor_down"}:
+        return _drag_step(state, snapshot, spec, frame, session,
+                          (0, -1 if mouse.action == "cursor_up" else 1))
+    return state
 
 
 def _transition(
@@ -307,11 +327,8 @@ def _transition(
         if not captured and not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows):
             return state, False
         if state.selection is not None and state.selection.dragging:
-            if mouse.action in {"drag", "release"}:
-                return _drag_pointer(state, mouse, snapshot, spec, rendered, session), False
-            if mouse.action in {"cursor_up", "cursor_down"}:
-                return _drag_step(state, snapshot, spec, rendered, session,
-                                  (0, -1 if mouse.action == "cursor_up" else 1)), False
+            if mouse.action in {"drag", "release", "cursor_up", "cursor_down"}:
+                return drag_mouse(state, mouse, snapshot, spec, rendered, session), False
         if mouse.action in {"cursor_up", "cursor_down"}:
             return action(clear_selection(state), mouse.action)
         if mouse.action == "click":

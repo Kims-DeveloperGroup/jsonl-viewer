@@ -6,9 +6,9 @@ from dataclasses import replace
 
 from ._browser_render import render_browser
 from ._catalog import Catalog, bind_catalog
-from ._controls import _accept_frame, _edit_prompt, _line_action, _safe_input, _transition, _unfold_match, selection_autoscroll
+from ._controls import _accept_frame, _edit_prompt, _line_action, _safe_input, _transition, _unfold_match, drag_mouse, selection_autoscroll
 from ._model import BrowserFrame, BrowserState, CursorPosition, InputDiagnostic, PromptState, Snapshot
-from ._mouse import parse_mouse
+from ._mouse import MouseEvent, parse_mouse
 from ._query import evaluate
 from ._render import RenderSession, _text_cells, selection_text
 from ._selection import clear_selection
@@ -240,14 +240,11 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
         return state
     if (state.detail.selection is not None and state.detail.selection.dragging
             and frame.detail is not None and mouse.action in {"drag", "release", "cursor_up", "cursor_down"}):
-        column = min(frame.detail.columns, max(1, mouse.column - frame.detail_column))
-        row = min(frame.detail.rows, max(1, mouse.row - frame.detail_row))
-        local = f"mouse\t{mouse.button}\t{column}\t{row}\t{mouse.phase}"
-        detail, _ = _transition(state.detail, local, snapshot, spec,
-                                page_size=frame.detail.body_rows,
-                                selected_line_count=frame.detail.selected_line_count,
-                                rendered=frame.detail, session=session,
-                                document_indices=state.detail.selection.records)
+        if not frame.detail.body_lines:
+            return replace(state, detail=clear_selection(state.detail))
+        local = MouseEvent(mouse.button, mouse.column - frame.detail_column,
+                           mouse.row - frame.detail_row, mouse.phase)
+        detail = drag_mouse(state.detail, local, snapshot, spec, frame.detail, session)
         return replace(state, detail=detail)
     if mouse.action in {"drag", "release"}:
         return state
@@ -265,7 +262,8 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
             return _modal_key(state, key, None, snapshot, catalog)[0] if state.panel not in {"search", "goto"} else state
         if row < frame.body_row or row >= frame.rows - 2:
             return state
-        if frame.detail and row >= frame.detail_row and column >= frame.detail_column:
+        if (frame.detail and frame.detail_row <= row < frame.detail_row + frame.detail.rows
+                and frame.detail_column <= column < frame.detail_column + frame.detail.columns):
             return _detail_event(replace(state, focus="detail"), event.replace(
                 f"\t{mouse.column}\t{mouse.row}\t", f"\t{mouse.column-frame.detail_column}\t{mouse.row-frame.detail_row}\t"), snapshot, catalog, spec, frame, session)
         if hit is not None and hit.kind in {"item", "list_area"}:
@@ -294,7 +292,9 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
             return replace(state, panel="search", panel_index=0,
                            draft_query=PromptState("search_query", state.query or "", len(state.query or "")),
                            draft_scope=state.scope, error=None)
-    if not state.panel and frame.detail and row >= frame.detail_row and column >= frame.detail_column:
+    if (not state.panel and frame.detail
+            and frame.detail_row <= row < frame.detail_row + frame.detail.rows
+            and frame.detail_column <= column < frame.detail_column + frame.detail.columns):
         local = f"mouse\t{mouse.button}\t{mouse.column-frame.detail_column}\t{mouse.row-frame.detail_row}\t{mouse.phase}"
         return _detail_event(replace(state, focus="detail"), local, snapshot, catalog, spec, frame, session)
     return state

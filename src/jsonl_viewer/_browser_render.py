@@ -7,7 +7,7 @@ from dataclasses import replace
 from ._catalog import Catalog
 from ._cell_layout import clusters, text_cells
 from ._model import BrowserFrame, BrowserHit, BrowserState, Snapshot
-from ._render import RenderSession, _clip_text, _neutralize_text, render_frame, strip_ansi
+from ._render import RenderSession, _clip_text, _neutralize_text, clip_painted_frame, render_frame, strip_ansi
 from ._selection import selection_label
 from .contracts import ViewerSpec
 
@@ -235,6 +235,7 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
                                         columns=right_width, rows=max(4, body_height - detail_top),
                                         color=color, session=session,
                                         visible_indices=section.records, chrome=False)
+            detail_frame = clip_painted_frame(detail_frame, body_height - detail_top)
             detail_rows.extend(detail_frame.text.splitlines())
         else:
             detail_rows.extend(_wrap(section.empty_text, right_width))

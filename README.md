@@ -353,13 +353,17 @@ Ordinary mouse-wheel reports move the cursor one navigable line, like `j`/`k`,
 including automatic viewport scrolling. A left press on a visible JSON character
 moves the cursor to that character. Clicking either cell of a wide character
 focuses the same character; panning and plain-mode caret rows are accounted for.
-A plain click does not copy or fold anything.
+A plain click does not copy or fold anything. Synthetic viewport ellipsis and
+padding for a partly clipped wide glyph cannot start a text selection; literal
+source glyphs remain selectable.
 
 Hold the left button and drag to select a substring or multiple JSON body lines,
 in either direction. The colored view highlights the range; plain output reports
 the range and character count in the footer. Holding the pointer at a body edge
 continuously scrolls through the selection, vertically and horizontally, even
-without further mouse movement. Edge polling runs every 50 ms, moving one
+without further mouse movement. Each edge motion can also advance one bounded
+scroll step, so continuous motion and hosts without idle events can extend the
+range. Stationary-edge polling runs every 50 ms, moving one
 projected row or two body cells per tick and preserving complete Unicode clusters.
 Scrolling stops at the displayed document's boundaries. In inspection views, that
 document is the current detail section: dragging never opens another item,

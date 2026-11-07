@@ -120,6 +120,17 @@ class TextSelection:
     pointer_row: int
     moved: bool = False
     dragging: bool = True
+    edge_intent: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PaintedSpan:
+    """A painted copyable segment with intact clusters and body coordinates."""
+
+    screen_column: int
+    column: int
+    text: str
+    cells: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +142,7 @@ class BodyLine:
     screen_row: int
     cells: int
     last_in_record: bool = False
+    spans: tuple[PaintedSpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
