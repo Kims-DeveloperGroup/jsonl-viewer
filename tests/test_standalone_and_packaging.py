@@ -395,7 +395,7 @@ class StandaloneTests(unittest.TestCase):
                 script = _RawScript(raw, [])
                 event, before, complete, _, termios, tty = self._scripted_event(script)
                 self.assertEqual(event, expected)
-                self.assertTrue(before.startswith("\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"))
+                self.assertTrue(before.startswith("\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"))
                 self.assertIn(_ROW_PRESENT.decode() + "PRIOR FRAME", before)
                 self.assertNotIn("\x1b[2J", before)
                 self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
@@ -1055,7 +1055,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.7.2")
+        self.assertEqual(project["version"], "0.8.0")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
@@ -1108,8 +1108,8 @@ class PackagingBoundaryTests(unittest.TestCase):
 
         for module in graph:
             visit(module)
-        self.assertEqual(len(modules), 22)
-        self.assertEqual(sum(len(value) for value in graph.values()), 59)
+        self.assertEqual(len(modules), 24)
+        self.assertEqual(sum(len(value) for value in graph.values()), 67)
         self.assertEqual(external, set())
         facade = (ROOT / "src/jsonl_viewer/__init__.py").read_text(encoding="utf-8")
         self.assertNotIn("_standalone", facade)
@@ -1117,8 +1117,8 @@ class PackagingBoundaryTests(unittest.TestCase):
         index = (ROOT / "PYTHON_MODULE_INDEX.md").read_text(encoding="utf-8")
         indexed = set(re.findall(r"^### `([^`]+)`$", index, flags=re.MULTILINE))
         self.assertEqual(indexed, set(modules))
-        self.assertIn("Importable production units indexed: 22.", index)
-        self.assertIn("Direct internal dependency edges indexed: 59.", index)
+        self.assertIn("Importable production units indexed: 24.", index)
+        self.assertIn("Direct internal dependency edges indexed: 67.", index)
         self.assertIn("Directed internal dependency cycles indexed: 0.", index)
         self.assertTrue(
             (
@@ -1148,6 +1148,7 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "_browser.py",
                 "_browser_render.py",
                 "_catalog.py",
+                "_clipboard.py",
                 "_controls.py",
                 "_json.py",
                 "_model.py",
@@ -1155,6 +1156,7 @@ class PackagingBoundaryTests(unittest.TestCase):
                 "_query.py",
                 "_render.py",
                 "_search.py",
+                "_selection.py",
                 "_standalone.py",
                 "_terminal.py",
                 "contracts.py",

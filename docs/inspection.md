@@ -211,6 +211,15 @@ Enter on a filter field completes that field; Apply/Search on its action row
 commits the whole corresponding draft. Escape inside a filter field cancels
 that local edit; Escape at panel level cancels the entire panel.
 
+Normal left-button dragging selects JSON body text in detail, in either Single
+or Split. Hold at a body edge to extend the selection through continuous vertical
+or horizontal scrolling; release to copy automatically and show the result in
+the footer. Selection stays within the current section's displayed record order.
+Dragging over the list/header does not activate it. Plain clicks and normal
+wheel navigation retain their existing behavior. See [mouse selection and
+navigation](../README.md#mouse-selection-and-navigation-080) for copy spelling,
+local clipboard support, cancellation, and optional embedding capabilities.
+
 ## Geometry, input, and ownership
 
 Single is the default layout: the focused list or detail uses the entire width,
@@ -237,11 +246,9 @@ Focus, checkbox, radio, draft, match, and error states need printable cues in
 plain and `NO_COLOR` output. Unicode cell widths and existing source/display
 line identities remain authoritative.
 
-Keyboard and mouse actions have equivalent effects. Clicking outside a modal
-does not discard its draft. Every action is available without a mouse. The
-existing host owns transport and terminal resources; inspection does not enter
-another raw mode, acquire another screen, or create a second input lifecycle.
-Closing drops view state and restores the existing ownership boundary.
+Keyboard and mouse navigation/filter actions have equivalent effects. Clicking
+outside a modal does not discard its draft. These actions remain available
+without a mouse; drag selection and automatic copying use the mouse protocol.
 
 ## Independent acceptance
 

@@ -12,6 +12,7 @@ from typing import Iterable
 from ._cell_layout import RowLayout, character_cells as _character_cells, clusters as _clusters, text_cells as _text_cells
 from ._json import Expansion, ExpansionBudget, SkippedExpansion, expand_json_string
 from ._model import (
+    BodyLine,
     ContainerMetadata,
     PropertyMetadata,
     CursorPosition,
@@ -21,13 +22,18 @@ from ._model import (
     JSONPath,
     JSONValue,
     Occurrence,
+    PaintedSpan,
     PromptState,
     Record,
     RenderResult,
+    SelectionPoint,
+    SelectionTextRow,
+    TextSelection,
     Snapshot,
     ViewMode,
     ViewState,
 )
+from ._selection import bounds as selection_bounds, selected_span, selected_text, selected_row_length, selection_label
 from .contracts import ViewerSpec
 
 
@@ -48,6 +54,7 @@ _ANSI = {
     "current": "1;36",
     "match_current": "1;30;43",
     "match_other": "4;33",
+    "selection": "1;30;106",
     "warning": "1;33",
     "error": "1;31",
     "muted": "2;90",
@@ -69,6 +76,7 @@ class _Segment:
     property: JSONPath | None = None
     key_anchor: bool = False
     logical_column: int | None = None
+    copyable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +130,7 @@ class _RecordProjection:
     match_row: int | None
     text_bytes: int
     segment_count: int
+    copy_prefix: tuple[int, ...]
     layouts: dict[int, RowLayout] = field(default_factory=dict)
     checkpoints: int = 0
 
@@ -135,6 +144,9 @@ class RenderSession:
         self._text_bytes = self._rows = self._segments = self._checkpoints = 0
         self._line_counts: dict[ViewMode, dict[int, int]] = {}
         self._line_prefixes: dict[ViewMode, list[int]] = {}
+        self._copy_context: tuple | None = None
+        self._copy_totals: dict[int, int] = {}
+        self._copy_boundaries: OrderedDict[SelectionPoint, int] = OrderedDict()
 
     def bind(self, spec: ViewerSpec, snapshot: Snapshot | None) -> None:
         if self._context is None or self._context[0] is not spec or self._context[1] is not snapshot:
@@ -142,11 +154,56 @@ class RenderSession:
             self._text_bytes = self._rows = self._segments = self._checkpoints = 0
             self._line_counts.clear()
             self._line_prefixes.clear()
+            self._copy_context = None
+            self._copy_totals.clear()
+            self._copy_boundaries.clear()
             self._context = (spec, snapshot)
 
     def cache_info(self) -> tuple[int, int, int, int, int]:
         """Record slots, UTF-8 bytes, rows, segments and sparse checkpoints."""
         return len(self._records), self._text_bytes, self._rows, self._segments, self._checkpoints
+
+    def selection_cache_info(self) -> tuple[int, int]:
+        """Current-context record totals and at most four boundary scalars."""
+        return len(self._copy_totals), len(self._copy_boundaries)
+
+    def _bind_copy_context(self, state: ViewState) -> None:
+        # Only the active occurrence changes a JSON projection. Retain no
+        # historical query, occurrence collection, or projection rows here.
+        active = state.search.current_occurrence if state.search is not None else None
+        key = (state.mode, state.folds, active)
+        if self._copy_context != key:
+            self._copy_totals.clear()
+            self._copy_boundaries.clear()
+            self._copy_context = key
+
+    def _remember_copy_total(self, index: int, projection: _RecordProjection) -> None:
+        self._copy_totals[index] = projection.copy_prefix[-1] + max(0, len(projection.lines) - 1)
+
+    def copy_total(self, index: int, spec: ViewerSpec, state: ViewState) -> int:
+        """Keep one scalar per snapshot record independently of full-row LRU."""
+        self._bind_copy_context(state)
+        if index not in self._copy_totals:
+            assert self._context is not None and self._context[1] is not None
+            self.projection(self._context[1].records[index], index, spec, state)
+        return self._copy_totals[index]
+
+    def copy_prefix_at(self, point: SelectionPoint, spec: ViewerSpec, state: ViewState) -> int:
+        """Memoize fixed anchor/nearby endpoint prefixes without retaining rows."""
+        self._bind_copy_context(state)
+        if point in self._copy_boundaries:
+            self._copy_boundaries.move_to_end(point)
+            return self._copy_boundaries[point]
+        assert self._context is not None and self._context[1] is not None
+        projection = self.projection(self._context[1].records[point.record_index], point.record_index, spec, state)
+        row = point.line_index
+        parts = tuple((segment.text, segment.copyable) for segment in projection.lines[row].segments)
+        amount = projection.copy_prefix[row] + row + selected_row_length(
+            parts, self.layout(point.record_index, projection, row), 0, point.column)
+        self._copy_boundaries[point] = amount
+        if len(self._copy_boundaries) > 4:
+            self._copy_boundaries.popitem(last=False)
+        return amount
 
     def _evict(self, index: int) -> None:
         old = self._records.pop(index)
@@ -156,6 +213,7 @@ class RenderSession:
         self._checkpoints -= old.checkpoints
 
     def projection(self, record: Record, index: int, spec: ViewerSpec, state: ViewState) -> _RecordProjection:
+        self._bind_copy_context(state)
         active = state.search.current_occurrence if state.search is not None else None
         if active is not None and active.record_index != index:
             active = None
@@ -164,10 +222,12 @@ class RenderSession:
         cached = self._records.get(index)
         if cached is not None and cached.key == key:
             self._records.move_to_end(index)
+            self._remember_copy_total(index, cached)
             return cached
         if cached is not None:
             self._evict(index)
         projection = _build_projection(record, index, spec, state.mode, active, folds, key)
+        self._remember_copy_total(index, projection)
         self._line_counts.setdefault(state.mode, {})[index] = projection.facts.expanded_line_count
         if (projection.text_bytes > _CACHE_TEXT_BYTES or len(projection.lines) > _CACHE_ROWS
                 or projection.segment_count > _CACHE_SEGMENTS):
@@ -275,7 +335,7 @@ def _clip_segments(
         if clipped:
             break
     if maximum > 0:
-        result.append(_Segment("…", "muted"))
+        result.append(_Segment("…", "muted", copyable=False))
     return tuple(result), True
 
 
@@ -379,9 +439,9 @@ def _focused_token(
     if start:
         result.append(_Segment("…", "muted"))
     result.extend((
-        _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current"),
+        _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current", copyable=False),
         _Segment(focused_display, "match_current"),
-        _Segment("⟧", "current"), _Segment(safe(text[focus_end:end]), role),
+        _Segment("⟧", "current", copyable=False), _Segment(safe(text[focus_end:end]), role),
     ))
     if end < len(text):
         result.append(_Segment("…", "muted"))
@@ -717,6 +777,7 @@ class _RecordLine:
     body_cells: int = 0
     expanded_line_number: int | None = None
     first_visible: bool = False
+    last_in_record: bool = False
 
 
 def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMode,
@@ -736,7 +797,9 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
     container_rows: dict[JSONPath, int] = {}
     match_row = None
     text_bytes = segments = 0
+    copy_prefix = [0]
     for row, line in enumerate(logical):
+        copy_prefix.append(copy_prefix[-1] + sum(len(segment.text) for segment in line.segments if segment.copyable))
         cells = tuple(_text_cells(segment.text) for segment in line.segments)
         widths.append(sum(cells))
         if any(segment.navigable and width for segment, width in zip(line.segments, cells)):
@@ -753,7 +816,8 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
             if segment.role == "match_current" and match_row is None:
                 match_row = row
     return _RecordProjection(key, tuple(logical), summary, tuple(widths), tuple(containers),
-                             tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments)
+                             tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments,
+                             tuple(copy_prefix))
 
 
 def _record_line(index: int, row: int, projection: _RecordProjection,
@@ -765,7 +829,8 @@ def _record_line(index: int, row: int, projection: _RecordProjection,
     expanded = projection.lines[row].expanded_line_index
     return _RecordLine(gutter + projection.lines[row].segments, index, row, 0,
                        session.layout(index, projection, row), projection.widths[row],
-                       None if expanded is None else line_start + expanded + 1, first_visible)
+                       None if expanded is None else line_start + expanded + 1, first_visible,
+                       row == len(projection.lines) - 1)
 
 
 def _gutter_line(line: _RecordLine, record_digits: int, line_digits: int,
@@ -779,7 +844,8 @@ def _gutter_line(line: _RecordLine, record_digits: int, line_digits: int,
               _Segment("│" if compact else " │ ", "gutter"))
     return _RecordLine(gutter + line.segments[1:], line.record_index, line.line_index,
                        record_digits + line_digits + (4 if compact else 8),
-                       line.layout, line.body_cells, line.expanded_line_number, line.first_visible)
+                       line.layout, line.body_cells, line.expanded_line_number, line.first_visible,
+                       line.last_in_record)
 
 
 def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
@@ -810,13 +876,13 @@ def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bo
             piece_start, piece_begin = start, begin
             gap = start - offset - painted
             if gap > 0:
-                result.append(_Segment(" " * gap))
+                result.append(_Segment(" " * gap, copyable=False))
                 painted += gap
         piece_end = finish
         painted += cells
     append_piece()
     if right_clipped:
-        result.append(_Segment("…", "muted"))
+        result.append(_Segment("…", "muted", copyable=False))
     return replace(line, segments=tuple(result), layout=None)
 
 
@@ -825,7 +891,7 @@ def _focus_prefix_window(line: _RecordLine, offset: int, width: int,
     """Keep a bounded marked keyword prefix with at least one intact cluster."""
     window = _window_line(line, offset, width - 1,
                           overflow_cue=width >= first_cluster_cells + 3)
-    return replace(window, segments=window.segments + (_Segment("⟧", "current"),))
+    return replace(window, segments=window.segments + (_Segment("⟧", "current", copyable=False),))
 
 
 def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCharacter]:
@@ -852,6 +918,21 @@ def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCha
 
 def _visible_characters(line: _RecordLine, screen_row: int) -> tuple[VisibleCharacter, ...]:
     return tuple(_character_stream(line, screen_row))
+
+
+def _painted_spans(line: _RecordLine) -> tuple[PaintedSpan, ...]:
+    """Retain segment-sized painted ranges, including real indentation only."""
+    spans: list[PaintedSpan] = []
+    column = screen_column = 0
+    for segment in line.segments:
+        if segment.logical_column is not None:
+            column = segment.logical_column
+        cells = _text_cells(segment.text)
+        if segment.copyable and cells and column >= line.gutter_columns:
+            spans.append(PaintedSpan(screen_column, column - line.gutter_columns, segment.text, cells))
+        column += cells
+        screen_column += cells
+    return tuple(spans)
 
 
 def _logical_characters(line: _RecordLine, screen_row: int, state: ViewState,
@@ -962,6 +1043,7 @@ def _resolve_cursor(state: ViewState, characters: tuple[VisibleCharacter, ...]) 
 def _paint_record_line(
     line: _RecordLine, *, cursor: CursorPosition | None,
     container: FoldIdentity | None, color: bool, cursor_visible: bool = True,
+    selection: TextSelection | None = None,
 ) -> str:
     if not color:
         return _paint(line.segments, color=False)
@@ -970,6 +1052,7 @@ def _paint_record_line(
     cursor_column = (cursor.column if cursor is not None
                      and cursor.record_index == line.record_index
                      and cursor.line_index == line.line_index else None)
+    selected = selected_span(selection, line.record_index, line.line_index, line.body_cells)
     for segment in line.segments:
         if segment.logical_column is not None:
             column = segment.logical_column
@@ -981,7 +1064,11 @@ def _paint_record_line(
         focused_style = style + (";4" if matching else ";7")
         for cluster in _clusters(segment.text):
             focused = cursor_visible and segment.navigable and cursor_column == column
-            result.append(f"\x1b[{focused_style if focused else style}m{cluster}\x1b[0m")
+            body_column = column - line.gutter_columns
+            in_selection = (selected is not None and segment.copyable
+                            and selected[0] <= body_column < selected[1])
+            painted_style = _ANSI["selection"] if in_selection else focused_style if focused else style
+            result.append(f"\x1b[{painted_style}m{cluster}\x1b[0m")
             column += _text_cells(cluster)
     return "".join(result)
 
@@ -1073,10 +1160,14 @@ def _footer_lines(
         role = "muted" if projection_status or width_clipped else "footer"
     if not status:
         status = "Immutable snapshot • no persistent viewer state"
+    selected = selection_label(state.selection, state.selection_count)
+    if selected and not state.copy_notice:
+        status = selected
+        role = "warning"
     if horizontal_offset or max_horizontal_offset:
         cues = ("←" if horizontal_offset else "") + ("→" if horizontal_offset < max_horizontal_offset else "")
         horizontal = f"x {horizontal_offset} {cues}"
-        status = f"{horizontal} • {status}"
+        status = f"{status} • {horizontal}" if state.copy_notice or selected else f"{horizontal} • {status}"
     help_text = (
         ("←/→ pan • ? help • q close" if horizontal_offset or max_horizontal_offset else "? help • q close")
         if width < 100
@@ -1338,12 +1429,14 @@ def render_frame(
         if isinstance(line, _RecordLine):
             painted = _paint_record_line(
                 line, cursor=cursor, container=None if focused is None else focused.container, color=color,
+                selection=state.selection,
             )
             rendered_body.append(painted)
             if color and focused is not None and row == focused.screen_row:
                 idle_body.append(_paint_record_line(
                     line, cursor=cursor, container=focused.container,
                     color=color, cursor_visible=False,
+                    selection=state.selection,
                 ))
             else:
                 idle_body.append(painted)
@@ -1367,5 +1460,97 @@ def render_frame(
         horizontal_offset=horizontal_offset, max_horizontal_offset=max_horizontal_offset, body_width=body_width,
         columns=width, rows=height, color=color, gutter_columns=gutter_columns,
         properties=tuple(properties),
+        body_lines=tuple(BodyLine(line.record_index, line.line_index,
+                                 row + int(caret_rows and focused is not None and row > focused.screen_row),
+                                 line.body_cells, line.last_in_record, _painted_spans(line))
+                         for row, line in enumerate(body, start=len(header))
+                         if isinstance(line, _RecordLine)),
         idle_text="\n".join((rendered_header + idle_body + rendered_footer)[:height]),
     )
+
+
+def selection_hit(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                  frame: RenderResult, column: int, row: int, *,
+                  session: RenderSession | None = None, clamp: bool = False
+                  ) -> tuple[SelectionPoint, int] | None:
+    """Resolve only painted whole clusters, never decoration or hidden text."""
+    lines = tuple(line for line in frame.body_lines if line.spans)
+    if not lines:
+        return None
+    if not clamp and (column < frame.gutter_columns or column >= frame.columns):
+        return None
+    line = min(lines, key=lambda item: (abs(item.screen_row - row), item.screen_row))
+    if not clamp and line.screen_row != row:
+        return None
+    span = next((span for span in line.spans
+                 if span.screen_column <= column < span.screen_column + span.cells), None)
+    if span is None and not clamp:
+        return None
+    if span is None:
+        span = min(line.spans, key=lambda item: max(item.screen_column - column,
+                                                    column - item.screen_column - item.cells + 1, 0))
+    target = min(span.cells - 1, max(0, column - span.screen_column))
+    cell = 0
+    for cluster in _clusters(span.text):
+        width = _text_cells(cluster)
+        if cell <= target < cell + width:
+            return SelectionPoint(line.record_index, line.line_index, span.column + cell), width
+        cell += width
+    return None
+
+
+def clip_painted_frame(frame: RenderResult, rows: int) -> RenderResult:
+    """Restrict mouse/selection paint metadata to an outer composed viewport.
+
+    Sparse logical navigation candidates remain unchanged so composition does
+    not redefine cursor retention or the renderer's minimum navigation frame.
+    """
+    height = min(frame.rows, max(0, rows))
+    if height == frame.rows:
+        return frame
+    return replace(frame, rows=height, text="\n".join(frame.text.splitlines()[:height]),
+                   idle_text="\n".join(frame.idle_text.splitlines()[:height]) if frame.idle_text else None,
+                   characters=tuple(cell for cell in frame.characters if cell.screen_row < height),
+                   body_lines=tuple(line for line in frame.body_lines if line.screen_row < height))
+
+
+def selection_text(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                   session: RenderSession | None = None) -> str:
+    """Copy only the selected bounded projection; never reconstruct raw JSON."""
+    selection = state.selection
+    limits = selection_bounds(selection) if selection is not None else None
+    if limits is None:
+        return ""
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    first, last = limits
+
+    def rows():
+        start = selection.records.index(first.record_index)
+        finish = selection.records.index(last.record_index)
+        for index in selection.records[start:finish + 1]:
+            projection = session.projection(snapshot.records[index], index, spec, state)
+            lower = first.line_index if index == first.record_index else 0
+            upper = last.line_index + 1 if index == last.record_index else len(projection.lines)
+            for number in range(lower, upper):
+                yield SelectionTextRow(index, number,
+                                       tuple((segment.text, segment.copyable)
+                                             for segment in projection.lines[number].segments))
+
+    return selected_text(selection, rows())
+
+
+def selection_character_count(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                              session: RenderSession | None = None) -> int:
+    """Count scalar record totals plus two sparse boundary prefixes."""
+    selection = state.selection
+    limits = selection_bounds(selection) if selection is not None else None
+    if limits is None:
+        return 0
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    first, last = limits
+    records = selection.records[selection.records.index(first.record_index):
+                                selection.records.index(last.record_index) + 1]
+    count = session.copy_prefix_at(last, spec, state) - session.copy_prefix_at(first, spec, state)
+    return count + sum(session.copy_total(index, spec, state) for index in records[:-1]) + 2 * (len(records) - 1)

@@ -112,7 +112,7 @@ class TerminalScreen:
                     else:
                         self.in_alternate = False
                         self.row, self.column, self.wrap_pending = self.saved_cursor
-                elif number not in ("25", "1000", "1006"):
+                elif number not in ("25", "1000", "1002", "1006"):
                     raise AssertionError(f"unsupported terminal mode: {number}")
             return
         if final in ("H", "f"):

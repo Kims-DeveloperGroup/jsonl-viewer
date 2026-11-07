@@ -24,8 +24,8 @@ from tests.test_standalone_and_packaging import _TerminalBuffer
 from tests.terminal_screen import TerminalScreen
 
 
-_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"
-_LEAVE = "\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
+_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"
+_LEAVE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _SOURCE = b'{"content":"one"}\n{"content":"two"}\n'
 _SPEC = ViewerSpec("s", "c", "a")
 _RECOVERY_SOURCE = '{"content":"한글 한글","level":"error"}\n'.encode()
@@ -57,6 +57,30 @@ def _acquired(terminal, **kwargs):
 
 
 class OwnedTerminalTests(unittest.TestCase):
+    def test_drag_polling_changes_idle_deadline_without_changing_escape_deadline(self):
+        host = _terminal._TerminalHost(ViewerTerminal(io.StringIO(), io.StringIO()))
+        with mock.patch.object(_terminal.time, "monotonic", return_value=10), \
+                mock.patch.object(host, "_character", side_effect=_terminal._ReadTimeout) as read:
+            for active, expected in ((False, 10.5), (True, 10.05), (False, 10.5)):
+                host.set_autoscroll_active(active)
+                self.assertEqual(host._raw_event(), "idle")
+                self.assertAlmostEqual(read.call_args.args[0], expected)
+            host.set_autoscroll_active(True)
+            self.assertEqual(host._escape_event(), "key\tescape")
+            self.assertAlmostEqual(read.call_args.args[0], 10.02)
+
+    def test_native_clipboard_is_available_only_during_owned_interactive_view(self):
+        terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
+        with _acquired(terminal) as (host, _, _, _, _), \
+                mock.patch.object(_terminal, "copy_text", return_value=True) as copy:
+            with self.assertRaises(NotImplementedError):
+                host.copy_to_clipboard("before")
+            with host:
+                self.assertTrue(host.copy_to_clipboard("selected 한글"))
+            with self.assertRaises(NotImplementedError):
+                host.copy_to_clipboard("after")
+            copy.assert_called_once_with("selected 한글")
+
     def _recovery_view(self, spec, events, adapter):
         terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
         frames, pending = [], [*events, "text\tAFTER_VIEWER"]

@@ -5,9 +5,10 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import replace
 
-from ._mouse import hit_test, parse_mouse
-from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, ViewMode, ViewState, VisibleCharacter
-from ._render import RenderSession, render_frame
+from ._mouse import MouseEvent, hit_test, parse_mouse
+from ._model import FoldIdentity, PromptState, RenderResult, SearchState, Snapshot, TextSelection, ViewMode, ViewState, VisibleCharacter
+from ._render import RenderSession, clip_painted_frame, render_frame, selection_character_count, selection_hit
+from ._selection import clear_selection
 from ._search import SearchLimitError, find_matches
 from .contracts import ViewerSpec
 
@@ -152,6 +153,117 @@ def _clear_message(state: ViewState) -> ViewState:
     return replace(state, message=None, message_is_error=False)
 
 
+def _selection_edges(state: ViewState, frame: RenderResult) -> tuple[int, int]:
+    selection = state.selection
+    if (selection is None or not selection.dragging
+            or not (selection.moved or selection.edge_intent) or not frame.body_lines):
+        return 0, 0
+    top = min(line.screen_row for line in frame.body_lines)
+    bottom = max(line.screen_row for line in frame.body_lines)
+    if top == bottom:
+        vertical = -1 if selection.pointer_row < top else 1 if selection.pointer_row > bottom else 0
+    else:
+        vertical = -1 if selection.pointer_row <= top else 1 if selection.pointer_row >= bottom else 0
+    horizontal = (-1 if selection.pointer_column <= frame.gutter_columns else
+                  1 if selection.pointer_column >= frame.columns - 1 else 0)
+    if (vertical < 0 and state.selected_index == selection.records[0] and not state.record_line_offset
+            or vertical > 0 and frame.body_lines[-1].record_index == selection.records[-1]
+            and frame.body_lines[-1].last_in_record):
+        vertical = 0
+    if (horizontal < 0 and not state.horizontal_offset
+            or horizontal > 0 and state.horizontal_offset >= frame.max_horizontal_offset):
+        horizontal = 0
+    return horizontal, vertical
+
+
+def selection_autoscroll(state: ViewState, frame: RenderResult | None) -> bool:
+    return frame is not None and any(_selection_edges(state, frame))
+
+
+def _drag_pointer(state: ViewState, mouse: MouseEvent, snapshot: Snapshot,
+                  spec: ViewerSpec, frame: RenderResult, session: RenderSession | None) -> ViewState:
+    selection = state.selection
+    assert selection is not None
+    hit = selection_hit(snapshot, spec, state, frame, mouse.column - 1, mouse.row - 1,
+                        session=session, clamp=True)
+    if hit is None:
+        return state
+    point, width = hit
+    lines = tuple(line for line in frame.body_lines if line.spans)
+    nearest = min(lines, key=lambda line: abs(line.screen_row - (mouse.row - 1)))
+    outside = (mouse.row - 1 < lines[0].screen_row or mouse.row - 1 > lines[-1].screen_row
+               or mouse.column - 1 < nearest.spans[0].screen_column
+               or mouse.column - 1 >= nearest.spans[-1].screen_column + nearest.spans[-1].cells)
+    selection = replace(selection, extent=point, extent_width=width,
+                        pointer_column=mouse.column - 1, pointer_row=mouse.row - 1,
+                        moved=selection.moved or point != selection.anchor,
+                        edge_intent=selection.edge_intent or (mouse.action == "drag" and outside),
+                        dragging=mouse.action != "release")
+    if mouse.action == "release" and not selection.moved:
+        return clear_selection(state)
+    state = replace(state, selection=selection, copy_pending=mouse.action == "release")
+    return replace(state, selection_count=selection_character_count(snapshot, spec, state, session))
+
+
+def _drag_step(state: ViewState, snapshot: Snapshot, spec: ViewerSpec,
+               frame: RenderResult, session: RenderSession | None,
+               direction: tuple[int, int] | None = None) -> ViewState:
+    selection = state.selection
+    if selection is None or not selection.dragging:
+        return state
+    horizontal, vertical = direction if direction is not None else _selection_edges(state, frame)
+    if not (horizontal or vertical):
+        return state
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    records = selection.records
+    index, offset = state.selected_index, state.record_line_offset
+    position = records.index(index)
+    projection = session.projection(snapshot.records[index], index, spec, state)
+    if vertical > 0:
+        last = frame.body_lines[-1]
+        if not (last.record_index == records[-1] and last.last_in_record):
+            if offset + 1 < len(projection.lines):
+                offset += 1
+            elif position + 1 < len(records):
+                index, offset = records[position + 1], 0
+    elif vertical < 0:
+        if offset:
+            offset -= 1
+        elif position:
+            index = records[position - 1]
+            previous = session.projection(snapshot.records[index], index, spec, state)
+            offset = max(0, len(previous.lines) - 1)
+    pan = min(frame.max_horizontal_offset, max(0, state.horizontal_offset + horizontal * 2))
+    if (index, offset, pan) == (state.selected_index, state.record_line_offset, state.horizontal_offset):
+        return state
+    updated = replace(state, selected_index=index, record_line_offset=offset,
+                      horizontal_offset=pan, reveal_cursor=False, reveal_match=False,
+                      focus_container=None, focus_property=None)
+    painted = render_frame(spec, updated, snapshot=snapshot, diagnostic=None,
+                           columns=frame.columns, rows=frame.rows, color=frame.color,
+                           session=session, visible_indices=records,
+                           chrome=bool(frame.body_lines[0].screen_row))
+    painted = clip_painted_frame(painted, frame.rows)
+    updated = _accept_frame(updated, painted)
+    return _drag_pointer(updated, MouseEvent(32, selection.pointer_column + 1,
+                                             selection.pointer_row + 1, "press"),
+                         snapshot, spec, painted, session)
+
+
+def drag_mouse(state: ViewState, mouse: MouseEvent, snapshot: Snapshot,
+               spec: ViewerSpec, frame: RenderResult,
+               session: RenderSession | None = None) -> ViewState:
+    """Consume one captured report with at most one motion-driven edge step."""
+    if mouse.action in {"drag", "release"}:
+        updated = _drag_pointer(state, mouse, snapshot, spec, frame, session)
+        return _drag_step(updated, snapshot, spec, frame, session) if mouse.action == "drag" else updated
+    if mouse.action in {"cursor_up", "cursor_down"}:
+        return _drag_step(state, snapshot, spec, frame, session,
+                          (0, -1 if mouse.action == "cursor_up" else 1))
+    return state
+
+
 def _transition(
     state: ViewState,
     event: object,
@@ -163,9 +275,18 @@ def _transition(
     malformed: bool = False,
     rendered: RenderResult | None = None,
     session: RenderSession | None = None,
+    document_indices: tuple[int, ...] | None = None,
 ) -> tuple[ViewState, bool]:
     """Validate transport before applying context-sensitive viewer behavior."""
 
+    if event == "idle" and rendered is not None:
+        return _drag_step(state, snapshot, spec, rendered, session), False
+    if (event != "idle" and not (type(event) is str and event.startswith("mouse\t"))
+            and (state.selection is not None or state.copy_notice)):
+        had_selection = state.selection is not None
+        state = clear_selection(state)
+        if had_selection and type(event) is str and event in {"cancel", "key\tescape", "key\tinterrupt"}:
+            return state, False
     rendered_state = state
 
     def projection_key(current: ViewState) -> tuple:
@@ -199,19 +320,34 @@ def _transition(
     if spec.input_protocol == "keys" and event.startswith("mouse\t"):
         mouse = parse_mouse(event)
         if (mouse is None or rendered is None or state.prompt is not None
-                or state.help_visible or malformed
-                or not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows)):
+                or state.help_visible or malformed):
             return state, False
+        captured = (state.selection is not None and state.selection.dragging
+                    and mouse.action in {"drag", "release", "cursor_up", "cursor_down"})
+        if not captured and not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows):
+            return state, False
+        if state.selection is not None and state.selection.dragging:
+            if mouse.action in {"drag", "release", "cursor_up", "cursor_down"}:
+                return drag_mouse(state, mouse, snapshot, spec, rendered, session), False
         if mouse.action in {"cursor_up", "cursor_down"}:
-            return action(state, mouse.action)
+            return action(clear_selection(state), mouse.action)
         if mouse.action == "click":
+            state = clear_selection(state)
             cell = hit_test(mouse, rendered)
             if cell is not None:
-                return replace(state, cursor=cell.position,
-                               preferred_column=cell.position.column,
-                               focus_container=None, focus_property=None,
-                               reveal_match=False, reveal_cursor=False,
-                               message=None, message_is_error=False), False
+                state = replace(state, cursor=cell.position,
+                                preferred_column=cell.position.column,
+                                focus_container=None, focus_property=None,
+                                reveal_match=False, reveal_cursor=False,
+                                message=None, message_is_error=False)
+            hit = selection_hit(snapshot, spec, state, rendered, mouse.column - 1, mouse.row - 1,
+                                session=session)
+            if hit is not None:
+                point, width = hit
+                records = document_indices if document_indices is not None else tuple(range(len(snapshot.records)))
+                state = replace(state, selection=TextSelection(point, point, width, width, records,
+                                                               mouse.column - 1, mouse.row - 1))
+            return state, False
         return state, False
     if len(event) > _MAX_EVENT_CHARACTERS + len("text\t"):
         return _input_error(state, "Unsupported host event; press ? for help."), False
