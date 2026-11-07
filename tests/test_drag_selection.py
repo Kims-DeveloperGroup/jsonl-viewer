@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 import unittest
 from unittest import mock
 
@@ -63,6 +64,12 @@ def _edge(direction, *, button=32, phase="press"):
             column = 1
         return f"mouse\t{button}\t{column}\t{row}\t{phase}"
     return event
+
+
+def _caret_character(frame):
+    rows = strip_ansi(frame).splitlines()
+    caret = next(index for index, row in enumerate(rows) if row.strip() == "^")
+    return rows[caret - 1][rows[caret].index("^")]
 
 
 class _CopyHost(FakeHost):
@@ -156,6 +163,47 @@ class DragSelectionTests(unittest.TestCase):
                 ))
                 self.assertEqual(host.copied, [])
                 self.assertFalse(any("Copied" in strip_ansi(frame) for frame in host.frames))
+
+    def test_pending_press_wheel_keeps_cursor_navigation_with_idle_or_release(self):
+        for inspection in (None, Inspection()):
+            for idle_count in (0, 2):
+                for release in (False, True):
+                    for button, expected in ((64, "{"), (65, "}")):
+                        with self.subTest(inspection=inspection is not None, idle=idle_count,
+                                          release=release, button=button):
+                            host = self._view(({"content": "one"},), (
+                                _Point('"content"', '"content"', saved="anchor"),
+                                *("idle" for _ in range(idle_count)),
+                                *((_saved("anchor"),) if release else ()),
+                                _saved("anchor", button=button, phase="press"),
+                                _Mark("wheel"),
+                            ), inspection=inspection)
+                            self.assertEqual(_caret_character(host.marks["wheel"]), expected)
+                            self.assertEqual(host.copied, [])
+                            self.assertNotIn(True, host.polling)
+
+    def test_wheel_remains_captured_for_moved_or_outward_intent_drags(self):
+        for inspection in (None, Inspection()):
+            with self.subTest(inspection=inspection is not None, drag="moved"):
+                host = self._view(({"content": [f"row-{i:02}" for i in range(24)]},), (
+                    _Point('"row-00"', "row-00", saved="anchor"),
+                    _Point('"row-01"', "row-01", button=32, saved="end"),
+                    _Mark("before-wheel"),
+                    _saved("anchor", button=65, phase="press"), _Mark("wheel"),
+                    _saved("end"),
+                ), inspection=inspection, size=(55, 14))
+                last_rows = [max(map(int, re.findall(r'"row-(\d{2})"', strip_ansi(host.marks[name]))))
+                             for name in ("before-wheel", "wheel")]
+                self.assertEqual(last_rows[1], last_rows[0] + 1)
+                self.assertEqual(len(host.copied), 1)
+                self.assertIn("row-01", host.copied[0])
+            with self.subTest(inspection=inspection is not None, drag="outward-intent"):
+                host = self._view(({"content": "one"},), (
+                    _Point("{", "{", saved="anchor"), _edge("top"),
+                    _saved("anchor", button=65, phase="press"), _Mark("wheel"),
+                    _edge("top", button=0, phase="release"),
+                ), inspection=inspection)
+                self.assertEqual(_caret_character(host.marks["wheel"]), "{")
 
     def test_real_drag_returning_to_anchor_copies_one_complete_glyph(self):
         host = self._view(({"content": "界ab"},), (
