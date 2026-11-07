@@ -357,7 +357,7 @@ and existing history without changing terminal preferences or erasing saved
 history. Previously archived viewer rows remain in existing history. Injected
 hosts retain responsibility for their own screen presentation and cleanup.
 
-### Mouse selection and navigation (0.8.2)
+### Mouse selection and navigation (0.8.3)
 
 Ordinary mouse-wheel reports move the cursor one navigable line, like `j`/`k`,
 including automatic viewport scrolling. A left press on a visible JSON character
@@ -400,9 +400,10 @@ arguments and a two-second timeout, without a shell or Python runtime dependency
 Clipboard contents outlive the viewer until replaced. SSH clipboard forwarding
 is outside this feature's scope.
 
-The terminal owner preserves the legacy click-tracking activation (`1000`), then
-enables button-motion tracking (`1002`) and SGR coordinates (`1006`). Cleanup
-disables all three modes. A plain click followed by a wheel event keeps ordinary
+The terminal owner enables SGR coordinates (`1006`), preserves the contiguous
+legacy click-tracking activation (`1000`), then enables button-motion tracking
+(`1002`). Cleanup disables all three modes.
+A plain click followed by a wheel event keeps ordinary
 wheel navigation; selection scrolling starts after actual drag intent. Ordinary wheel input therefore
 goes to the viewer rather than terminal history. iTerm2 must permit mouse and
 wheel reporting: disabling reporting or holding Option can force the emulator's
