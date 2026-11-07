@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from contextlib import ExitStack
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -45,6 +46,85 @@ class _MemoryAdapter:
 
 
 class InputSourceLifecycleTests(unittest.TestCase):
+    def test_command_recovery_refreshes_native_state_without_replacing_entry(self):
+        korean = InputSourceState(("ko", "two-set", "active"), False)
+        for entry in (korean, InputSourceState(("en-GB",), True)):
+            with self.subTest(entry=entry):
+                adapter = _MemoryAdapter(entry)
+                owner = InputSourceLifecycle(lambda *_: adapter)
+                owner.start(io.StringIO(), io.StringIO(), live=True)
+                owner.set_input_mode("command")
+                reads = adapter.reads
+                for text in ("", "j", "/한글", "g 2"):
+                    self.assertFalse(owner.recover_command_text(text))
+                self.assertEqual(adapter.reads, reads)
+                adapter.current = korean
+                selections = len(adapter.selections)
+                self.assertTrue(owner.recover_command_text("ㅎ"))
+                self.assertEqual(adapter.current, adapter.english)
+                self.assertEqual(adapter.reads, reads + 2)
+                self.assertEqual(len(adapter.selections), selections + 1)
+                adapter.current = InputSourceState(("en-AU",), True)
+                selections = list(adapter.selections)
+                self.assertTrue(owner.recover_command_text("ㅎ"))
+                self.assertEqual(adapter.selections, selections)
+                self.assertEqual(adapter.english_reads, 1)
+                owner.set_input_mode("text")
+                adapter.current = korean
+                reads = adapter.reads
+                self.assertFalse(owner.recover_command_text("한글"))
+                self.assertEqual(adapter.reads, reads)
+                owner.stop()
+                self.assertEqual(adapter.current, entry)
+                reads, selections = adapter.reads, list(adapter.selections)
+                owner.stop()
+                self.assertFalse(owner.recover_command_text("ㅎ"))
+                self.assertEqual((adapter.reads, adapter.selections), (reads, selections))
+
+    def test_recovery_requires_discovery_and_verified_post_selection_english(self):
+        entry = InputSourceState(("ko", "two-set"), False)
+        for fault in ("unsupported", "factory", "entry_read", "entry_missing", "english_missing", "english_read"):
+            with self.subTest(discovery=fault):
+                adapter = _MemoryAdapter(entry)
+                factory = mock.Mock(return_value=None if fault == "unsupported" else adapter)
+                if fault == "factory":
+                    factory.side_effect = OSError("discovery failed")
+                elif fault == "entry_read":
+                    adapter.read_failure = OSError("entry observation failed")
+                elif fault == "entry_missing":
+                    adapter.current = None
+                elif fault == "english_missing":
+                    adapter.english = None
+                elif fault == "english_read":
+                    adapter.english_source = mock.Mock(side_effect=OSError("English discovery failed"))
+                owner = InputSourceLifecycle(factory)
+                owner.start(io.StringIO(), io.StringIO(), live=True)
+                owner.set_input_mode("command")
+                self.assertFalse(owner.recover_command_text("ㅎ"))
+                owner.stop()
+                self.assertEqual(adapter.selections, [])
+        for fault in ("read", "select", "uncertain_select", "post_read", "post_missing", "post_wrong"):
+            with self.subTest(recovery=fault):
+                adapter = _MemoryAdapter(entry)
+                owner = InputSourceLifecycle(lambda *_: adapter)
+                owner.start(io.StringIO(), io.StringIO(), live=True)
+                owner.set_input_mode("command")
+                adapter.current = entry
+                with ExitStack() as stack:
+                    if fault == "read":
+                        adapter.read_failure = OSError("fresh observation failed")
+                    elif fault == "select":
+                        stack.enter_context(mock.patch.object(adapter, "select_source", side_effect=OSError("selection failed")))
+                    elif fault == "uncertain_select":
+                        adapter.selection_failure = TimeoutError("selection outcome unknown")
+                    else:
+                        observed = {"post_read": OSError("post observation failed"),
+                                    "post_missing": None, "post_wrong": entry}[fault]
+                        stack.enter_context(mock.patch.object(adapter, "current_source", side_effect=[entry, observed]))
+                    self.assertFalse(owner.recover_command_text("ㅎ"))
+                owner.stop()
+                self.assertEqual(adapter.current, entry)
+
     def test_command_text_and_close_restore_one_exact_entry_source(self):
         entry = InputSourceState(("ko",), False)
         manual = InputSourceState(("ja",), False)
