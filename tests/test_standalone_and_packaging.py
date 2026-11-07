@@ -395,7 +395,7 @@ class StandaloneTests(unittest.TestCase):
                 script = _RawScript(raw, [])
                 event, before, complete, _, termios, tty = self._scripted_event(script)
                 self.assertEqual(event, expected)
-                self.assertTrue(before.startswith("\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"))
+                self.assertTrue(before.startswith("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h"))
                 self.assertIn(_ROW_PRESENT.decode() + "PRIOR FRAME", before)
                 self.assertNotIn("\x1b[2J", before)
                 self.assertTrue(complete.endswith("\x1b[?25h\x1b[?1049l"))
@@ -1055,7 +1055,7 @@ class PackagingBoundaryTests(unittest.TestCase):
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
         project = metadata["project"]
         self.assertEqual(project["name"], "jsonl-viewer")
-        self.assertEqual(project["version"], "0.8.0")
+        self.assertEqual(project["version"], "0.8.1")
         self.assertEqual(project["requires-python"], ">=3.11")
         self.assertEqual(project["dependencies"], [])
         self.assertEqual(project["license"], "MIT")
