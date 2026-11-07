@@ -26,7 +26,8 @@ class InputSourceLifecycle:
 
     A failed optional discovery or selection never changes viewer text or
     replaces a terminal failure. Source observation happens only at acquisition,
-    mode changes, and cleanup; there is no per-key or idle polling.
+    mode changes, invalid command-text recovery, and cleanup; ASCII input and
+    idle events never poll the source.
     """
 
     def __init__(self, adapter_factory: Callable[
@@ -76,6 +77,16 @@ class InputSourceLifecycle:
         else:
             self._change(self._entry)
 
+    def recover_command_text(self, text: str) -> bool:
+        """Verify English after invalid leading non-ASCII command input."""
+        if (not self._active or self._mode != "command" or not text
+                or text[0].isascii() or self._adapter is None
+                or self._entry is None or self._english is None):
+            return False
+        # An uncertain partial selection must retain exact-entry cleanup too.
+        self._restoration_pending = True
+        return self._change(self._english, retain_english=True)
+
     def stop(self) -> None:
         try:
             if self._restoration_pending:
@@ -88,24 +99,27 @@ class InputSourceLifecycle:
             self._mode = None
             self._restoration_pending = False
 
-    def _change(self, target: InputSourceState | None, *, retain_english: bool = False) -> None:
+    def _change(self, target: InputSourceState | None, *, retain_english: bool = False) -> bool:
         adapter = self._adapter
         if adapter is None or target is None:
-            return
+            return False
         try:
             current = adapter.current_source()
         except Exception:
             current = None
         if isinstance(current, InputSourceState):
             if current == target or (retain_english and current.english):
-                return
+                return True
         elif retain_english:
-            return
+            return False
         try:
             # Restoration must still be attempted after an uncertain partial
             # selection, even when observing the current source has failed.
             adapter.select_source(target)
             # A fresh read also refreshes native source caches after selection.
-            adapter.current_source()
+            observed = adapter.current_source()
         except Exception:
-            return
+            return False
+        return isinstance(observed, InputSourceState) and (
+            observed == target or (retain_english and observed.english)
+        )

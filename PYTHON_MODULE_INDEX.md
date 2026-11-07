@@ -183,12 +183,14 @@ imports do not authenticate, launch helpers or alter terminal/input-source state
 ### `jsonl_viewer._terminal`
 
 Source: `src/jsonl_viewer/_terminal.py`. Owns explicit terminal acquisition, bounded
-physical decoding, presentation and visible cleanup. Caller streams stay open.
+physical decoding, event-triggered command-source recovery, presentation and visible
+cleanup. Caller streams stay open.
 
 ### `jsonl_viewer._input_sources`
 
 Source: `src/jsonl_viewer/_input_sources.py`. Owns the explicit keyboard-source
-lifecycle, mode transitions and restoration through a generic adapter protocol.
+lifecycle, mode transitions, verified command recovery and exact-entry restoration
+through a generic adapter protocol. ASCII input, search text and idle never poll.
 
 ### `jsonl_viewer._input_sources_macos`
 
