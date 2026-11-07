@@ -214,7 +214,7 @@ imports do not authenticate, launch helpers or alter terminal/input-source state
 ### `jsonl_viewer._terminal`
 
 Source: `src/jsonl_viewer/_terminal.py`. Owns explicit terminal acquisition, bounded
-physical decoding, presentation and visible cleanup. Button-event mouse tracking
+physical decoding, event-triggered command-source recovery, presentation and visible cleanup. Button-event mouse tracking
 reports drag motion; optional edge polling uses 50 ms while ordinary idle remains
 500 ms and escape decoding retains its separate deadline. Caller streams stay open.
 
@@ -230,7 +230,8 @@ Native-adapter tests mock helpers; README documents local clipboard support.
 ### `jsonl_viewer._input_sources`
 
 Source: `src/jsonl_viewer/_input_sources.py`. Owns the explicit keyboard-source
-lifecycle, mode transitions and restoration through a generic adapter protocol.
+lifecycle, mode transitions, verified command recovery and exact-entry restoration
+through a generic adapter protocol. ASCII input, search text and idle never poll.
 
 ### `jsonl_viewer._input_sources_macos`
 

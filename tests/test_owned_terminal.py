@@ -15,7 +15,10 @@ from unittest import mock
 
 from jsonl_viewer import ViewerSpec, ViewerTerminal, view_jsonl
 from jsonl_viewer import _terminal
-from tests.support import FakeHost
+from jsonl_viewer._input_sources import InputSourceState
+from jsonl_viewer.inspection import Facet, Inspection, SearchScope, Target
+from tests.support import FakeHost, without_caret
+from tests.test_input_sources import _MemoryAdapter
 from tests import test_standalone_and_packaging as standalone_tests
 from tests.test_standalone_and_packaging import _TerminalBuffer
 from tests.terminal_screen import TerminalScreen
@@ -25,6 +28,10 @@ _ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"
 _LEAVE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _SOURCE = b'{"content":"one"}\n{"content":"two"}\n'
 _SPEC = ViewerSpec("s", "c", "a")
+_RECOVERY_SOURCE = '{"content":"한글 한글","level":"error"}\n'.encode()
+_RECOVERY_INSPECTION = ViewerSpec(inspection=Inspection(
+    facets=(Facet("level", "Level", path=("level",)),),
+    scopes=(SearchScope("content", "Content", (Target(1, ("content",)),)),)))
 
 
 @contextmanager
@@ -73,6 +80,195 @@ class OwnedTerminalTests(unittest.TestCase):
             with self.assertRaises(NotImplementedError):
                 host.copy_to_clipboard("after")
             copy.assert_called_once_with("selected 한글")
+
+    def _recovery_view(self, spec, events, adapter):
+        terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer(), no_color=True)
+        frames, pending = [], [*events, "text\tAFTER_VIEWER"]
+        with mock.patch.object(_terminal, "_desktop_input_source_adapter", return_value=adapter) as factory:
+            with _acquired(terminal, transient_only=True) as (host, termios, _, _, saved):
+                original_present = host.present
+
+                def present(frame):
+                    frames.append(frame)
+                    original_present(frame)
+
+                def read():
+                    event = pending.pop(0)
+                    self.assertNotEqual(event, "text\tAFTER_VIEWER", "viewer consumed following input")
+                    return event(adapter, frames) if callable(event) else event
+
+                with mock.patch.object(host, "_raw_event", side_effect=read), \
+                        mock.patch.object(host, "present", side_effect=present), \
+                        mock.patch.object(host, "close_view", wraps=host.close_view) as closed, \
+                        mock.patch.object(_terminal, "_TerminalHost", return_value=host):
+                    original = bytes(_RECOVERY_SOURCE)
+                    view_jsonl(_RECOVERY_SOURCE, spec, terminal=terminal, transient_only=True)
+                self.assertEqual(closed.call_count, 1)
+                self.assertEqual(termios.tcsetattr.call_args_list.count(mock.call(17, termios.TCSADRAIN, saved)), 1)
+        factory.assert_called_once_with(terminal.input_stream, terminal.output_stream)
+        self.assertEqual(pending, ["text\tAFTER_VIEWER"])
+        self.assertEqual(_RECOVERY_SOURCE, original)
+        self.assertEqual(terminal.output_stream.getvalue().count(_ENTER), 1)
+        self.assertEqual(terminal.output_stream.getvalue().count(_LEAVE), 1)
+        self.assertFalse(terminal.input_stream.closed)
+        self.assertFalse(terminal.output_stream.closed)
+        return frames
+
+    def test_manual_korean_switch_recovers_once_in_both_owned_engines(self):
+        korean = InputSourceState(("ko", "two-set", "active"), False)
+        for spec in (_SPEC, _RECOVERY_INSPECTION):
+            for entry in (korean, InputSourceState(("en-GB",), True)):
+                with self.subTest(inspection=spec.inspection is not None, entry=entry):
+                    adapter, observed = _MemoryAdapter(entry), {}
+
+                    def baseline(native, frames):
+                        self.assertTrue(native.current.english)
+                        observed["reads"] = native.reads
+                        return "idle"
+
+                    def manual(native, frames):
+                        self.assertEqual(native.reads, observed["reads"])
+                        native.current = korean
+                        observed["selections"] = len(native.selections)
+                        return "text\tㅎ"
+
+                    def recovered(native, frames):
+                        self.assertEqual(native.current, native.english)
+                        self.assertEqual(native.reads, observed["reads"] + 2)
+                        self.assertEqual(len(native.selections), observed["selections"] + 1)
+                        self.assertNotIn("switch your keyboard", frames[-1])
+                        return "text\t?"
+
+                    def leave_help(native, frames):
+                        self.assertIn("help", frames[-1].lower())
+                        return "key\tescape"
+
+                    self._recovery_view(spec, (baseline, "idle", "text\tj", "text\tk", manual,
+                                              recovered, leave_help, "text\tq"), adapter)
+                    self.assertEqual(adapter.current, entry)
+                    self.assertEqual(adapter.english_reads, 1)
+
+    def test_recovery_obeys_command_subviews_and_literal_search_query_mode(self):
+        entry = InputSourceState(("ko", "two-set"), False)
+        for spec in (_SPEC, _RECOVERY_INSPECTION):
+            contexts = [("help", ("text\t?",), ()), ("goto", ("text\tg",), ())]
+            if spec.inspection is not None:
+                contexts += [("filters", ("text\tf",), ()),
+                             ("options", ("text\tf", "key\tenter"), ("key\tescape",)),
+                             ("scope", ("text\t/", "key\ttab"), ()),
+                             ("annotations", ("text\ta",), ())]
+            for name, enter, leave in contexts:
+                with self.subTest(inspection=spec.inspection is not None, context=name):
+                    adapter, observed = _MemoryAdapter(entry), {}
+
+                    def manual(native, frames):
+                        self.assertTrue(native.current.english)
+                        observed["frame"] = without_caret(frames[-1])
+                        native.current = entry
+                        return "text\tㅎ"
+
+                    def recovered(native, frames):
+                        self.assertEqual(native.current, native.english)
+                        self.assertEqual(without_caret(frames[-1]), observed["frame"])
+                        return "key\tescape"
+
+                    self._recovery_view(spec, (*enter, manual, recovered, *leave, "text\tq"), adapter)
+                    self.assertEqual(adapter.current, entry)
+            with self.subTest(inspection=spec.inspection is not None, context="query"):
+                adapter, observed = _MemoryAdapter(entry), {}
+
+                def korean_query(native, frames):
+                    native.current = entry
+                    observed["reads"] = native.reads
+                    observed["selections"] = list(native.selections)
+                    return "text\t한글"
+
+                def submit(native, frames):
+                    self.assertEqual(native.current, entry)
+                    self.assertEqual(native.reads, observed["reads"])
+                    self.assertEqual(native.selections, observed["selections"])
+                    return "key\tenter"
+
+                def searched(native, frames):
+                    label = "Search: '한글'" if spec.inspection is not None else "Search all text='한글'"
+                    self.assertIn(label, frames[-1])
+                    self.assertIn("2 occurrences", frames[-1])
+                    return "text\tq"
+
+                self._recovery_view(spec, ("text\t/", korean_query, submit, searched), adapter)
+                self.assertEqual(adapter.current, entry)
+
+    def test_ascii_prefixed_unicode_search_and_line_fallback_remain_literal(self):
+        entry = InputSourceState(("ko", "two-set"), False)
+        for spec in (_SPEC, _RECOVERY_INSPECTION):
+            label = "Search: '한글'" if spec.inspection is not None else "Search all text='한글'"
+            for prefix in ("text", "line"):
+                with self.subTest(inspection=spec.inspection is not None, transport=prefix):
+                    adapter, observed = _MemoryAdapter(entry), {}
+
+                    def prefixed(native, frames):
+                        native.current = entry
+                        observed["selections"] = list(native.selections)
+                        return prefix + ("\t/한글" if prefix == "text" else "\t/ 한글")
+
+                    def submit(native, frames):
+                        self.assertEqual(native.selections, observed["selections"])
+                        return "key\tenter"
+
+                    def searched(native, frames):
+                        self.assertIn(label, frames[-1])
+                        self.assertIn("2 occurrences", frames[-1])
+                        return "text\tq"
+
+                    events = (prefixed, submit, searched) if prefix == "text" else (prefixed, searched)
+                    self._recovery_view(spec, events, adapter)
+                    self.assertEqual(adapter.current, entry)
+            with self.subTest(inspection=spec.inspection is not None, transport="actual_line_fallback"):
+                input_stream, output_stream = io.StringIO("/ 한글\nq\nTAIL\n"), io.StringIO()
+                with mock.patch.object(_terminal, "_desktop_input_source_adapter") as factory:
+                    view_jsonl(_RECOVERY_SOURCE, spec, terminal=ViewerTerminal(input_stream, output_stream))
+                factory.assert_not_called()
+                self.assertIn(label, output_stream.getvalue())
+                self.assertIn("2 occurrences", output_stream.getvalue())
+                self.assertEqual(input_stream.readline(), "TAIL\n")
+                self.assertFalse(input_stream.closed)
+                self.assertFalse(output_stream.closed)
+
+    def test_unverified_recovery_keeps_command_feedback_and_exact_cleanup(self):
+        entry = InputSourceState(("ko", "two-set"), False)
+        for spec in (_SPEC, _RECOVERY_INSPECTION):
+            for fault in ("unsupported", "read", "uncertain_select", "post_missing", "interrupt"):
+                with self.subTest(inspection=spec.inspection is not None, fault=fault):
+                    adapter = None if fault == "unsupported" else _MemoryAdapter(entry)
+
+                    def invalid(native, frames):
+                        if native is not None:
+                            native.current = entry
+                            if fault == "read":
+                                native.read_failure = OSError("fresh source unavailable")
+                            elif fault == "uncertain_select":
+                                native.selection_failure = TimeoutError("selection outcome unknown")
+                            elif fault == "interrupt":
+                                native.selection_failure = KeyboardInterrupt()
+                            elif fault == "post_missing":
+                                original_read, observations = native.current_source, []
+
+                                def observe():
+                                    value = original_read()
+                                    observations.append(value)
+                                    return None if len(observations) == 2 else value
+
+                                native.current_source = observe
+                        return "text\tㅎ"
+
+                    def feedback(native, frames):
+                        self.assertIn("switch your keyboard input to English", frames[-1])
+                        return "text\tq"
+
+                    events = (invalid,) if fault == "interrupt" else (invalid, feedback)
+                    self._recovery_view(spec, events, adapter)
+                    if adapter is not None:
+                        self.assertEqual(adapter.current, entry)
 
     def test_public_signature_defaults_and_immutable_terminal_adapter(self):
         signature = inspect.signature(view_jsonl)

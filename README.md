@@ -197,10 +197,20 @@ Successful submission or cancellation selects English again; an invalid search
 keeps its draft and text input active. Closing the view attempts to restore the
 exact entry source, including after interruption or a terminal failure.
 
-The viewer switches only when the input context changes. You can still change
-the language manually within a context. Non-English navigation input performs
-no command and displays guidance to select English; input is never transliterated.
-The saved source is not hard-coded to Korean or replaced by a later OS choice.
+In 0.7.2, changing to a non-English input source while the viewer is open no
+longer leaves command input waiting for a manual language switch. If a command
+text event begins with a non-ASCII character, the owned terminal attempts to
+select English and verifies the result. On success it consumes that invalid
+event without running a command; press the command key again. Search drafts and
+ASCII-prefixed text events such as `/한글` stay literal. Ordinary line input
+keeps its existing grammar, including `/ QUERY` for a submitted search.
+If source control is unavailable or recovery fails, the original event reaches
+the existing command handling and manual-switch guidance remains available.
+The saved entry source is never replaced by this recovery or a later OS choice.
+
+Source reads occur at context changes, recovery attempts, and cleanup. ASCII
+commands, physical control keys, and idle redraws do not trigger source polling.
+Received text is never transliterated or replayed as an English command.
 
 macOS uses native TIS/CoreFoundation calls and refreshes pending source-change
 notifications before observing the current source. Linux supports a configured

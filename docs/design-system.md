@@ -660,15 +660,22 @@ For an owned local interactive terminal, the source controller captures the exac
 entry input source once. Command entry selects an enabled English source; search
 entry restores the saved source. Search validation errors retain text mode, and
 submission or cancellation returns to command mode. Draft text remains literal
-Unicode. Non-English navigation input has no action and receives English-keyboard
-guidance in the existing error/status footer. No new layout or color role is used.
+Unicode. In command mode, an interactive text event beginning with a non-ASCII
+character requests English recovery. The source owner verifies English before
+the transport consumes the invalid event as a no-op; the user enters the command
+again. Recovery does not replay a key, change selection, or rewrite query text.
+ASCII-prefixed text such as `/한글`, every line envelope, and text-mode search
+input remain unchanged. Failed or unsupported recovery leaves the original event
+to existing command handling and guidance. No new layout or color role is used.
 
 macOS source reads first service pending input-source notifications with one
 nonblocking default-mode CoreFoundation run-loop poll, so an already-English
 decision uses fresh state. Linux adapters use configured or unambiguous installed
 IBus/Fcitx5 tools with bounded calls. Remote, multiplexed, background, redirected,
 or unsupported sessions keep manual selection. Switching happens on context
-transitions, preserving manual choices within a context without per-key polling.
+transitions and invalid non-ASCII command text, without polling on ASCII keys,
+physical controls, or idle. Recovery retains the exact entry restore target and
+cleanup responsibility even when a native selection has an uncertain outcome.
 
 Input-source restoration is attempted independently of screen/termios cleanup on
 every owned-view exit and before termination-signal redelivery. Source-control

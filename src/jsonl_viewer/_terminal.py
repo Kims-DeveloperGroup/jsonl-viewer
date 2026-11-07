@@ -519,7 +519,12 @@ class _TerminalHost:
 
     def read_event(self) -> str | None:
         try:
-            return self._raw_event() if self._interactive else self._line_event()
+            event = self._raw_event() if self._interactive else self._line_event()
+            if (self._interactive and event is not None and event.startswith("text\t")
+                    and len(event) > 5 and not event[5].isascii()
+                    and self._input_sources.recover_command_text(event[5:])):
+                return "idle"
+            return event
         except KeyboardInterrupt:
             return "key\tinterrupt"
 
