@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     termios = None  # type: ignore[assignment]
     tty = None  # type: ignore[assignment]
 
-_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"
+_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h"
 _LEAVE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _INVALID_MOUSE = "mouse\tinvalid"
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
