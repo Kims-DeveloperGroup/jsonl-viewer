@@ -17,6 +17,7 @@ from types import TracebackType
 from typing import Any, Callable
 
 from ._cell_layout import clusters as _clusters, text_cells as _text_cells
+from ._clipboard import ClipboardUnavailable, copy_text
 from ._input_sources import InputSourceAdapter, InputSourceLifecycle
 from ._mouse import decode_sgr
 from .contracts import ViewerSpec, ViewerTerminal
@@ -29,8 +30,8 @@ except ImportError:  # pragma: no cover
     termios = None  # type: ignore[assignment]
     tty = None  # type: ignore[assignment]
 
-_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h"
-_LEAVE = "\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
+_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1002h"
+_LEAVE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _INVALID_MOUSE = "mouse\tinvalid"
 _SGR = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -167,6 +168,7 @@ class _TerminalHost:
         self._pending_csi: tuple[str, int] | None = None
         self._discard_mouse = False
         self._mouse_received = 0
+        self._idle_interval = 0.5
         self._input_sources = InputSourceLifecycle(_desktop_input_source_adapter)
 
     def __enter__(self) -> _TerminalHost:
@@ -243,6 +245,7 @@ class _TerminalHost:
         if self._restoring:
             return
         self._restoring = True
+        self._idle_interval = 0.5
         failures: list[BaseException] = []
         try:
             try:
@@ -471,7 +474,7 @@ class _TerminalHost:
         return None
 
     def _raw_event(self) -> str | None:
-        deadline = time.monotonic() + 0.5
+        deadline = time.monotonic() + self._idle_interval
         if self._pending_csi is not None:
             prefix, self._pending_csi = self._pending_csi, None
             return self._escape_event(prefix)
@@ -519,6 +522,16 @@ class _TerminalHost:
             return self._raw_event() if self._interactive else self._line_event()
         except KeyboardInterrupt:
             return "key\tinterrupt"
+
+    def set_autoscroll_active(self, active: bool) -> None:
+        if type(active) is not bool:
+            raise TypeError("active must be bool")
+        self._idle_interval = 0.05 if active else 0.5
+
+    def copy_to_clipboard(self, text: str) -> bool:
+        if not self._interactive or self._closed:
+            raise ClipboardUnavailable("Clipboard unavailable.")
+        return copy_text(text)
 
     def close_view(self) -> None:
         if self._closed:

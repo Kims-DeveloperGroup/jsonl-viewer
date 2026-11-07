@@ -216,6 +216,16 @@ class ViewerHost(Protocol):
     help, goto, and other viewer states. Search validation errors retain text
     mode. The host owns any resulting keyboard-source changes and restoration.
     Existing five-method hosts require no additional method or resource work.
+    A host may additionally expose ``copy_to_clipboard(text) -> bool`` for an
+    acknowledged local clipboard write. Missing capability or
+    ``NotImplementedError`` means unavailable; false or another exception means
+    failure. Only a true result displays a successful copy notice. The viewer
+    never writes clipboard controls into a frame or acquires a second terminal.
+    Optional ``set_autoscroll_active(active: bool)`` requests 50-ms idle events
+    while a drag is at a scrollable viewport edge, restoring the ordinary
+    500-ms cadence otherwise. Existing read_event signatures remain unchanged.
+    Hosts with their own idle cadence retain it; hosts without idle events can
+    extend a selection on mouse motion, without stationary edge scrolling.
     Generic inspection additionally accepts the semantic ``toggle_layout``
     event in its main view. Layout remains private, per-view state.
     """

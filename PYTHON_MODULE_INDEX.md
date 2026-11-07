@@ -3,8 +3,8 @@
 ## Scope and supported boundaries
 
 Source root: `src/`. Package root: `src/jsonl_viewer/`.
-Importable production units indexed: 22.
-Direct internal dependency edges indexed: 59.
+Importable production units indexed: 24.
+Direct internal dependency edges indexed: 67.
 Directed internal dependency cycles indexed: 0.
 `py.typed` is package data, not an importable unit.
 
@@ -31,11 +31,12 @@ The following compact table records direct edges, including explicit local impor
 | --- | --- |
 | `jsonl_viewer` | `_terminal`, `contracts`, `engine` |
 | `__main__` | `_standalone` |
-| `_browser` | `_browser_render`, `_catalog`, `_controls`, `_model`, `_mouse`, `_query`, `_render`, `_search`, `contracts` |
-| `_browser_render` | `_catalog`, `_cell_layout`, `_model`, `_render`, `contracts` |
+| `_browser` | `_browser_render`, `_catalog`, `_controls`, `_model`, `_mouse`, `_query`, `_render`, `_search`, `_selection`, `contracts` |
+| `_browser_render` | `_catalog`, `_cell_layout`, `_model`, `_render`, `_selection`, `contracts` |
 | `_catalog` | `_json`, `_model`, `inspection` |
 | `_cell_layout` | None |
-| `_controls` | `_model`, `_mouse`, `_render`, `_search`, `contracts` |
+| `_clipboard` | None |
+| `_controls` | `_model`, `_mouse`, `_render`, `_search`, `_selection`, `contracts` |
 | `_input` | `_model` |
 | `_input_sources` | None |
 | `_input_sources_linux` | `_input_sources` |
@@ -44,12 +45,13 @@ The following compact table records direct edges, including explicit local impor
 | `_model` | None |
 | `_mouse` | `_model` |
 | `_query` | `_catalog`, `_model`, `_search`, `inspection` |
-| `_render` | `_cell_layout`, `_json`, `_model`, `contracts` |
+| `_render` | `_cell_layout`, `_json`, `_model`, `_selection`, `contracts` |
 | `_search` | `_json`, `_model`, `inspection` |
+| `_selection` | `_cell_layout`, `_model` |
 | `_standalone` | `jsonl_viewer`, `_input`, `contracts` |
-| `_terminal` | `_cell_layout`, `_input_sources`, `_input_sources_linux`, `_input_sources_macos`, `_mouse`, `contracts`, `engine` |
+| `_terminal` | `_cell_layout`, `_clipboard`, `_input_sources`, `_input_sources_linux`, `_input_sources_macos`, `_mouse`, `contracts`, `engine` |
 | `contracts` | `inspection` |
-| `engine` | `_browser`, `_controls`, `_input`, `_model`, `_render`, `contracts` |
+| `engine` | `_browser`, `_controls`, `_input`, `_model`, `_render`, `_selection`, `contracts` |
 | `inspection` | None |
 
 ## Public values and view state
@@ -69,8 +71,9 @@ host or a lazy terminal-owned adapter; importing it performs no terminal work.
 ### `jsonl_viewer.contracts`
 
 Source: `src/jsonl_viewer/contracts.py`. Owns ViewerSpec, ViewerTerminal and the
-five-method ViewerHost protocol, optional input-mode notification and legacy
-header-to-Context conversion. Streams remain caller-owned.
+five-method ViewerHost protocol, optional input-mode, clipboard-acknowledgement
+and autoscroll notifications, and legacy header-to-Context conversion. Streams
+remain caller-owned; existing public constructors and required methods are unchanged.
 
 ### `jsonl_viewer.inspection`
 
@@ -80,7 +83,7 @@ bounded tuple/scalar/reference shapes and incremental metadata size without I/O.
 ### `jsonl_viewer._model`
 
 Source: `src/jsonl_viewer/_model.py`. Owns immutable snapshots, occurrences,
-logical cursor/fold state, query results and renderer hit geometry. BrowserState
+logical cursor/fold/selection state, pending copy requests, query results and renderer hit geometry. BrowserState
 owns invocation-only focus/layout plus committed/draft conditions; no persistence.
 
 ## Bounded source and selection
@@ -144,16 +147,29 @@ cluster windows and nearest-cell seeking; no terminal or source acquisition.
 Source: `src/jsonl_viewer/_render.py`. Owns JSON projections, semantic/plain record
 frames and bounded RenderSession caches. Its visible-index/chrome pane boundary
 keeps the original snapshot, identities, cursor and cumulative line geometry.
+Body-relative sparse selection hits and cached row character prefixes support
+copy extraction and live counts without a document-wide character map. Search
+brackets are presentation-only; existing bounded projection cues remain copyable.
 
 ### `jsonl_viewer._mouse`
 
 Source: `src/jsonl_viewer/_mouse.py`. Validates bounded mouse envelopes and resolves
-reported cells against renderer geometry; it performs no terminal-mode changes.
+reported cells against renderer geometry, including left motion and release;
+it performs no terminal-mode changes.
+
+### `jsonl_viewer._selection`
+
+Source: `src/jsonl_viewer/_selection.py`. Owns pure inclusive cluster ranges,
+body-relative ordering, sparse boundary counting, projected-text extraction and
+selection notices. It consumes immutable rows and owns no terminal, clipboard,
+timer or source resource. Tests cover mouse ranges, Unicode and bounded copying;
+README and design-system document the interaction.
 
 ### `jsonl_viewer._controls`
 
 Source: `src/jsonl_viewer/_controls.py`. Applies validated JSON cursor, page, fold,
-sibling and prompt transitions using explicitly supplied state/render caches.
+sibling, prompt and captured-drag transitions using explicitly supplied state/render
+caches. Edge-idle transitions stay in the drag's frozen displayed-document order.
 
 ### `jsonl_viewer._browser_render`
 
@@ -164,6 +180,8 @@ effective Single/Split composition and painted hit regions; layout remains state
 
 Source: `src/jsonl_viewer/_browser.py`. Coordinates generic input, drafts,
 per-view focus/layout and retained cursor viewport acceptance through ViewerHost.
+It captures detail drags ahead of chrome/list routing and dispatches each released
+copy request once through optional host capabilities with truthful outcome notices.
 It consumes prepared data only, does not
 acquire or close the host, and skips source-bound metadata on malformed input.
 
@@ -171,7 +189,8 @@ acquire or close the host, and skips source-bound metadata on malformed input.
 
 Source: `src/jsonl_viewer/engine.py`. Owns one source parse and the once-only outer
 host-close boundary. It dispatches legacy record viewing or generic inspection;
-controllers and rendering do not acquire terminal ownership.
+legacy viewing dispatches released copy requests and autoscroll idle transitions.
+Controllers and rendering do not acquire terminal ownership.
 
 ## Terminal and desktop input-source ownership
 
@@ -183,7 +202,18 @@ imports do not authenticate, launch helpers or alter terminal/input-source state
 ### `jsonl_viewer._terminal`
 
 Source: `src/jsonl_viewer/_terminal.py`. Owns explicit terminal acquisition, bounded
-physical decoding, presentation and visible cleanup. Caller streams stay open.
+physical decoding, presentation and visible cleanup. Button-event mouse tracking
+reports drag motion; optional edge polling uses 50 ms while ordinary idle remains
+500 ms and escape decoding retains its separate deadline. Caller streams stay open.
+
+### `jsonl_viewer._clipboard`
+
+Source: `src/jsonl_viewer/_clipboard.py`. Owns explicit local UTF-8 clipboard writes
+through macOS pbcopy or available Linux wl-copy/xclip helpers. Fixed arguments,
+stdin, suppressed output and a two-second timeout bound helper execution; imports
+perform no helper work. Successful helper exit acknowledges acceptance, unavailable
+or failed transports never claim success, and SSH/tmux forwarding is excluded.
+Native-adapter tests mock helpers; README documents local clipboard support.
 
 ### `jsonl_viewer._input_sources`
 

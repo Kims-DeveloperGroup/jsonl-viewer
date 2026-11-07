@@ -8,6 +8,7 @@ from ._catalog import Catalog
 from ._cell_layout import clusters, text_cells
 from ._model import BrowserFrame, BrowserHit, BrowserState, Snapshot
 from ._render import RenderSession, _clip_text, _neutralize_text, render_frame, strip_ansi
+from ._selection import selection_label
 from .contracts import ViewerSpec
 
 
@@ -151,6 +152,8 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
     width, height = min(240, max(1, columns)), min(100, max(1, rows))
     if width < 24 or height < 6:
         lines = [_fit(spec.title + " · READ ONLY", width), _fit("Resize terminal to inspect data.", width)]
+        if state.detail.copy_notice and state.detail.message:
+            lines.insert(0, _fit(state.detail.message, width))
         return BrowserFrame("\n".join(lines[:height]), columns=width, rows=height, color=color)
     if state.panel:
         return replace(_modal(spec, catalog, state, width, height), color=color)
@@ -246,13 +249,17 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
         if split or not show_detail:
             hits.append(BrowserHit("list_area", -1, len(header) + row, 0, left_width))
     notice = state.error or state.notice or state.detail.message or (catalog.notices[0] if catalog.notices else "")
-    if result.unavailable:
+    selected = selection_label(state.detail.selection, state.detail.selection_count)
+    if selected and not state.detail.copy_notice:
+        notice = selected
+    if result.unavailable and not state.detail.copy_notice and not selected:
         notice = f"Search coverage incomplete: {len(result.unavailable)} target(s) · " + result.unavailable[0][1]
     position = _occurrence(state)
     layout = "Split" if state.layout == "split" else "Single"
     if state.layout == "split" and not split:
         layout = "Split→Single"
-    footer = [_fit((position + " · " if position else "") + f"Focus: {state.focus.title()} · {notice}", width),
+    status = notice if state.detail.copy_notice or selected else (position + " · " if position else "") + f"Focus: {state.focus.title()} · {notice}"
+    footer = [_fit(status, width),
               _fit(layout + " · v layout · Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close", width)]
     return BrowserFrame("\n".join(header + body + footer), detail_frame,
                         len(header) + detail_top, left_width + 3 if split else 0, tuple(hits),

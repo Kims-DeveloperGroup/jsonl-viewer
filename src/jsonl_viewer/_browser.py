@@ -6,17 +6,19 @@ from dataclasses import replace
 
 from ._browser_render import render_browser
 from ._catalog import Catalog, bind_catalog
-from ._controls import _accept_frame, _edit_prompt, _line_action, _safe_input, _transition, _unfold_match
+from ._controls import _accept_frame, _edit_prompt, _line_action, _safe_input, _transition, _unfold_match, selection_autoscroll
 from ._model import BrowserFrame, BrowserState, CursorPosition, InputDiagnostic, PromptState, Snapshot
 from ._mouse import parse_mouse
 from ._query import evaluate
-from ._render import RenderSession, _text_cells
+from ._render import RenderSession, _text_cells, selection_text
+from ._selection import clear_selection
 from ._search import SearchLimitError
 from .contracts import ViewerHost, ViewerSpec
 
 
 def _select(state: BrowserState, catalog: Catalog, index: int, *, section: int | None = None,
             first_hit: bool = False, focus: str | None = None) -> BrowserState:
+    state = replace(state, detail=clear_selection(state.detail))
     item = catalog.items[index]
     initial_section = next((i for i, candidate in enumerate(item.sections)
                             if item.records[0] in candidate.records), 0)
@@ -206,7 +208,8 @@ def _detail_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: 
     detail, _ = _transition(state.detail, action, snapshot, spec,
                             page_size=frame.detail.body_rows,
                             selected_line_count=frame.detail.selected_line_count,
-                            rendered=frame.detail, session=session)
+                            rendered=frame.detail, session=session,
+                            document_indices=catalog.items[state.selected].sections[state.section].records)
     allowed = tuple(record for index in state.result.items for record in catalog.items[index].records)
     if detail.selected_index not in allowed:
         forward = action not in {"up", "page_up", "cursor_up", "cursor_left"}
@@ -235,8 +238,23 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
     mouse = parse_mouse(event)
     if mouse is None or mouse.action is None:
         return state
+    if (state.detail.selection is not None and state.detail.selection.dragging
+            and frame.detail is not None and mouse.action in {"drag", "release", "cursor_up", "cursor_down"}):
+        column = min(frame.detail.columns, max(1, mouse.column - frame.detail_column))
+        row = min(frame.detail.rows, max(1, mouse.row - frame.detail_row))
+        local = f"mouse\t{mouse.button}\t{column}\t{row}\t{mouse.phase}"
+        detail, _ = _transition(state.detail, local, snapshot, spec,
+                                page_size=frame.detail.body_rows,
+                                selected_line_count=frame.detail.selected_line_count,
+                                rendered=frame.detail, session=session,
+                                document_indices=state.detail.selection.records)
+        return replace(state, detail=detail)
+    if mouse.action in {"drag", "release"}:
+        return state
     if not (1 <= mouse.column <= frame.columns and 1 <= mouse.row <= frame.rows):
         return state
+    if mouse.action in {"click", "cursor_up", "cursor_down"}:
+        state = replace(state, detail=clear_selection(state.detail))
     row, column = mouse.row - 1, mouse.column - 1
     hit = next((h for h in frame.hits if h.row == row and h.column <= column < h.column + h.width), None)
     if mouse.action in {"cursor_up", "cursor_down"}:
@@ -290,11 +308,23 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     if type(event) is not str or len(event) > 8_192 + 6:
         return replace(state, notice="Unsupported input."), False
     if event == "idle":
+        if state.detail.selection is not None and state.detail.selection.dragging and frame.detail is not None:
+            detail, _ = _transition(state.detail, event, snapshot, spec,
+                                    page_size=frame.detail.body_rows,
+                                    selected_line_count=frame.detail.selected_line_count,
+                                    rendered=frame.detail, session=session,
+                                    document_indices=state.detail.selection.records)
+            return replace(state, detail=detail), False
         return state, False
     if event.startswith("mouse\t"):
         if spec.input_protocol != "keys":
             return replace(state, notice="Unsupported input envelope."), False
         return _mouse_event(state, event, snapshot, catalog, spec, frame, session), False
+    if state.detail.selection is not None or state.detail.copy_notice:
+        had_selection = state.detail.selection is not None
+        state = replace(state, detail=clear_selection(state.detail))
+        if had_selection and event in {"cancel", "key\tescape", "key\tinterrupt"}:
+            return state, False
     text: str | None = None
     if event.startswith("key\t"):
         if spec.input_protocol != "keys":
@@ -443,6 +473,9 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
         state = _select(state, catalog, state.result.items[0])
     session = RenderSession()
     notifier = getattr(host, "set_input_mode", None)
+    scroll_notifier = getattr(host, "set_autoscroll_active", None)
+    copy_to_clipboard = getattr(host, "copy_to_clipboard", None)
+    autoscroll_active = None
     input_mode = None
     geometry: tuple[int, int] | None = None
     while True:
@@ -453,7 +486,8 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
             input_mode = desired
         columns, rows = host.terminal_size()
         if geometry is not None and geometry != (columns, rows):
-            state = replace(state, detail=replace(state.detail, reveal_cursor=True))
+            detail = clear_selection(state.detail) if state.detail.selection is not None and state.detail.selection.dragging else state.detail
+            state = replace(state, detail=replace(detail, reveal_cursor=True))
         geometry = (columns, rows)
         color = bool(host.color_enabled())
         frame = render_browser(spec, state, snapshot, catalog, columns=columns, rows=rows,
@@ -465,7 +499,29 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                                    color=color, session=session)
         if frame.detail is not None and not state.panel:
             state = replace(state, detail=_accept_frame(state.detail, frame.detail))
+        desired_scroll = selection_autoscroll(state.detail, frame.detail)
+        if desired_scroll != autoscroll_active:
+            if callable(scroll_notifier):
+                scroll_notifier(desired_scroll)
+            autoscroll_active = desired_scroll
         host.present(frame.text)
         state, closed = transition_browser(state, host.read_event(), snapshot, catalog, spec, frame, session)
+        if state.detail.copy_pending and not closed:
+            text = selection_text(snapshot, spec, state.detail, session)
+            detail = replace(state.detail, copy_pending=False)
+            if text:
+                status = "Clipboard unavailable."
+                if callable(copy_to_clipboard):
+                    try:
+                        status = f"Copied {len(text)} characters." if copy_to_clipboard(text) is True else "Copy failed."
+                    except NotImplementedError:
+                        pass
+                    except Exception:
+                        status = "Copy failed."
+                detail = replace(detail, message=status, message_is_error=not status.startswith("Copied "),
+                                 copy_notice=True, selection_count=len(text))
+            else:
+                detail = clear_selection(detail)
+            state = replace(state, detail=detail, notice=None, error=None)
         if closed:
             return

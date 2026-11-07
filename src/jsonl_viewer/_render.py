@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 import json
 import re
 import unicodedata
@@ -12,6 +13,7 @@ from typing import Iterable
 from ._cell_layout import RowLayout, character_cells as _character_cells, clusters as _clusters, text_cells as _text_cells
 from ._json import Expansion, ExpansionBudget, SkippedExpansion, expand_json_string
 from ._model import (
+    BodyLine,
     ContainerMetadata,
     PropertyMetadata,
     CursorPosition,
@@ -24,10 +26,14 @@ from ._model import (
     PromptState,
     Record,
     RenderResult,
+    SelectionPoint,
+    SelectionTextRow,
+    TextSelection,
     Snapshot,
     ViewMode,
     ViewState,
 )
+from ._selection import bounds as selection_bounds, selected_span, selected_text, selected_row_length, selection_label
 from .contracts import ViewerSpec
 
 
@@ -48,6 +54,7 @@ _ANSI = {
     "current": "1;36",
     "match_current": "1;30;43",
     "match_other": "4;33",
+    "selection": "1;30;106",
     "warning": "1;33",
     "error": "1;31",
     "muted": "2;90",
@@ -69,6 +76,7 @@ class _Segment:
     property: JSONPath | None = None
     key_anchor: bool = False
     logical_column: int | None = None
+    copyable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +130,7 @@ class _RecordProjection:
     match_row: int | None
     text_bytes: int
     segment_count: int
+    copy_prefix: tuple[int, ...]
     layouts: dict[int, RowLayout] = field(default_factory=dict)
     checkpoints: int = 0
 
@@ -275,7 +284,7 @@ def _clip_segments(
         if clipped:
             break
     if maximum > 0:
-        result.append(_Segment("…", "muted"))
+        result.append(_Segment("…", "muted", copyable=False))
     return tuple(result), True
 
 
@@ -379,9 +388,9 @@ def _focused_token(
     if start:
         result.append(_Segment("…", "muted"))
     result.extend((
-        _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current"),
+        _Segment(safe(text[start:focus_start]), role), _Segment("⟦", "current", copyable=False),
         _Segment(focused_display, "match_current"),
-        _Segment("⟧", "current"), _Segment(safe(text[focus_end:end]), role),
+        _Segment("⟧", "current", copyable=False), _Segment(safe(text[focus_end:end]), role),
     ))
     if end < len(text):
         result.append(_Segment("…", "muted"))
@@ -717,6 +726,7 @@ class _RecordLine:
     body_cells: int = 0
     expanded_line_number: int | None = None
     first_visible: bool = False
+    last_in_record: bool = False
 
 
 def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMode,
@@ -736,7 +746,9 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
     container_rows: dict[JSONPath, int] = {}
     match_row = None
     text_bytes = segments = 0
+    copy_prefix = [0]
     for row, line in enumerate(logical):
+        copy_prefix.append(copy_prefix[-1] + sum(len(segment.text) for segment in line.segments if segment.copyable))
         cells = tuple(_text_cells(segment.text) for segment in line.segments)
         widths.append(sum(cells))
         if any(segment.navigable and width for segment, width in zip(line.segments, cells)):
@@ -753,7 +765,8 @@ def _build_projection(record: Record, index: int, spec: ViewerSpec, mode: ViewMo
             if segment.role == "match_current" and match_row is None:
                 match_row = row
     return _RecordProjection(key, tuple(logical), summary, tuple(widths), tuple(containers),
-                             tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments)
+                             tuple(navigable), key_rows, container_rows, match_row, text_bytes, segments,
+                             tuple(copy_prefix))
 
 
 def _record_line(index: int, row: int, projection: _RecordProjection,
@@ -765,7 +778,8 @@ def _record_line(index: int, row: int, projection: _RecordProjection,
     expanded = projection.lines[row].expanded_line_index
     return _RecordLine(gutter + projection.lines[row].segments, index, row, 0,
                        session.layout(index, projection, row), projection.widths[row],
-                       None if expanded is None else line_start + expanded + 1, first_visible)
+                       None if expanded is None else line_start + expanded + 1, first_visible,
+                       row == len(projection.lines) - 1)
 
 
 def _gutter_line(line: _RecordLine, record_digits: int, line_digits: int,
@@ -779,7 +793,8 @@ def _gutter_line(line: _RecordLine, record_digits: int, line_digits: int,
               _Segment("│" if compact else " │ ", "gutter"))
     return _RecordLine(gutter + line.segments[1:], line.record_index, line.line_index,
                        record_digits + line_digits + (4 if compact else 8),
-                       line.layout, line.body_cells, line.expanded_line_number, line.first_visible)
+                       line.layout, line.body_cells, line.expanded_line_number, line.first_visible,
+                       line.last_in_record)
 
 
 def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bool = True,
@@ -816,7 +831,7 @@ def _window_line(line: _RecordLine, offset: int, width: int, *, overflow_cue: bo
         painted += cells
     append_piece()
     if right_clipped:
-        result.append(_Segment("…", "muted"))
+        result.append(_Segment("…", "muted", copyable=False))
     return replace(line, segments=tuple(result), layout=None)
 
 
@@ -825,7 +840,7 @@ def _focus_prefix_window(line: _RecordLine, offset: int, width: int,
     """Keep a bounded marked keyword prefix with at least one intact cluster."""
     window = _window_line(line, offset, width - 1,
                           overflow_cue=width >= first_cluster_cells + 3)
-    return replace(window, segments=window.segments + (_Segment("⟧", "current"),))
+    return replace(window, segments=window.segments + (_Segment("⟧", "current", copyable=False),))
 
 
 def _character_stream(line: _RecordLine, screen_row: int) -> Iterable[VisibleCharacter]:
@@ -962,6 +977,7 @@ def _resolve_cursor(state: ViewState, characters: tuple[VisibleCharacter, ...]) 
 def _paint_record_line(
     line: _RecordLine, *, cursor: CursorPosition | None,
     container: FoldIdentity | None, color: bool, cursor_visible: bool = True,
+    selection: TextSelection | None = None,
 ) -> str:
     if not color:
         return _paint(line.segments, color=False)
@@ -970,6 +986,7 @@ def _paint_record_line(
     cursor_column = (cursor.column if cursor is not None
                      and cursor.record_index == line.record_index
                      and cursor.line_index == line.line_index else None)
+    selected = selected_span(selection, line.record_index, line.line_index, line.body_cells)
     for segment in line.segments:
         if segment.logical_column is not None:
             column = segment.logical_column
@@ -981,7 +998,11 @@ def _paint_record_line(
         focused_style = style + (";4" if matching else ";7")
         for cluster in _clusters(segment.text):
             focused = cursor_visible and segment.navigable and cursor_column == column
-            result.append(f"\x1b[{focused_style if focused else style}m{cluster}\x1b[0m")
+            body_column = column - line.gutter_columns
+            in_selection = (selected is not None and segment.copyable
+                            and selected[0] <= body_column < selected[1])
+            painted_style = _ANSI["selection"] if in_selection else focused_style if focused else style
+            result.append(f"\x1b[{painted_style}m{cluster}\x1b[0m")
             column += _text_cells(cluster)
     return "".join(result)
 
@@ -1073,10 +1094,14 @@ def _footer_lines(
         role = "muted" if projection_status or width_clipped else "footer"
     if not status:
         status = "Immutable snapshot • no persistent viewer state"
+    selected = selection_label(state.selection, state.selection_count)
+    if selected and not state.copy_notice:
+        status = selected
+        role = "warning"
     if horizontal_offset or max_horizontal_offset:
         cues = ("←" if horizontal_offset else "") + ("→" if horizontal_offset < max_horizontal_offset else "")
         horizontal = f"x {horizontal_offset} {cues}"
-        status = f"{horizontal} • {status}"
+        status = f"{status} • {horizontal}" if state.copy_notice or selected else f"{horizontal} • {status}"
     help_text = (
         ("←/→ pan • ? help • q close" if horizontal_offset or max_horizontal_offset else "? help • q close")
         if width < 100
@@ -1338,12 +1363,14 @@ def render_frame(
         if isinstance(line, _RecordLine):
             painted = _paint_record_line(
                 line, cursor=cursor, container=None if focused is None else focused.container, color=color,
+                selection=state.selection,
             )
             rendered_body.append(painted)
             if color and focused is not None and row == focused.screen_row:
                 idle_body.append(_paint_record_line(
                     line, cursor=cursor, container=focused.container,
                     color=color, cursor_visible=False,
+                    selection=state.selection,
                 ))
             else:
                 idle_body.append(painted)
@@ -1367,5 +1394,100 @@ def render_frame(
         horizontal_offset=horizontal_offset, max_horizontal_offset=max_horizontal_offset, body_width=body_width,
         columns=width, rows=height, color=color, gutter_columns=gutter_columns,
         properties=tuple(properties),
+        body_lines=tuple(BodyLine(line.record_index, line.line_index,
+                                 row + int(caret_rows and focused is not None and row > focused.screen_row),
+                                 line.body_cells, line.last_in_record)
+                         for row, line in enumerate(body, start=len(header))
+                         if isinstance(line, _RecordLine)),
         idle_text="\n".join((rendered_header + idle_body + rendered_footer)[:height]),
     )
+
+
+def selection_hit(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                  frame: RenderResult, column: int, row: int, *,
+                  session: RenderSession | None = None, clamp: bool = False
+                  ) -> tuple[SelectionPoint, int] | None:
+    """Resolve zero-based screen coordinates through the sparse full-row layout."""
+    if not frame.body_lines:
+        return None
+    if not clamp and (column < frame.gutter_columns or column >= frame.columns):
+        return None
+    line = min(frame.body_lines, key=lambda item: (abs(item.screen_row - row), item.screen_row))
+    if not clamp and line.screen_row != row:
+        return None
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    projection = session.projection(snapshot.records[line.record_index], line.record_index, spec, state)
+    layout = session.layout(line.record_index, projection, line.line_index)
+    target = max(0, column - frame.gutter_columns + frame.horizontal_offset)
+    if not clamp and target >= layout.cells:
+        return None
+    if target >= layout.cells:
+        return SelectionPoint(line.record_index, line.line_index, layout.cells), 0
+    part_index = max(0, bisect_right(layout.starts, target) - 1)
+    part = layout.parts[part_index]
+    local = target - layout.starts[part_index]
+    span = next((candidate for candidate in part.window(max(0, local - 2), local + 3)
+                 if candidate[0] <= local < candidate[0] + candidate[3]), None)
+    span = span or part.nearest(local)
+    if span is None:
+        return None
+    cell, _, _, width = span
+    return SelectionPoint(line.record_index, line.line_index, layout.starts[part_index] + cell), width
+
+
+def selection_text(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                   session: RenderSession | None = None) -> str:
+    """Copy only the selected bounded projection; never reconstruct raw JSON."""
+    selection = state.selection
+    limits = selection_bounds(selection) if selection is not None else None
+    if limits is None:
+        return ""
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    first, last = limits
+
+    def rows():
+        start = selection.records.index(first.record_index)
+        finish = selection.records.index(last.record_index)
+        for index in selection.records[start:finish + 1]:
+            projection = session.projection(snapshot.records[index], index, spec, state)
+            lower = first.line_index if index == first.record_index else 0
+            upper = last.line_index + 1 if index == last.record_index else len(projection.lines)
+            for number in range(lower, upper):
+                yield SelectionTextRow(index, number,
+                                       tuple((segment.text, segment.copyable)
+                                             for segment in projection.lines[number].segments))
+
+    return selected_text(selection, rows())
+
+
+def selection_character_count(snapshot: Snapshot, spec: ViewerSpec, state: ViewState,
+                              session: RenderSession | None = None) -> int:
+    """Count cached whole rows plus sparse boundary slices for a live drag."""
+    selection = state.selection
+    limits = selection_bounds(selection) if selection is not None else None
+    if limits is None:
+        return 0
+    session = session or RenderSession()
+    session.bind(spec, snapshot)
+    first, last = limits
+    count = 0
+    records = selection.records[selection.records.index(first.record_index):
+                                selection.records.index(last.record_index) + 1]
+    for ordinal, index in enumerate(records):
+        projection = session.projection(snapshot.records[index], index, spec, state)
+        lower = first.line_index if index == first.record_index else 0
+        upper = last.line_index + 1 if index == last.record_index else len(projection.lines)
+        amount = projection.copy_prefix[upper] - projection.copy_prefix[lower]
+        for number in {lower, upper - 1}:
+            if (index, number) not in {(first.record_index, first.line_index),
+                                       (last.record_index, last.line_index)}:
+                continue
+            parts = tuple((segment.text, segment.copyable) for segment in projection.lines[number].segments)
+            span = selected_span(selection, index, number, projection.widths[number])
+            assert span is not None
+            amount -= projection.copy_prefix[number + 1] - projection.copy_prefix[number]
+            amount += selected_row_length(parts, session.layout(index, projection, number), *span)
+        count += amount + max(0, upper - lower - 1) + (2 if ordinal else 0)
+    return count

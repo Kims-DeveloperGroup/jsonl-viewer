@@ -3,7 +3,7 @@
 `jsonl-viewer` is a read-only, transient, structured JSONL viewer for Python
 terminals. It parses one bounded immutable byte snapshot, renders colored
 multiline JSON with separate record and display-line gutters, and discards navigation,
-cursor, fold, search, help, and mode state when the view closes.
+cursor, selection, fold, search, help, and mode state when the view closes.
 
 The package is Python 3.11+, MIT licensed, and has no runtime dependencies. It
 has no knowledge of Story, agent runtimes, storage layouts, provider schemas,
@@ -27,6 +27,8 @@ or terminal-driver implementations.
   focus, current/total counts, and hidden-hit Verbose promotion;
 - blinking character focus, structural sibling-key navigation, and container folding;
 - horizontal body scrolling with fixed record/line gutters and automatic cursor reveal;
+- mouse drag selection with continuous edge scrolling, automatic local clipboard
+  copying on release, and visible copy results;
 - viewer-owned key bindings, ordinary-line command grammar, and bounded search
   and go-to-line drafts through an opt-in physical-input protocol;
 - Unicode-aware cell clipping and visible neutralization of embedded terminal
@@ -34,7 +36,7 @@ or terminal-driver implementations.
 - an explicit terminal owner for library and CLI calls plus an injected host boundary for applications
   that already own raw mode, signals, geometry, input, output, and cleanup.
 
-There is no writer API, persistence, live tail, network access, replay, retry,
+There is no source writer API, persistence, live tail, network access, replay, retry,
 or arbitrary search-expression language.
 
 ## Generic inspection in 0.7.0
@@ -345,28 +347,76 @@ and existing history without changing terminal preferences or erasing saved
 history. Previously archived viewer rows remain in existing history. Injected
 hosts retain responsibility for their own screen presentation and cleanup.
 
-### Mouse navigation
+### Mouse selection and navigation (0.8.0)
 
 Ordinary mouse-wheel reports move the cursor one navigable line, like `j`/`k`,
 including automatic viewport scrolling. A left press on a visible JSON character
 moves the cursor to that character. Clicking either cell of a wide character
-selects the same character; panning and plain-mode caret rows are accounted for.
-Headers, gutters, empty cells, releases, motion and other buttons do not navigate.
-Mouse input is consumed without editing or cancelling search/goto drafts or help.
+focuses the same character; panning and plain-mode caret rows are accounted for.
+A plain click does not copy or fold anything.
 
-The terminal owner enables SGR mouse reporting before normal tracking and disables
-both during cleanup. This routes ordinary wheel input to the viewer instead of
-terminal history. iTerm2 must permit mouse and wheel reporting: explicitly disabling
-reporting or holding Option can force the emulator's native behavior. No terminal
-history is erased. Noninteractive line fallback retains its existing behavior.
+Hold the left button and drag to select a substring or multiple JSON body lines,
+in either direction. The colored view highlights the range; plain output reports
+the range and character count in the footer. Holding the pointer at a body edge
+continuously scrolls through the selection, vertically and horizontally, even
+without further mouse movement. Edge polling runs every 50 ms, moving one
+projected row or two body cells per tick and preserving complete Unicode clusters.
+Scrolling stops at the displayed document's boundaries. In inspection views, that
+document is the current detail section: dragging never opens another item,
+section, list, or modal. Single and Split use the same selection behavior.
+
+Release the button to copy a nonempty drag automatically. The copy contains the
+projected JSON spelling, indentation, and line breaks, including selected text
+revealed by scrolling. It excludes record/line gutters, header/footer text, ANSI
+codes, and cursor/search decorations. Existing folded values and preview limits
+remain in effect, including their existing expansion/truncation/fold cues;
+copying does not expand hidden data or decode displayed JSON escapes into raw
+string values. A selected range is displayed text, not a raw-JSON export.
+
+After the local clipboard backend accepts the write, the footer prioritizes
+`Copied N characters` until the next user action. Missing support, failure, or a
+timeout produces a separate unavailable/failed notice. Empty drags, plain clicks,
+and cancelled selections do not write the clipboard. Escape, keyboard navigation,
+view changes, and resizing cancel an active drag. Releasing over surrounding
+chrome completes the active drag without activating that chrome.
+
+Viewer-owned local macOS terminals use `pbcopy`; Linux uses an available `wl-copy`
+or `xclip` backend. Helpers receive text through standard input with fixed
+arguments and a two-second timeout, without a shell or Python runtime dependency.
+Clipboard contents outlive the viewer until replaced. SSH clipboard forwarding
+is outside this feature's scope.
+
+The terminal owner enables SGR coordinates (`1006`) and button-motion tracking
+(`1002`) and disables tracking during cleanup. Ordinary wheel input therefore
+goes to the viewer rather than terminal history. iTerm2 must permit mouse and
+wheel reporting: disabling reporting or holding Option can force the emulator's
+native behavior. No terminal history is erased. Noninteractive line fallback
+retains its existing behavior. Mouse input does not edit search/goto drafts or
+help views.
 
 Physical-input hosts may return
 `mouse<TAB>BUTTON<TAB>COLUMN<TAB>ROW<TAB>PHASE` in `input_protocol="keys"`.
 Button is the SGR button/modifier value (0–255); coordinates are positive one-based
 terminal cells with at most six decimal digits; phase is `press` or `release`.
-Wheel codes 64/65 and left-button code 0 use their existing navigation after
-modifier bits are removed. Invalid or unsupported mouse input has no action.
-Injected hosts remain responsible for enabling, decoding and restoring mouse modes.
+Wheel codes 64/65 retain their navigation behavior. Left-button code 0 starts or
+completes a selection; motion code 32 extends an active drag after modifier bits
+are removed. Unsupported or malformed reports remain inert. Injected hosts own
+enabling, decoding, and restoring their mouse modes.
+
+Two optional concrete-host capabilities support embedding without changing the
+five required `ViewerHost` methods:
+
+- `copy_to_clipboard(text: str) -> bool` returns whether the host accepted a
+  clipboard write. A host without it reports clipboard unavailability.
+- `set_autoscroll_active(active: bool) -> None` tells a host when a scrollable
+  drag edge is active. The owned terminal then emits `idle` at 50 ms intervals,
+  returning to its usual 500 ms polling afterward; Escape decoding retains its
+  independent 20 ms deadline and buffered characters retain their readiness rules.
+
+Injected hosts may retain their own idle cadence. Hosts that never emit `idle`
+extend selections only when mouse events arrive, so continuous stationary-edge
+scrolling requires an idle-capable host. Clipboard and polling work remain owned
+by the injected host; supplying it never transfers terminal ownership.
 
 ### Navigation responsiveness (0.6.2)
 
@@ -651,7 +701,9 @@ frames exist only while the view is open. The standalone adapter reads only the
 explicit bounded file or standard input. An owned interactive terminal may query
 and temporarily select its desktop input source; Linux adapters may read existing
 input-method configuration and invoke installed input-method tools. They do not
-change saved desktop configuration or the source JSONL.
+change saved desktop configuration or the source JSONL. An explicit completed
+mouse drag can additionally ask the terminal host to write selected projected
+text to the local clipboard; no clipboard read is performed.
 
 ## Design and verification
 

@@ -101,6 +101,46 @@ class CursorPosition:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionPoint:
+    """A cluster's body-relative cell position, independent of fixed gutters."""
+
+    record_index: int
+    line_index: int
+    column: int
+
+
+@dataclass(frozen=True, slots=True)
+class TextSelection:
+    anchor: SelectionPoint
+    extent: SelectionPoint
+    anchor_width: int
+    extent_width: int
+    records: tuple[int, ...]
+    pointer_column: int
+    pointer_row: int
+    moved: bool = False
+    dragging: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class BodyLine:
+    """One painted projection row, without allocating a character map."""
+
+    record_index: int
+    line_index: int
+    screen_row: int
+    cells: int
+    last_in_record: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionTextRow:
+    record_index: int
+    line_index: int
+    parts: tuple[tuple[str, bool], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class VisibleCharacter:
     position: CursorPosition
     screen_row: int
@@ -145,6 +185,10 @@ class ViewState:
     horizontal_offset: int = 0
     reveal_cursor: bool = False
     gutter_columns: int = 0
+    selection: TextSelection | None = None
+    copy_pending: bool = False
+    copy_notice: bool = False
+    selection_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +211,7 @@ class RenderResult:
     max_horizontal_offset: int = 0
     body_width: int = 74
     gutter_columns: int = 0
+    body_lines: tuple[BodyLine, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

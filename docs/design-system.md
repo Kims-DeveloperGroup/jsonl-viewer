@@ -104,7 +104,7 @@ Every normal frame has three areas:
    Source-line goto and footer source identity remain distinct from `L`.
 3. **Footer:** transient status/search position followed by persistent command
    help. The normal footer retains at least `? help • q close` in the tiny
-   tier. An active input draft replaces these two rows with its editor and
+   tier; selection and copy feedback take priority while present. An active input draft replaces these two rows with its editor and
    submit/cancel/edit hint or validation error.
 
 Plain gutter markers carry state without color:
@@ -151,6 +151,7 @@ host.
 | error | `! INPUT ERROR` / error wording | `1;31` bold red | input-diagnostic body and invalid host-event, goto, search, or draft-validation messages in the footer |
 | muted | `…` and explanatory wording | `2;90` dim bright-black | `[expanded JSON string ×N]` and string-truncation cues; JSON-display/truncation and clipping footer facts; loading, empty, and unchanged-source safety text |
 | footer/help | command words and ordinary status | `2;36` dim cyan | standard record status, search result when no message overrides it, persistent footer help, and draft editing hint |
+| selected text | range and character-count footer | `1;30;106` bold black on bright cyan | complete selected body clusters, independent of cursor blinking; clipboard text excludes styling |
 | character cursor | aligned `^` on the following row | inverse video; also underlined on a matching delimiter | focused visible JSON character; the character remains readable |
 | matching container | `{}` / `[]` | bold inverse video | visible opening and closing delimiters of the innermost containing container |
 | plain structure | JSON punctuation or help text | `0` reset/default | braces, brackets, commas, colons, whitespace, and Help command descriptions |
@@ -165,9 +166,13 @@ commas, and colons remain the terminal default. Expansion and truncation cues
 use muted dim bright-black; a skipped-expansion cue is warning yellow. The
 normal footer is dim cyan, while a record footer containing JSON display,
 truncation, or clipping facts uses muted dim bright-black. An active search
-footer remains dim cyan. Only the active occurrence's characters override
+footer remains dim cyan. Outside a mouse selection, only the active occurrence's characters override
 ordinary token colors; surrounding text retains its ordinary roles. The literal cues and footer counts carry
 the same information in plain mode.
+
+Selected body spans take priority over cursor and search styles. Their bright
+cyan role stays steady through idle frames; the footer provides the same range
+and count information when SGR is disabled.
 
 ## Responsive geometry
 
@@ -233,7 +238,7 @@ subsequent visible records. Shorter rows may be blank at that offset.
   ANSI; the body follows the cursor geometry described above.
 - **Close:** once a valid `view_jsonl` call begins, it calls
   `host.close_view()` exactly once in `finally`, including after a host failure.
-  It retains no frame, prompt draft, cursor, search, help, or navigation state.
+  It retains no frame, prompt draft, cursor, selection, search, help, or navigation state.
 
 Prompt cancellation is a viewer-engine transition shared by standalone and
 embedded hosts using the physical-input protocol:
@@ -305,18 +310,18 @@ space after `/` or `//` is required before a query in this mode. Textual
 - `toggle_mode`: switch mode unless a selected hidden-field hit requires
   Verbose.
 - `help`: open/close the transient help body.
-- `cancel`: dismiss help, then search, then transient status; with nothing left
-  to dismiss it closes.
+- `cancel`: cancel a selection first, then dismiss help, search, or transient
+  status; with nothing left to dismiss it closes.
 - `close` or EOF: close immediately.
 
-The body has a character cursor and printable keyword focus markers, but no editable JSON or
-selection clipboard,
-command execution, mouse link, or provider action. Search and goto accept only
-transient viewer drafts; they never edit JSON or the source snapshot. The host
-owns application focus and restores the surrounding view from `close_view()`;
-the standalone adapter owns and restores its alternate-screen, hardware cursor
-visibility, and terminal mode. The printable draft cursor provides a non-color
-focus cue without transferring terminal ownership to the engine.
+The body has a character cursor, printable keyword focus markers, and explicit
+mouse selection/copying, but no editable JSON, arbitrary command execution,
+mouse link, or provider action. Search and goto accept only transient viewer
+drafts; they never edit JSON or the source snapshot. The host owns application
+focus and restores the surrounding view from `close_view()`; the standalone
+adapter owns and restores its alternate-screen, hardware cursor visibility, and
+terminal mode. The printable draft cursor provides a non-color focus cue
+without transferring terminal ownership to the engine.
 
 ## Cursor blinking and sibling keys
 
@@ -532,6 +537,12 @@ explicit bounded path or standard-input read. Valid JSON values are displayed
 after control neutralization; malformed input diagnostics expose a safe reason
 and source location without echoing the malformed record.
 
+A completed nonempty mouse drag explicitly asks the terminal host to copy
+projected body text to the local clipboard. The native terminal adapter invokes
+only the selected fixed clipboard helper; source text is passed through stdin,
+never through shell commands. The viewer does not read the clipboard. Copied
+text remains in the OS clipboard after view state is discarded on close.
+
 ## Nested diagnostic scenarios
 
 1. **Provider exchange:** a JSONL exchange stores a complete JSON object in
@@ -553,27 +564,75 @@ and source location without echoing the malformed record.
    children under bounded strict decoding rules, using original encoded text
    only when those children have no direct hit.
 
-## Viewer-owned mouse capture (0.6.0)
+## Viewer-owned mouse capture and selection (0.8.0)
 
 An explicit terminal-owned call uses `ViewerTerminal` streams and, when supplied,
 the embedding application's buffered character reader. The facade dispatches to
 one private terminal owner; the pure engine still consumes `ViewerHost` events.
 Existing injected-host calls never transfer terminal modes to the package.
 
-The owner enters one alternate screen, enables SGR coordinates before normal mouse
-tracking, and consumes wheel/click reports. A wheel report moves the character
-cursor one navigable row using existing vertical cursor behavior. A left press
-hits the last displayed JSON character cell, including panning, wide and combining
-clusters, and the extra caret row in plain output. Header, gutter and blank cells,
-release/motion/other-button reports, invalid coordinates, and mouse navigation during
-prompt/help/error views are inert. A click never folds or edits source data.
+The owner enters one alternate screen, enables SGR coordinates (`1006`) before
+button-motion tracking (`1002`), and consumes wheel/click/drag reports. Without
+an active drag, a wheel moves the character cursor one navigable row and a left
+press hits the last painted JSON character cell, including panning, wide and
+combining clusters, and the extra caret row in plain output. Header/gutter/blank
+cells, unsupported reports, and mouse input during prompt/help/error views are
+inert. A plain click never copies, folds, or edits source data.
 
-Before returning, cleanup disables normal tracking before SGR reporting, clears the
-alternate screen, leaves it, and restores saved terminal attributes and owned signal
-dispositions. Supplied streams stay open. The application resumes its input only
-after that cleanup; no buffered keyboard input is flushed to hide mouse reports.
-Transient-only calls refuse unsupported terminals before presenting source content.
-Native emulator reporting overrides remain outside application control.
+An ordinary left-button drag creates a linear range in the current displayed
+JSON document. The range uses body-relative positions independent of gutter
+width, terminal geometry, and the viewport. Once movement starts a drag, both
+endpoint glyphs are included; returning to the anchor can select one glyph.
+It can run backward or forward through rows and source records. Inspection
+freezes the current detail section's record order and never opens another item
+or section. Generic legacy views use the snapshot's record order.
+
+The renderer maps painted body cells to complete Unicode clusters and bounded
+projected text, reusing sparse row layouts rather than allocating a document-wide
+character map. Viewport clipping indicators, gutters, header/footer text, SGR,
+and cursor/search decorations are not copied. JSON spelling, indentation, line
+breaks, and existing expansion/truncation/fold cues are retained. Selection does
+not expose hidden source or bypass preview bounds. Output is displayed text,
+not a promise of valid exported JSON.
+
+Colored frames highlight selected body spans. Plain frames retain their caret
+geometry and report the selection range and character count in the footer.
+Blinking must not erase selection feedback. Active browser drags are captured
+before ordinary list/header/modal hit routing, including when motion or release
+reaches surrounding chrome.
+
+At a scrollable body edge the owned terminal uses 50 ms idle polling; each tick
+advances one projected row vertically and two body cells horizontally, clamped
+to document bounds and intact cluster boundaries. The stored pointer extends
+the range after scrolling even without another motion event. This precedes
+ordinary cursor blinking. Leaving the edge, releasing, cancelling, or closing
+restores 500 ms polling; Escape retains its independent 20 ms decoding bound.
+No second input loop, thread, or timer owns terminal reads.
+
+A completed nonempty drag produces one copy request. Each event loop drains it
+once through optional host `copy_to_clipboard(text: str) -> bool`. Success means
+the backend accepted a write, and the footer prioritizes `Copied N characters`
+until the next user action, including on tiny screens. Unsupported hosts, helper
+errors, and timeouts show unavailable/failed feedback without claiming success.
+Repeated releases and idle ticks never copy again. A plain click does not write
+the clipboard.
+
+The native adapter uses local macOS `pbcopy` or Linux `wl-copy`/`xclip`, fixed
+arguments, stdin, no shell, and a two-second timeout. SSH clipboard forwarding
+is outside this feature's scope. Optional `set_autoscroll_active(active: bool)`
+lets injected hosts choose their own polling cadence without adding required
+`ViewerHost` methods. Hosts without idle events extend selections only on mouse
+movement; continuous stationary-edge scrolling requires idle support. Clipboard
+and input resource ownership remain with the host.
+
+Escape, keyboard navigation, mode/filter/search/item/section changes, resize,
+EOF, and closure discard active selection work without copying. Before return,
+cleanup disables button-motion tracking before SGR reporting, clears and leaves
+the alternate screen, and restores saved terminal attributes and owned signal
+dispositions. Supplied streams stay open. The application resumes input only
+after cleanup; buffered keyboard input is not flushed. Transient-only calls
+refuse unsupported terminals before displaying source content. Native emulator
+reporting overrides remain outside application control.
 
 ## Command input language (0.6.5)
 

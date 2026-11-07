@@ -20,11 +20,11 @@ class MouseEvent:
 
     @property
     def action(self) -> str | None:
-        if self.phase != "press":
-            return None
         # SGR modifier bits are orthogonal to button and motion identity.
         code = self.button & ~(4 | 8 | 16)
-        return {0: "click", 64: "cursor_up", 65: "cursor_down"}.get(code)
+        if self.phase == "release":
+            return "release" if code == 0 else None
+        return {0: "click", 32: "drag", 64: "cursor_up", 65: "cursor_down"}.get(code)
 
 
 def parse_mouse(event: str) -> MouseEvent | None:
