@@ -564,15 +564,15 @@ text remains in the OS clipboard after view state is discarded on close.
    children under bounded strict decoding rules, using original encoded text
    only when those children have no direct hit.
 
-## Viewer-owned mouse capture and selection (0.8.2)
+## Viewer-owned mouse capture and selection (0.8.3)
 
 An explicit terminal-owned call uses `ViewerTerminal` streams and, when supplied,
 the embedding application's buffered character reader. The facade dispatches to
 one private terminal owner; the pure engine still consumes `ViewerHost` events.
 Existing injected-host calls never transfer terminal modes to the package.
 
-The owner enters one alternate screen, preserves the legacy click-tracking activation (`1000`), then enables
-button-motion tracking (`1002`) and SGR coordinates (`1006`), and consumes
+The owner enters one alternate screen, enables SGR coordinates (`1006`), preserves the contiguous legacy click-tracking
+activation (`1000`), then enables button-motion tracking (`1002`) and consumes
 wheel/click/drag reports. The final tracking mode remains `1002`; cleanup disables
 `1002`, `1000`, and `1006`. Without
 an active drag, a wheel moves the character cursor one navigable row and a left

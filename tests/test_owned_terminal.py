@@ -24,7 +24,7 @@ from tests.test_standalone_and_packaging import _TerminalBuffer
 from tests.terminal_screen import TerminalScreen
 
 
-_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h"
+_ENTER = "\x1b[?1049h\x1b[?25l\x1b[?1006h\x1b[?1000h\x1b[?1002h"
 _LEAVE = "\x1b[?1002l\x1b[?1000l\x1b[?1006l\x1b[H\x1b[2J\x1b[?25h\x1b[?1049l"
 _SOURCE = b'{"content":"one"}\n{"content":"two"}\n'
 _SPEC = ViewerSpec("s", "c", "a")
@@ -358,11 +358,15 @@ class OwnedTerminalTests(unittest.TestCase):
         terminal = ViewerTerminal(_TerminalBuffer(), _TerminalBuffer())
         with _acquired(terminal) as (host, termios, tty, handlers, saved):
             with host:
-                self.assertEqual(terminal.output_stream.getvalue(), _ENTER)
+                entry = terminal.output_stream.getvalue()
+                legacy_mouse_prefix = "\x1b[?1006h\x1b[?1000h"
+                self.assertEqual(entry.count(legacy_mouse_prefix), 1)
+                self.assertEqual(entry, _ENTER)
                 for mode in ("\x1b[?1000h", "\x1b[?1002h", "\x1b[?1006h"):
                     self.assertEqual(terminal.output_stream.getvalue().count(mode), 1)
                 self.assertLess(_ENTER.index("\x1b[?1000h"), _ENTER.index("\x1b[?1002h"))
-                self.assertLess(_ENTER.index("\x1b[?1002h"), _ENTER.index("\x1b[?1006h"))
+                self.assertEqual(entry.index("\x1b[?1002h"),
+                                 entry.index(legacy_mouse_prefix) + len(legacy_mouse_prefix))
                 tty.setcbreak.assert_called_once_with(17, 0)
                 active = termios.tcsetattr.call_args.args[2]
                 self.assertEqual(active[3] & (8 | 64), 0)
