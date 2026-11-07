@@ -322,13 +322,15 @@ def _transition(
         if (mouse is None or rendered is None or state.prompt is not None
                 or state.help_visible or malformed):
             return state, False
-        captured = (state.selection is not None and state.selection.dragging
-                    and mouse.action in {"drag", "release", "cursor_up", "cursor_down"})
+        selection = state.selection
+        captured = (selection is not None and selection.dragging
+                    and (mouse.action in {"drag", "release"}
+                         or (selection.moved or selection.edge_intent)
+                         and mouse.action in {"cursor_up", "cursor_down"}))
         if not captured and not (1 <= mouse.column <= rendered.columns and 1 <= mouse.row <= rendered.rows):
             return state, False
-        if state.selection is not None and state.selection.dragging:
-            if mouse.action in {"drag", "release", "cursor_up", "cursor_down"}:
-                return drag_mouse(state, mouse, snapshot, spec, rendered, session), False
+        if captured:
+            return drag_mouse(state, mouse, snapshot, spec, rendered, session), False
         if mouse.action in {"cursor_up", "cursor_down"}:
             return action(clear_selection(state), mouse.action)
         if mouse.action == "click":

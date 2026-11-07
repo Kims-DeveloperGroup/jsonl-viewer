@@ -564,7 +564,7 @@ text remains in the OS clipboard after view state is discarded on close.
    children under bounded strict decoding rules, using original encoded text
    only when those children have no direct hit.
 
-## Viewer-owned mouse capture and selection (0.8.1)
+## Viewer-owned mouse capture and selection (0.8.2)
 
 An explicit terminal-owned call uses `ViewerTerminal` streams and, when supplied,
 the embedding application's buffered character reader. The facade dispatches to
@@ -579,7 +579,10 @@ an active drag, a wheel moves the character cursor one navigable row and a left
 press hits the last painted JSON character cell, including panning, wide and
 combining clusters, and the extra caret row in plain output. Header/gutter/blank
 cells, unsupported reports, and mouse input during prompt/help/error views are
-inert. A plain click never copies, folds, or edits source data.
+inert. A plain click never copies, folds, or edits source data. A pending press captures
+motion and release, but a wheel before actual movement or edge intent cancels
+that pending range and follows ordinary wheel navigation. Actual drags retain
+selection scrolling.
 
 An ordinary left-button drag creates a linear range in the current displayed
 JSON document. The range uses body-relative positions independent of gutter

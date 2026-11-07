@@ -238,8 +238,11 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
     mouse = parse_mouse(event)
     if mouse is None or mouse.action is None:
         return state
-    if (state.detail.selection is not None and state.detail.selection.dragging
-            and frame.detail is not None and mouse.action in {"drag", "release", "cursor_up", "cursor_down"}):
+    selection = state.detail.selection
+    if (selection is not None and selection.dragging and frame.detail is not None
+            and (mouse.action in {"drag", "release"}
+                 or (selection.moved or selection.edge_intent)
+                 and mouse.action in {"cursor_up", "cursor_down"})):
         if not frame.detail.body_lines:
             return replace(state, detail=clear_selection(state.detail))
         local = MouseEvent(mouse.button, mouse.column - frame.detail_column,
