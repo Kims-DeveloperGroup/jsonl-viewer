@@ -784,3 +784,44 @@ non-error footer notices persist through idle/redraw, clear on ordinary cursor
 movement, and Escape dismisses them before clearing active search. Fold identities
 and occurrence counts remain unchanged. Page Up/Down (`b`/Space) scroll within a
 record first, then cycle records at its boundary with the same notices.
+
+
+## Compact generic group list (0.9.0)
+
+Each group or ungrouped item occupies exactly one row. Selection/kind/number, name,
+and right-aligned record count form fixed columns (`G` group / `R` record); a long Unicode label cannot
+wrap or displace the count. A source-search query changes the count title from
+`Records` to `Matching/total`. Name finding has its own result count. Same-name
+items include a short ID in the name column, and the selected information area
+provides the full label, ID, and exact count through list-only `,`/`.` scrolling.
+Original labels, source identities, and bytes remain unchanged.
+
+The group list uses original-order alternating row backgrounds, with no extra
+separator or ID row. A selected row uses a full blue band, white text, and `▸`;
+the focused pane title uses cyan and a printable focus marker. Name-match
+highlighting applies only to matching text. Precedence is match span over
+selection over alternating background; focus is separate from selection.
+
+| Role | Dark | Light |
+| --- | --- | --- |
+| Detail background | `#0B1220` | `#F0F9FF` |
+| List base / alternating background | `#102A43` / `#153750` | `#E0F2FE` / `#BAE6FD` |
+| Body text | `#E0F2FE` | `#082F49` |
+| Selected row | `#1D4ED8`, white | Same |
+| Focus title | `#22D3EE` | `#075985` |
+| Search span | `#FBBF24`, `#111827` | Same |
+| Metadata | `#93C5FD` | `#1E40AF` |
+
+Main-view `p` cycles Dark, Light, and ANSI palettes. ANSI is the explicit fallback
+for terminals with limited color support. Color-disabled hosts and `NO_COLOR`
+retain numbers, aligned columns, selection markers, and focus words. Colors do
+not interpret domain fields as success or failure. List geometry targets 40
+cells (32–48 within existing detail bounds); Single/Split availability and
+compact fallback retain their established 120-column/12-row boundary.
+
+`t` finds labels/IDs without changing the source-search query or facet filters.
+A hidden selected item remains in detail until explicit selection; zero name
+results do not navigate. A 32-item invocation-only LRU restores recent group
+positions, sections, folds, and cursors, invalidating on applied source-query,
+scope, or filter changes. Closing discards every draft and cache. Batch and
+sensor data use the same behavior without an embedding application installed.

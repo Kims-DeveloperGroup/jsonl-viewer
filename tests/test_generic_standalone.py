@@ -32,7 +32,7 @@ class GenericStandaloneTests(unittest.TestCase):
             for columns in (80, 180):
                 with self.subTest(columns=columns):
                     result = subprocess.run([sys.executable, "-W", "error", "-m", "jsonl_viewer", str(path)],
-                                            input="q\n", capture_output=True, text=True, timeout=10,
+                        input="p\nq\n", capture_output=True, text=True, timeout=10,
                                             cwd=temporary, env=self._environment(columns))
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn('"message": "timeout"', result.stdout)
@@ -76,19 +76,22 @@ class GenericStandaloneTests(unittest.TestCase):
             sys.path.insert(0, sys.argv[1])
             from jsonl_viewer import ViewerSpec, view_jsonl
             from jsonl_viewer.inspection import Context, Facet, Group, Inspection, Option, Section
-            source = b'{"message":"ready"}\n{"message":"timeout"}\n'
+            source = b'{"message":"ready"}\n{"message":"timeout"}\n{"message":"sensor timeout"}\n'
             digest = hashlib.sha256(source).digest()
             description = Inspection(
-                groups=(Group("a", "Audit bundle", (1,2),
+                groups=(Group("batch-104", "Audit bundle", (1,2),
                               sections=(Section("events", "Events", (1,2)),),
-                              values=(("severity", "error"),)),),
+                              values=(("severity", "error"),)),
+                        Group("sensor", "센서 묶음", (3,), values=(("severity", "error"),))),
                 facets=(Facet("severity", "Severity", (Option("error", "Error"),)),),
             )
             class Host:
                 def __init__(self):
                     self.frames = []; self.closed = 0
                     self.events = iter(("text\tf", "key\tescape", "text\t/", "text\ttimeout",
-                                        "key\tenter", "next_match", "key\ttab", "key\tescape", "text\tq"))
+                        "key\tenter", "next_match", "next_match", "key\ttab", "key\tescape",
+                        "key\ttab", "text\tt", "text\t센서", "key\tenter", "key\ttab", "text\tt",
+                        "key\tctrl_u", "text\tbatch-104", "key\tenter", "text\tq"))
                 def terminal_size(self): return (180,30)
                 def color_enabled(self): return False
                 def present(self, frame): self.frames.append(frame)
@@ -104,6 +107,8 @@ class GenericStandaloneTests(unittest.TestCase):
                                          inspection=description, input_protocol="keys"), host)
             frames = "\n".join(host.frames)
             assert "Audit bundle" in frames and "Severity" in frames and "Events" in frames
+            assert "센서 묶음" in frames and "Name/ID:" in frames
+            assert "Record 2/2" in host.frames[-1]
             assert "timeout" in frames and host.closed == 1
             assert hashlib.sha256(source).digest() == digest
             assert not any(name == "story_writing_agents" or name.startswith("story_writing_agents.")

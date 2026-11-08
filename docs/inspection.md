@@ -150,9 +150,39 @@ occurrences and synchronizes the list, detail section, and focused source
 position. Manual detail navigation can inspect related nonmatching data while
 retaining the query. The next occurrence command reveals its next source hit.
 
-Selecting a different item starts at its first retained record, or its first
-current match while searching. Returning to the list and pressing Enter on the
-unchanged item retains the detail position, selected section and JSON state.
+Selecting a new item starts at its first retained record, or its first current
+match while searching. Revisiting one of the 32 most recently visited groups
+restores its record, section, cursor, folds, and scroll position. This bounded
+invocation-only cache includes the current group and discards transient drag,
+copy, and prompt state. Applied query, scope, or filter changes invalidate it;
+layout, resize, focus, and list-name finding do not. An evicted group uses the
+normal first-entry behavior. Enter on the unchanged item retains its position.
+
+Every item uses one row: selection/kind/number, name, then a fixed right-aligned
+record-count column. `G` marks a caller-provided group and `R` an ungrouped source
+record; opaque labels cannot disguise the item kind. With source search active the count is `matching/total`;
+without it only the total is shown. List-find result counts are separate from
+source match counts. Names containing wide glyphs, combining characters, or
+line breaks never create extra list rows. Labels are safely neutralized and
+cell-clipped without changing the original descriptor or record.
+
+The selected information area exposes the full name, ID, and exact count;
+`,`/`.` scroll its rows while list focus remains active. Repeated labels include
+a short ID in the available name column. Exact IDs remain available in that
+information area. Alternating full-row backgrounds follow original item order,
+and the selected row uses blue, white text, and `▸`. Focus is identified in the
+pane title, independently of selection. Search highlighting covers matching
+label/ID text rather than recoloring the entire selected row.
+
+In list focus, `t` edits a literal, case-insensitive name/ID substring. It only
+narrows the existing filter/source-search result; it does not search synthetic
+labels as source text, alter grouping, or discard nonmatching member records.
+An already selected item outside the name results remains in detail with a
+hidden-selection notice. Up/Down explicitly selects a visible result. Enter
+retains a visible selection or selects the first visible result and opens detail;
+with no result Enter/Up/Down preserve the current detail. Escape clears name
+finding and returns to the list. Other command letters, including `p`, remain
+literal Unicode text in this editor.
 
 ## Filter drafts
 
@@ -191,6 +221,9 @@ input behavior remain available.
 | --- | --- |
 | `/` | Edit the query and named scope. |
 | `f` | Open the filter draft. |
+| `t` in list | Edit literal name/ID finding without changing source search or filters. |
+| `p` in main view | Cycle invocation-only Dark / Light / ANSI palette. |
+| `,` / `.` in list | Scroll selected full-name/ID/count information. |
 | Tab / Shift+Tab | Switch list/detail focus or move modal focus. |
 | `v` | Switch Single/Split layout in the main view. |
 | Up / Down in the list | Select an item. |
@@ -228,7 +261,8 @@ list opens its detail. There are no separate click-switch buttons. Up/Down selec
 items in the list and traverses eligible source records in detail.
 
 Press `v` in the main view to choose Split. At least 120 columns and 12 rows show
-the existing left list beside detail; the list uses `min(48, columns // 3)` cells
+the existing left list beside detail; the list targets 40 cells and can grow to 48 for long labels, staying within
+32–48 cells while preserving the existing detail minimum
 and remains visible while detail has focus. Smaller terminals show only the
 focused screen without losing the Split preference; widening restores the split.
 The existing footer shows the selected layout and shortcut without another row.

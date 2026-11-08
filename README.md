@@ -71,6 +71,26 @@ Press `v` to select the optional Split layout: at least 120 columns and 12 rows
 retain a fixed left list beside detail. Compact terminals keep one screen visible
 and restore Split when enlarged. Layout selection lasts only for the current view.
 
+### Group navigation in 0.9.0
+
+Each list item occupies one row with aligned selection/kind/number, name, and record
+count columns. Long names are clipped by terminal cell width; the selected
+information area retains the complete name, ID, and exact counts. With list
+focus, `,` and `.` scroll that information without adding rows to each item.
+Alternating row backgrounds and a blue selected row make group boundaries
+visible. `p` cycles Dark, Light, and ANSI palettes for this view; disabled color
+and `NO_COLOR` retain selection and focus markers.
+
+In the list, `t` finds names and IDs using a bounded literal, Unicode-casefold
+substring. It narrows only current list results, independently of `/` source
+search and `f` filters. A hidden selection stays in detail until an explicit
+selection; empty name results do not move the current group. Escape clears only
+name finding. Returning to a recently visited group restores its section,
+record, folds, cursor, and scroll position. The cache includes at most 32 groups
+per invocation; changing applied source-search/filter conditions invalidates it.
+No application types, callbacks, extra host methods, or persistent state are
+required. See the [inspection guide](docs/inspection.md#main-controls).
+
 ## Preview
 
 The left gutter distinguishes `R` (record number) from `L` (formatted JSON line
@@ -650,7 +670,8 @@ search<TAB>NONEMPTY_QUERY
 ```
 
 Inspection also accepts `filters` / `begin_filter`, `focus_next`,
-`focus_previous`, `section_next`, `section_previous`, and `toggle_layout`.
+`focus_previous`, `section_next`, `section_previous`, `toggle_layout`,
+`list_find`, `cycle_appearance`, `info_previous`, and `info_next`.
 Physical Tab and
 Shift+Tab select focus; `[` and `]` select arbitrary configured sections.
 Physical or ordinary-line `v` switches Single/Split in the main view only.

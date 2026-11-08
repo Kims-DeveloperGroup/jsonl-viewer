@@ -21,6 +21,9 @@ These plain UTF-8 files are complete, source-controlled renderer frames:
 - `malformed-input.txt`
 - `tiny-terminal.txt`
 - `plain-no-color.txt`
+- `generic-group-list.txt` shows the one-row G/R list, fixed record-count column,
+  selected full-value information area, and Split detail.
+- `generic-name-find.txt` shows literal name finding separately from source search.
 - `generic-inspection.txt` — identity-free audit groups, four arbitrary sections,
   and an independent record
 - `generic-filter-draft.txt` — a field selection returned to an unapplied filter

@@ -245,6 +245,10 @@ class BrowserState:
     section: int = 0
     focus: str = "detail"
     layout: str = "single"
+    list_query: str = ""
+    info_offset: int = 0
+    appearance: str = "dark"
+    navigation: tuple[tuple[int, int, ViewState], ...] = ()
     detail: ViewState = ViewState()
     panel: str | None = None
     panel_index: int = 0
@@ -279,3 +283,4 @@ class BrowserFrame:
     rows: int = 24
     color: bool = False
     body_row: int = 0
+    info_max_offset: int = 0
