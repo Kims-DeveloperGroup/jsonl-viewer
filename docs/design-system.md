@@ -822,6 +822,7 @@ compact fallback retain their established 120-column/12-row boundary.
 `t` finds labels/IDs without changing the source-search query or facet filters.
 A hidden selected item remains in detail until explicit selection; zero name
 results do not navigate. A 32-item invocation-only LRU restores recent group
-positions, sections, folds, and cursors, invalidating on applied source-query,
+positions, including empty sections, folds, and cursors, across list, cursor,
+wheel, source-line, and occurrence navigation. It invalidates on applied source-query,
 scope, or filter changes. Closing discards every draft and cache. Batch and
 sensor data use the same behavior without an embedding application installed.

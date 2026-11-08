@@ -157,6 +157,9 @@ invocation-only cache includes the current group and discards transient drag,
 copy, and prompt state. Applied query, scope, or filter changes invalidate it;
 layout, resize, focus, and list-name finding do not. An evicted group uses the
 normal first-entry behavior. Enter on the unchanged item retains its position.
+Empty configured sections are valid saved positions. Cross-item cursor, wheel,
+source-line, and occurrence navigation also save the outgoing position; these
+paths do not silently bypass the bounded cache.
 
 Every item uses one row: selection/kind/number, name, then a fixed right-aligned
 record-count column. `G` marks a caller-provided group and `R` an ungrouped source
@@ -180,9 +183,12 @@ labels as source text, alter grouping, or discard nonmatching member records.
 An already selected item outside the name results remains in detail with a
 hidden-selection notice. Up/Down explicitly selects a visible result. Enter
 retains a visible selection or selects the first visible result and opens detail;
-with no result Enter/Up/Down preserve the current detail. Escape clears name
-finding and returns to the list. Other command letters, including `p`, remain
-literal Unicode text in this editor.
+with no result Enter/Up/Down preserve the current detail. Escape in the editor
+clears name finding and returns to the list. After Enter closes the editor,
+Escape first clears an active name query while preserving the current focus,
+detail position, and applied source conditions. With no name query, list Escape
+returns to detail as before. Other command letters, including `p`, remain
+literal Unicode text in the editor.
 
 ## Filter drafts
 

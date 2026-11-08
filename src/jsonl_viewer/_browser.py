@@ -34,7 +34,8 @@ def _select(state: BrowserState, catalog: Catalog, index: int, *, section: int |
     if cached and section is None and not first_hit:
         _, section_index, detail = cached
         if (0 <= section_index < len(item.sections)
-                and detail.selected_index in item.sections[section_index].records):
+                and (detail.selected_index in item.sections[section_index].records
+                     or not item.sections[section_index].records and detail.selected_index in item.records)):
             restored = replace(state, selected=index, section=section_index,
                                detail=replace(detail, search=search, reveal_cursor=True),
                                focus=focus or state.focus, notice=None, error=None,
@@ -113,7 +114,8 @@ def _move_match(state: BrowserState, catalog: Catalog, delta: int) -> BrowserSta
     detail = replace(state.detail, selected_index=hit.record_index, search=updated,
                      reveal_match=True, cursor=None,
                      folds=_unfold_match(state.detail, updated))
-    return replace(state, detail=detail)
+    moved = replace(state, detail=detail)
+    return replace(moved, navigation=_remember(moved))
 
 
 def _filter_action(state: BrowserState, action: int, snapshot: Snapshot, catalog: Catalog) -> BrowserState:
@@ -226,7 +228,8 @@ def _modal_key(state: BrowserState, key: str, text: str | None,
             section = next((i for i, s in enumerate(item.sections) if index in s.records), 0)
             selected = _select(replace(state, panel=None, error=None), catalog, item_index,
                                section=section, focus="detail")
-            return replace(selected, detail=replace(selected.detail, selected_index=index)), False
+            moved = replace(selected, detail=replace(selected.detail, selected_index=index))
+            return replace(moved, navigation=_remember(moved)), False
         return state, False
     if state.panel_index == 1 and key in {"left", "right", "up", "down", "enter"}:
         delta = -1 if key in {"left", "up"} else 1
@@ -280,7 +283,10 @@ def _detail_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: 
     item = catalog.items[item_index]
     section = state.section if item_index == state.selected and detail.selected_index in item.sections[state.section].records else next(
         (i for i, s in enumerate(item.sections) if detail.selected_index in s.records), 0)
-    return replace(state, detail=detail, selected=item_index, section=section)
+    moved = replace(state, detail=detail, selected=item_index, section=section,
+                    navigation=_remember(state) if item_index != state.selected else state.navigation,
+                    info_offset=0 if item_index != state.selected else state.info_offset)
+    return replace(moved, navigation=_remember(moved)) if item_index != state.selected else moved
 
 
 def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: Catalog,
@@ -441,6 +447,9 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     if key == "interrupt":
         key = "escape"
     if key in {"escape", "unknown_escape"}:
+        if state.list_query:
+            return replace(state, list_query="", draft_query=PromptState("search_query"),
+                           notice=None, error=None), False
         if state.focus == "list":
             return replace(state, focus="detail", notice=None, detail=replace(state.detail, reveal_cursor=True)), False
         if state.notice or state.detail.message:
@@ -538,7 +547,7 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                          result=evaluate(snapshot, catalog, filters, None),
                          diagnostic=diagnostic)
     if state.result.items:
-        state = _select(state, catalog, state.result.items[0])
+        state = _select(state, catalog, state.result.items[0], remember=False)
     session = RenderSession()
     notifier = getattr(host, "set_input_mode", None)
     scroll_notifier = getattr(host, "set_autoscroll_active", None)

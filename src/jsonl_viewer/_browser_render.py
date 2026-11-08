@@ -150,6 +150,20 @@ def _modal(spec: ViewerSpec, catalog: Catalog, state: BrowserState,
     return BrowserFrame("\n".join(lines[:height]), hits=tuple(hits), columns=width, rows=height, body_row=3)
 
 
+def _information_rows(values: tuple[str, ...], width: int) -> list[str]:
+    """Reserve the actual widest counter prefix before wrapping any value."""
+    reserve = text_cells("Info 1/1 ")
+    rows: list[str] = []
+    # Descriptor bounds limit the counter to a few digits. Reserve only grows.
+    for _ in range(8):
+        rows = [line for value in values for line in _wrap(value, max(1, width - reserve))]
+        needed = text_cells(f"Info {len(rows)}/{len(rows)} ")
+        if needed <= reserve:
+            return rows
+        reserve = min(max(0, width - 1), needed)
+    return rows
+
+
 def list_items(state: BrowserState, catalog: Catalog) -> tuple[int, ...]:
     """Name finding narrows presentation, never the materialized body result."""
     query = state.list_query.casefold()
@@ -235,43 +249,51 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
     context = " | ".join(f"{c.label}: {c.value}" for c in spec.display_context)
     if context:
         header.insert(1, context)
-    header = [_fit(line, width) for line in header[:max(1, height - 4)]]
-    hits: list[BrowserHit] = []
-    for row, kind in ((1 if not context else 2, "search"), (2 if not context else 3, "filters")):
-        if row < len(header):
-            hits.append(BrowserHit(kind, 0, row, 0, width))
-    body_height = max(1, height - len(header) - 2)
     split = state.layout == "split" and width >= 120 and height >= 12
     show_detail = split or state.focus == "detail"
+    compact_list = not show_detail and height <= 8
+    if compact_list:
+        header = [_fit(f"Tab detail · F{len(active)} /{state.query!r}", width)]
+    else:
+        header = [_fit(line, width) for line in header[:max(1, height - 4)]]
+    hits: list[BrowserHit] = []
+    if not compact_list:
+        for row, kind in ((1 if not context else 2, "search"), (2 if not context else 3, "filters")):
+            if row < len(header):
+                hits.append(BrowserHit(kind, 0, row, 0, width))
+    body_height = max(1, height - len(header) - 2)
+    show_list = split or not show_detail or not result.items
     preferred_width = 40
     if split:
         preferred_width = min(48, max(40, max((text_cells(_neutralize_text(item.label))
                                               for item in catalog.items), default=0) + 12))
     left_width = max(32, min(preferred_width, width - 83)) if split else width
     right_width = width - left_width - 3 if split else width
-    visible = list_items(state, catalog)
+    visible = list_items(state, catalog) if show_list else ()
     item_rows: list[str] = []
     info_max_offset = 0
     if state.diagnostic is not None:
         item_rows = [_fit("Input error", left_width), _fit(state.diagnostic.summary, left_width)]
         item_rows.extend(_wrap(state.diagnostic.detail, left_width))
-    else:
+    elif show_list:
         title = ("[Focus] " if state.focus == "list" else "") + ("Groups/records" if unit == "Groups/records" else "Records")
         count_title = "Match/All" if state.query is not None else "Records"
         title_width = max(0, left_width - len(count_title) - 1)
-        item_rows.append(_paint(_pad(_fit(title, title_width), title_width) + " " + count_title,
-                                state, color, "focus" if state.focus == "list" else "meta"))
-        draft = (_draft_window(state.draft_query.buffer, state.draft_query.cursor, max(1, left_width - 12))
-                 if state.panel == "list_find" else repr(state.list_query))
-        item_rows.append(_paint(_pad(_fit(f"Name/ID: {draft} · {len(visible)} names", left_width), left_width), state, color, "meta"))
+        if not compact_list:
+            item_rows.append(_paint(_pad(_fit(title, title_width), title_width) + " " + count_title,
+                                    state, color, "focus" if state.focus == "list" else "meta"))
+        if not compact_list or state.panel == "list_find" or state.list_query:
+            draft = (_draft_window(state.draft_query.buffer, state.draft_query.cursor, max(1, left_width - 12))
+                     if state.panel == "list_find" else repr(state.list_query))
+            item_rows.append(_paint(_pad(_fit(f"Name/ID: {draft} · {len(visible)} names", left_width), left_width), state, color, "meta"))
         information: list[str] = []
         if result.items and 0 <= state.selected < len(catalog.items):
             item = catalog.items[state.selected]
-            information = _wrap("Name: " + item.label, max(1, left_width - 12))
-            information += _wrap("ID: " + (item.display_id or item.id), max(1, left_width - 12))
-            information += _wrap("Records: " + str(len(item.records)), max(1, left_width - 12))
-        info_height = min(2, max(0, body_height - 3))
-        capacity = max(0, body_height - 2 - info_height)
+            information = _information_rows(("Name: " + item.label,
+                                             "ID: " + (item.display_id or item.id),
+                                             "Records: " + str(len(item.records))), left_width)
+        info_height = min(2, max(0, body_height - len(item_rows) - 1))
+        capacity = max(0, body_height - len(item_rows) - info_height)
         if not visible:
             message = ("No recorded data" if not snapshot.records else
                        "No items match filters" if not result.filtered else
@@ -375,7 +397,13 @@ def render_browser(spec: ViewerSpec, state: BrowserState, snapshot: Snapshot,
     selected = selection_label(state.detail.selection, state.detail.selection_count)
     if selected and not state.detail.copy_notice:
         notice = selected
-    if state.selected not in visible and result.items and state.list_query:
+    selected_matches = True
+    if result.items and state.list_query:
+        selected_item = catalog.items[state.selected]
+        query = state.list_query.casefold()
+        selected_matches = (query in selected_item.label.casefold()
+                            or query in (selected_item.display_id or selected_item.id).casefold())
+    if not selected_matches:
         notice = "Selected item is outside name results; detail retained. " + notice
     if result.unavailable and not state.detail.copy_notice and not selected:
         notice = f"Search coverage incomplete: {len(result.unavailable)} target(s) · " + result.unavailable[0][1]
