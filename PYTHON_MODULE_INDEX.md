@@ -86,7 +86,9 @@ Source: `src/jsonl_viewer/_model.py`. Owns immutable snapshots, occurrences,
 logical cursor/fold/selection state, pending copy requests, query results and renderer hit geometry.
 Selection edge intent is distinct from a changed logical endpoint. BodyLine/PaintedSpan
 retain only actual painted copyable segment ranges, never a document character map. BrowserState
-owns invocation-only focus/layout plus committed/draft conditions; no persistence.
+owns invocation-only focus/layout, committed/draft conditions, bounded literal name-finding,
+selected-info scroll and palette preference. Its 32-item navigation LRU retains section/cursor/
+fold/viewport state without prompts, clipboard requests, drags or source copies; no persistence.
 
 ## Bounded source and selection
 
@@ -108,7 +110,8 @@ caller-supplied ExpansionBudget accounting; whole candidates are accepted or ski
 
 ### `jsonl_viewer._catalog`
 
-Source: `src/jsonl_viewer/_catalog.py`. Binds original references to generic groups,
+Source: `src/jsonl_viewer/_catalog.py`. Its private Item separates stable internal identity
+from the caller's opaque display/search ID; ungrouped IDs retain source-line identity. Binds original references to generic groups,
 facets and cached selector previews. Original typed targets and declared-unavailable
 metadata remain separate from eager diagnostics; unsupported automatic facets
 produce notices without preventing ordinary source viewing.
@@ -185,13 +188,18 @@ outer viewport's painted bounds before resolving endpoints.
 
 ### `jsonl_viewer._browser_render`
 
-Source: `src/jsonl_viewer/_browser_render.py`. Owns generic chrome, lists, modals,
-effective Single/Split composition and painted hit regions; layout remains state data.
+Source: `src/jsonl_viewer/_browser_render.py`. Owns generic chrome, single-row list cells,
+Unicode name/ID highlighting, fixed selected-info scrolling, Dark/Light/ANSI roles, modals,
+effective Single/Split composition and painted hit regions. Pure name finding projects
+materialized query results without changing them; layout remains state data.
 
 ### `jsonl_viewer._browser`
 
-Source: `src/jsonl_viewer/_browser.py`. Coordinates generic input, drafts,
-per-view focus/layout and retained cursor viewport acceptance through ViewerHost.
+Source: `src/jsonl_viewer/_browser.py`. Coordinates generic input, drafts, literal name finding,
+per-view focus/layout/palette, bounded group-navigation restoration and retained cursor
+viewport acceptance through ViewerHost. Applied body conditions invalidate saved navigation;
+name finding only narrows the list. Detail record movement stays within an explicit group;
+ungrouped records retain ordinary eligible-source traversal.
 It captures detail drags ahead of chrome/list routing and dispatches each released
 copy request once through optional host capabilities with truthful outcome notices.
 It consumes prepared data only, does not

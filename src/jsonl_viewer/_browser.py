@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from ._browser_render import render_browser
+from ._browser_render import list_items, render_browser
 from ._catalog import Catalog, bind_catalog
 from ._controls import _accept_frame, _edit_prompt, _line_action, _safe_input, _transition, _unfold_match, drag_mouse, selection_autoscroll
-from ._model import BrowserFrame, BrowserState, CursorPosition, InputDiagnostic, PromptState, Snapshot
+from ._model import BrowserFrame, BrowserState, CursorPosition, InputDiagnostic, PromptState, Snapshot, ViewState
 from ._mouse import MouseEvent, parse_mouse
 from ._query import evaluate
 from ._render import RenderSession, _text_cells, selection_text
@@ -16,30 +16,57 @@ from ._search import SearchLimitError
 from .contracts import ViewerHost, ViewerSpec
 
 
+def _remember(state: BrowserState) -> tuple[tuple[int, int, ViewState], ...]:
+    """Retain bounded navigation, never a prompt, clipboard request, or drag."""
+    detail = replace(clear_selection(state.detail), search=None, prompt=None,
+                     message=None, message_is_error=False, copy_pending=False,
+                     copy_notice=False, selection_count=0)
+    retained = tuple(entry for entry in state.navigation if entry[0] != state.selected)
+    return (retained + ((state.selected, state.section, detail),))[-32:]
+
+
 def _select(state: BrowserState, catalog: Catalog, index: int, *, section: int | None = None,
-            first_hit: bool = False, focus: str | None = None) -> BrowserState:
-    state = replace(state, detail=clear_selection(state.detail))
+            first_hit: bool = False, focus: str | None = None, remember: bool = True) -> BrowserState:
+    saved = _remember(state) if remember and state.result and state.selected in state.result.items else state.navigation
     item = catalog.items[index]
-    initial_section = next((i for i, candidate in enumerate(item.sections)
-                            if item.records[0] in candidate.records), 0)
-    section_index = min(section if section is not None else initial_section, len(item.sections) - 1)
     search = state.result.search if state.result else None
-    member_set = frozenset(item.records)
-    hit = next((h for h in search.occurrences if h.record_index in member_set), None) if search and first_hit else None
-    if hit:
-        section_index = next((i for i, s in enumerate(item.sections) if hit.record_index in s.records), 0)
-        search = replace(search, current_index=search.occurrences.index(hit))
+    cached = next((entry for entry in reversed(saved) if entry[0] == index), None)
+    if cached and section is None and not first_hit:
+        _, section_index, detail = cached
+        if (0 <= section_index < len(item.sections)
+                and (detail.selected_index in item.sections[section_index].records
+                     or not item.sections[section_index].records and detail.selected_index in item.records)):
+            restored = replace(state, selected=index, section=section_index,
+                               detail=replace(detail, search=search, reveal_cursor=True),
+                               focus=focus or state.focus, notice=None, error=None,
+                               info_offset=0, navigation=saved)
+            return replace(restored, navigation=_remember(restored))
+    state = replace(state, detail=clear_selection(state.detail))
+    section_index = (next((i for i, candidate in enumerate(item.sections)
+                          if item.records[0] in candidate.records), 0) if section is None else section)
+    section_index = min(max(0, section_index), len(item.sections) - 1)
+    hit = None
+    first_hit = first_hit or (cached is None and section is None and search is not None)
+    if first_hit and search:
+        members = frozenset(item.records)
+        hit = next((h for h in search.occurrences if h.record_index in members), None)
+        if hit:
+            section_index = next((i for i, candidate in enumerate(item.sections)
+                                  if hit.record_index in candidate.records), 0)
+            search = replace(search, current_index=search.occurrences.index(hit))
     records = item.sections[section_index].records
     record = hit.record_index if hit else records[0] if records else item.records[0]
     detail = replace(state.detail, selected_index=record, record_line_offset=0,
-                     horizontal_offset=0, cursor=None, preferred_column=None,
-                     search=search, reveal_match=bool(hit), message=None,
-                     focus_container=None, focus_property=None, gutter_columns=0)
+                     horizontal_offset=0, cursor=None, preferred_column=None, search=search,
+                     reveal_match=bool(hit), message=None, focus_container=None,
+                     focus_property=None, gutter_columns=0)
     if hit:
         detail = replace(detail, folds=_unfold_match(detail, search))
     result = replace(state.result, search=search) if state.result else None
-    return replace(state, selected=index, section=section_index, detail=detail,
-                   result=result, focus=focus or state.focus, notice=None, error=None)
+    selected = replace(state, selected=index, section=section_index, detail=detail, result=result,
+                       focus=focus or state.focus, notice=None, error=None, info_offset=0,
+                       navigation=saved)
+    return replace(selected, navigation=_remember(selected))
 
 
 def _commit(state: BrowserState, snapshot: Snapshot, catalog: Catalog,
@@ -52,22 +79,24 @@ def _commit(state: BrowserState, snapshot: Snapshot, catalog: Catalog,
     if old_hit is not None and result.search and old_hit in result.search.occurrences:
         result = replace(result, search=replace(result.search, current_index=result.search.occurrences.index(old_hit)))
     retain = state.selected in result.items and (query is None or (query == state.query and scope == state.scope))
+    changed = (filters, query, scope) != (state.filters, state.query, state.scope)
     committed = replace(state, filters=filters, query=query, scope=scope, result=result,
+                        navigation=() if changed else state.navigation,
                         panel=None, error=None, notice=None, reset_all=False)
     if not result.items:
         return replace(committed, detail=replace(state.detail, search=result.search))
     if retain:
         return replace(committed, detail=replace(state.detail, search=result.search))
-    return _select(committed, catalog, result.items[0], first_hit=query is not None)
+    return _select(committed, catalog, result.items[0], first_hit=query is not None, remember=not changed)
 
 
 def _move_item(state: BrowserState, catalog: Catalog, delta: int) -> BrowserState:
-    items = state.result.items
+    items = list_items(state, catalog)
     if not items:
         return state
-    old = items.index(state.selected) if state.selected in items else 0
+    old = items.index(state.selected) if state.selected in items else (-1 if delta > 0 else 0)
     index = items[(old + delta) % len(items)]
-    return _select(state, catalog, index, first_hit=state.query is not None)
+    return _select(state, catalog, index)
 
 
 def _move_match(state: BrowserState, catalog: Catalog, delta: int) -> BrowserState:
@@ -85,7 +114,8 @@ def _move_match(state: BrowserState, catalog: Catalog, delta: int) -> BrowserSta
     detail = replace(state.detail, selected_index=hit.record_index, search=updated,
                      reveal_match=True, cursor=None,
                      folds=_unfold_match(state.detail, updated))
-    return replace(state, detail=detail)
+    moved = replace(state, detail=detail)
+    return replace(moved, navigation=_remember(moved))
 
 
 def _filter_action(state: BrowserState, action: int, snapshot: Snapshot, catalog: Catalog) -> BrowserState:
@@ -118,6 +148,26 @@ def _modal_key(state: BrowserState, key: str, text: str | None,
                snapshot: Snapshot, catalog: Catalog) -> tuple[BrowserState, bool]:
     if key in {"eof", "interrupt"}:
         return state, True
+    if state.panel == "list_find":
+        if key in {"escape", "unknown_escape", "cancel"}:
+            return replace(state, panel=None, list_query="", focus="list", error=None), False
+        if key in {"up", "down", "page_up", "page_down"}:
+            return _move_item(state, catalog, -1 if key in {"up", "page_up"} else 1), False
+        if key == "enter":
+            items = list_items(state, catalog)
+            if not items:
+                return replace(state, notice="No names match; Esc clears name find."), False
+            selected = state if state.selected in items else _select(state, catalog, items[0])
+            return replace(selected, panel=None, focus="detail", error=None), False
+        if text is not None:
+            if _safe_input(text) and len(state.draft_query.buffer) + len(text) <= 1_024:
+                prompt = state.draft_query
+                prompt = replace(prompt, buffer=prompt.buffer[:prompt.cursor] + text + prompt.buffer[prompt.cursor:],
+                                 cursor=prompt.cursor + len(text))
+                return replace(state, draft_query=prompt, list_query=prompt.buffer, error=None), False
+            return state, False
+        prompt = _edit_prompt(state.draft_query, key)
+        return replace(state, draft_query=prompt, list_query=prompt.buffer, error=None), False
     if key in {"escape", "unknown_escape", "cancel"}:
         if state.panel == "options":
             return replace(state, panel="filters", panel_index=state.field, error=None), False
@@ -178,7 +228,8 @@ def _modal_key(state: BrowserState, key: str, text: str | None,
             section = next((i for i, s in enumerate(item.sections) if index in s.records), 0)
             selected = _select(replace(state, panel=None, error=None), catalog, item_index,
                                section=section, focus="detail")
-            return replace(selected, detail=replace(selected.detail, selected_index=index)), False
+            moved = replace(selected, detail=replace(selected.detail, selected_index=index))
+            return replace(moved, navigation=_remember(moved)), False
         return state, False
     if state.panel_index == 1 and key in {"left", "right", "up", "down", "enter"}:
         delta = -1 if key in {"left", "up"} else 1
@@ -210,7 +261,9 @@ def _detail_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: 
                             selected_line_count=frame.detail.selected_line_count,
                             rendered=frame.detail, session=session,
                             document_indices=catalog.items[state.selected].sections[state.section].records)
-    allowed = tuple(record for index in state.result.items for record in catalog.items[index].records)
+    allowed = (catalog.items[state.selected].records if catalog.items[state.selected].grouped
+               and action in {"up", "down", "page_up", "page_down"}
+               else tuple(record for index in state.result.items for record in catalog.items[index].records))
     if detail.selected_index not in allowed:
         forward = action not in {"up", "page_up", "cursor_up", "cursor_left"}
         candidates = [i for i in allowed if i > state.detail.selected_index] if forward else [i for i in allowed if i < state.detail.selected_index]
@@ -230,7 +283,10 @@ def _detail_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: 
     item = catalog.items[item_index]
     section = state.section if item_index == state.selected and detail.selected_index in item.sections[state.section].records else next(
         (i for i, s in enumerate(item.sections) if detail.selected_index in s.records), 0)
-    return replace(state, detail=detail, selected=item_index, section=section)
+    moved = replace(state, detail=detail, selected=item_index, section=section,
+                    navigation=_remember(state) if item_index != state.selected else state.navigation,
+                    info_offset=0 if item_index != state.selected else state.info_offset)
+    return replace(moved, navigation=_remember(moved)) if item_index != state.selected else moved
 
 
 def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: Catalog,
@@ -284,7 +340,7 @@ def _mouse_event(state: BrowserState, event: str, snapshot: Snapshot, catalog: C
             activate = hit.index in (1, 2) if state.panel == "goto" else hit.index in (1, 2, 3)
             return _modal_key(state, "enter", None, snapshot, catalog)[0] if activate else state
         if hit.kind == "item":
-            return _select(state, catalog, hit.index, first_hit=state.query is not None, focus="list")
+            return _select(state, catalog, hit.index, focus="list")
         if hit.kind == "section":
             return _select(state, catalog, state.selected, section=hit.index, focus="detail")
         if hit.kind == "annotations":
@@ -346,12 +402,16 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
         command = event[5:]
         if spec.input_protocol != "keys" or len(command) > 8_192 or not _safe_input(command, allow_tab=True):
             return replace(state, notice="Unsupported line input."), False
+        if state.panel == "list_find":
+            inserted, _ = _modal_key(state, "", command, snapshot, catalog)
+            return _modal_key(inserted, "enter", None, snapshot, catalog)
         aliases = {"f":"filters", "filters":"filters", "tab":"focus_next", "shift-tab":"focus_previous",
                    "enter":"enter", "space":"space", "[":"section_previous", "]":"section_next", "a":"a"}
         if state.panel is None:
-            aliases["v"] = "toggle_layout"
+            aliases.update({"v":"toggle_layout", "t":"list_find", "p":"cycle_appearance",
+                            ",":"info_previous", ".":"info_next"})
         action = aliases.get(command.strip(), _line_action(command))
-        if action == "unknown" and state.panel == "search" and state.panel_index == 0:
+        if action == "unknown" and state.panel in {"search", "list_find"} and state.panel_index == 0:
             inserted, _ = _modal_key(state, "", command, snapshot, catalog)
             return _modal_key(inserted, "enter", None, snapshot, catalog)
         return transition_browser(state, action, snapshot, catalog, spec, frame, session)
@@ -364,7 +424,8 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
         key = {"cancel":"escape", "help":"?", "clear_search":"c", "next_match":"n",
                "previous_match":"N", "filters":"f", "begin_filter":"f",
                "focus_next":"tab", "focus_previous":"shift_tab", "section_next":"]",
-               "section_previous":"[", "toggle_mode":"m", "toggle_layout":"v"}.get(event, event)
+               "section_previous":"[", "toggle_mode":"m", "toggle_layout":"v", "list_find":"t", "cycle_appearance":"p",
+               "info_previous":",", "info_next":"."}.get(event, event)
     if state.panel:
         return _modal_key(state, key, text, snapshot, catalog)
     if text is not None:
@@ -386,11 +447,24 @@ def transition_browser(state: BrowserState, event: str | None, snapshot: Snapsho
     if key == "interrupt":
         key = "escape"
     if key in {"escape", "unknown_escape"}:
+        if state.list_query:
+            return replace(state, list_query="", draft_query=PromptState("search_query"),
+                           notice=None, error=None), False
+        if state.focus == "list":
+            return replace(state, focus="detail", notice=None, detail=replace(state.detail, reveal_cursor=True)), False
         if state.notice or state.detail.message:
             return replace(state, notice=None, detail=replace(state.detail, message=None)), False
         if state.query is not None:
             return _commit(state, snapshot, catalog, state.filters, None, state.scope), False
         return state, True
+    if key == "t" and state.focus == "list":
+        return replace(state, panel="list_find", panel_index=0,
+                       draft_query=PromptState("search_query", state.list_query, len(state.list_query)), error=None), False
+    if key == "p":
+        choices = ("dark", "light", "ansi")
+        return replace(state, appearance=choices[(choices.index(state.appearance) + 1) % 3]), False
+    if state.focus == "list" and key in {",", "."}:
+        return replace(state, info_offset=min(frame.info_max_offset, max(0, min(state.info_offset, frame.info_max_offset) + (-1 if key == "," else 1)))), False
     if key == "f":
         return replace(state, panel="filters", panel_index=0, draft_filters=state.filters, reset_all=False, error=None), False
     if key in {"/", "g"}:
@@ -473,7 +547,7 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
                          result=evaluate(snapshot, catalog, filters, None),
                          diagnostic=diagnostic)
     if state.result.items:
-        state = _select(state, catalog, state.result.items[0])
+        state = _select(state, catalog, state.result.items[0], remember=False)
     session = RenderSession()
     notifier = getattr(host, "set_input_mode", None)
     scroll_notifier = getattr(host, "set_autoscroll_active", None)
@@ -482,7 +556,7 @@ def view_browser(snapshot: Snapshot, spec: ViewerSpec, host: ViewerHost,
     input_mode = None
     geometry: tuple[int, int] | None = None
     while True:
-        desired = "text" if state.panel == "search" and state.panel_index == 0 else "command"
+        desired = "text" if state.panel in {"search", "list_find"} and state.panel_index == 0 else "command"
         if desired != input_mode:
             if callable(notifier):
                 notifier(desired)

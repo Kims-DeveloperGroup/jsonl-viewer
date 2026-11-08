@@ -188,6 +188,8 @@ def _generic_frames() -> dict[str, str]:
                                                                             for i in range(1, 7))),)))
     cases = {
         "generic-inspection.txt": ((None,), (140, 28)),
+        "generic-group-list.txt": (("text\tv", "key\ttab", None), (140, 28)),
+        "generic-name-find.txt": (("text\tv", "key\ttab", "text\tt", "text\tTrace", None), (140, 28)),
         "generic-filter-draft.txt": (("text\tf", "key\tenter", "key\tdown", "key\tdown", "key\tspace",
                                        "key\tenter", None), (80, 24)),
         "generic-scoped-search.txt": (("search\ttimeout", "text\t/", "key\ttab", "key\tright", "key\ttab",

@@ -1,0 +1,28 @@
+JSONL VIEWER · READ ONLY                                                                                                                    
+Dataset: Audit events                                                                                                                       
+Search: None | In: All text · / Edit · c Clear                                                                                              
+Filters(0): All · f Edit                                                                                                                    
+Groups/records: 2 total · 2 filtered                                                                                                        
+[Focus] Groups/records           Records │ [Open] | Reads | Writes | Close |                                                                
+Name/ID: Trace│ · 1 names                │ Item 1/2 · Record 1/5 · Trace A · trace-a · a Full annotations                                   
+▸G 01 Trace A [trace-a]              5   │ > R1 L1 │ {                                                                                      
+                                         │           ^                                                                                      
+                                         │ >    L2 │   "trace": "a",                                                                        
+                                         │ >    L3 │   "kind": "open",                                                                      
+                                         │ >    L4 │   "level": "info",                                                                     
+                                         │ >    L5 │   "message": "ready"                                                                   
+                                         │ >    L6 │ }                                                                                      
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+                                         │                                                                                                  
+Info 1/3 Name: Trace A                   │                                                                                                  
+ID: trace-a                              │                                                                                                  
+Focus: List ·                                                                                                                               
+Split · Name find: ↑/↓ choose · Enter detail · Esc clear · literal text · v layout · p Dark · f filters · / search · ? help · q close       

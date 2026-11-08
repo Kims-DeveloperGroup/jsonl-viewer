@@ -330,7 +330,8 @@ class DragSelectionTests(unittest.TestCase):
                                     host.copied[0].index("C-copy-me"))
                     self.assertNotIn("forbidden", host.copied[0])
                     after = strip_ansi(host.marks["after"])
-                    self.assertIn("selected · a annotations", after)
+                    self.assertIn("selected ·", after)
+                    self.assertIn("annotations", after)
                     self.assertNotIn("D-forbidden", after)
                     self.assertIn("Copied", after)
                     self.assertIn("Focus: List", strip_ansi(host.marks["list"]))
@@ -354,13 +355,14 @@ class DragSelectionTests(unittest.TestCase):
                     *(("text\tv",) if split else ()),
                     _Point('"content"', "alpha"),
                     _Point('"content"', "beta", 3, button=32, saved="end"),
-                    _saved("end"), "key\tdown", _Mark("new-item"),
+                    _saved("end"), "key\ttab", "key\tdown", "key\tenter", _Mark("new-item"),
                     _Point('"content"', "second"),
                     _Point('"content"', "copy", 3, button=32, saved="end"),
                     _saved("end"),
                 ), inspection=inspection, size=(160, 24), color=True)
                 self.assertEqual(host.copied, ["alpha beta", "second-copy"])
-                self.assertIn("second · a annotations", strip_ansi(host.marks["new-item"]))
+                self.assertIn("second ·", strip_ansi(host.marks["new-item"]))
+                self.assertIn("annotations", strip_ansi(host.marks["new-item"]))
                 self.assertNotIn("Copied", strip_ansi(host.marks["new-item"]))
 
     def test_cancellation_does_not_copy_or_turn_release_into_navigation(self):

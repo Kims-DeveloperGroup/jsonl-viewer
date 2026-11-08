@@ -1,4 +1,4 @@
-"""Exercise generic inspection exclusively through public input and frames."""
+"""Exercise generic inspection input, frames, and deterministic cell geometry."""
 
 from __future__ import annotations
 
@@ -133,11 +133,13 @@ class InspectionUiTests(unittest.TestCase):
                 self.assertIn("_TAIL", single)
                 self.assertNotIn("_TAIL", split)
                 self.assertNotIn("Second item", single)
-                self.assertIn("first · a annotations", replayed)
+                self.assertIn("first ·", replayed)
+                self.assertIn("annotations", replayed)
                 self.assertIn("_TAIL", replayed)
                 self.assertNotIn("second-source", replayed)
                 self.assertIn("Focus: List", strip_ansi(host.checkpoints["clicked"]))
-                self.assertIn("second · a annotations", selected)
+                self.assertIn("second ·", selected)
+                self.assertIn("annotations", selected)
                 self.assertIn("second-source", selected)
                 self.assertIn("Focus: Detail", selected)
                 self.assertTrue(all(_text_cells(line) <= 200 for line in selected.splitlines()))
@@ -420,6 +422,234 @@ class InspectionUiTests(unittest.TestCase):
             self.assertIn("tail-only-unsectioned", host.checkpoints[name])
             self.assertIn("Other records", host.checkpoints[name])
         self.assertIn("1 matched · 1 records · 1 occurrences", host.checkpoints["search"])
+
+    def test_name_find_is_literal_unicode_and_preserves_body_conditions_and_hidden_selection(self):
+        source = jsonl({"message": "timeout", "kind": "batch"},
+                       {"message": "saved", "kind": "batch"},
+                       {"message": "timeout", "kind": "sensor"})
+        spec = ViewerSpec(inspection=Inspection(groups=(
+            Group("batch-104", "Straße 작업", (1, 2)),
+            Group("sensor-1", "센서 로그", (3,)))), input_protocol="keys")
+        host = self._view(("search\ttimeout", _key("tab"), _text("t"),
+                           _text("STRASSE"), Checkpoint("casefold"), _key("enter"),
+                           _key("down"), Checkpoint("context"), _key("tab"),
+                           _text("t"), _key("ctrl_u"), _text("센서"), Checkpoint("hidden"),
+                           _key("enter"), Checkpoint("sensor"), _key("tab"),
+                           _text("t"), _key("ctrl_u"), _text("batch-104"),
+                           _key("enter"), Checkpoint("restored")), source=source, spec=spec)
+        self.assertIn("STRASSE", host.checkpoints["casefold"])
+        self.assertIn("1 names", host.checkpoints["casefold"])
+        self.assertIn("1/2", host.checkpoints["casefold"])
+        self.assertIn('"message": "saved"', host.checkpoints["context"])
+        self.assertIn("outside name results; detail retained.", host.checkpoints["hidden"])
+        self.assertIn("batch-104", host.checkpoints["hidden"])
+        self.assertIn("sensor-1", host.checkpoints["sensor"])
+        self.assertIn("Record 2/2", host.checkpoints["restored"])
+        self.assertIn('"message": "saved"', host.checkpoints["restored"])
+        self.assertIn("Search: 'timeout'", host.checkpoints["restored"])
+        filtered = self._view((*_severity_error(), *_search("timeout", messages=True),
+                               _key("tab"), _text("t"), _text("Trace Beta"),
+                               Checkpoint("none"), _key("enter"), _key("up"), _key("down"),
+                               Checkpoint("inert"), _key("escape"), _key("enter"),
+                               Checkpoint("detail")))
+        self.assertIn("No names match", filtered.checkpoints["none"])
+        self.assertEqual(filtered.checkpoints["none"].splitlines()[:-2],
+                         filtered.checkpoints["inert"].splitlines()[:-2])
+        self.assertIn("No names match", filtered.checkpoints["inert"])
+        self.assertIn("Severity=Error", filtered.checkpoints["detail"])
+        self.assertIn("In: Messages", filtered.checkpoints["detail"])
+        self.assertIn("Search: 'timeout'", filtered.checkpoints["detail"])
+        self.assertIn("Trace Alpha", filtered.checkpoints["detail"])
+
+    def test_name_find_text_mode_and_line_commands_do_not_become_main_commands(self):
+        class ModeHost(InteractiveHost):
+            def __init__(self, events):
+                super().__init__(events, size=(180, 30))
+                self.modes = []
+
+            def set_input_mode(self, mode):
+                self.modes.append(mode)
+
+        description = Inspection(groups=(Group("a", "Alpha", (1,)),
+            Group("literal-q", "q", (2,)), Group("literal-up", "up", (3,))))
+        spec = ViewerSpec(inspection=description, input_protocol="keys")
+        host = ModeHost(("line\ttab", "line\tt", "line\tq", Checkpoint("q"),
+                         "line\ttab", "line\tt", _key("ctrl_u"), "line\tup", Checkpoint("up"),
+                         _key("tab"), _text("t"), _key("ctrl_u"), _text("p한글"),
+                         Checkpoint("text"), _key("escape"), _text("/"), _text("p한글"),
+                         _key("escape"), Checkpoint("cancelled"), "close"))
+        source = jsonl("alpha", "literal q", "literal up")
+        view_jsonl(source, spec, host)
+        self.assertEqual(host.close_calls, 1)
+        self.assertIn("literal-q", host.checkpoints["q"])
+        self.assertIn("literal-up", host.checkpoints["up"])
+        self.assertIn("p한글", host.checkpoints["text"])
+        self.assertIn("p Dark", host.checkpoints["cancelled"])
+        self.assertEqual(host.modes, ["command", "text", "command", "text", "command",
+                                     "text", "command", "text", "command"])
+
+    def test_group_navigation_restores_sections_and_evicts_only_after_32_groups(self):
+        for count in (32, 33):
+            with self.subTest(groups=count):
+                source = jsonl(*({"batch": index, "part": part}
+                                 for index in range(count) for part in (1, 2)))
+                groups = tuple(Group(f"batch-{index}", f"Batch {index}",
+                                     (index * 2 + 1, index * 2 + 2), sections=(
+                                         Section("first", "First", (index * 2 + 1,)),
+                                         Section("second", "Second", (index * 2 + 2,))))
+                               for index in range(count))
+                events = [_key("down"), _key("tab")]
+                for _ in range(1, count):
+                    events.extend((_key("down"), _key("enter"), _key("down"), _key("tab")))
+                events.extend((_key("down"), _key("enter"), Checkpoint("returned"),
+                               _key("down"), Checkpoint("within_group")))
+                host = self._view(events, source=source,
+                                  spec=ViewerSpec(inspection=Inspection(groups=groups),
+                                                  input_protocol="keys"))
+                expected = 2 if count == 32 else 1
+                self.assertIn(f"Record {expected}/2", host.checkpoints["returned"])
+                self.assertIn("[Second]" if expected == 2 else "[First]",
+                              host.checkpoints["returned"])
+                self.assertIn('"batch": 0', host.checkpoints["within_group"])
+        source = jsonl({"message": "timeout"}, {"message": "saved"},
+                       {"message": "timeout"}, {"message": "saved"})
+        spec = ViewerSpec(inspection=Inspection(groups=(Group("a", "Batch A", (1, 2)),
+            Group("b", "Sensor B", (3, 4)))), input_protocol="keys")
+        host = self._view((_key("down"), _key("tab"), _key("down"), _key("enter"),
+                           _key("down"), "search\ttimeout", _key("tab"), _key("down"),
+                           _key("enter"), Checkpoint("new_conditions")), source=source, spec=spec)
+        self.assertIn("Record 1/2", host.checkpoints["new_conditions"])
+        self.assertIn('"message": "⟦timeout⟧"', host.checkpoints["new_conditions"])
+
+    def test_group_rows_are_single_cell_aligned_with_visible_kinds_and_palette(self):
+        from jsonl_viewer._browser import _select
+        from jsonl_viewer._browser_render import render_browser
+        from jsonl_viewer._catalog import bind_catalog
+        from jsonl_viewer._input import parse_jsonl
+        from jsonl_viewer._model import BrowserState
+        from jsonl_viewer._query import evaluate
+        from jsonl_viewer._render import RenderSession
+
+        label = "중복 센서 👩‍💻 é\n" + "가시성" * 20
+        source = jsonl(*({"value": i} for i in range(13)))
+        groups = (Group("batch-long-104", label, (1,)),
+                  Group("batch-long-105", label, (2, 3)),
+                  Group("sensor", "record:13", tuple(range(4, 13))))
+        spec = ViewerSpec(inspection=Inspection(groups=groups), input_protocol="keys")
+        snapshot = parse_jsonl(source)
+        catalog = bind_catalog(snapshot, spec.inspection)
+        filters = tuple(frozenset() for _ in catalog.facets)
+        initial = BrowserState(filters=filters, result=evaluate(snapshot, catalog, filters, None),
+                               focus="list", layout="split")
+        state = _select(initial, catalog, 0)
+        for columns, target in ((120, None), (200, 48)):
+            for color in (False, True):
+                with self.subTest(columns=columns, color=color):
+                    frame = render_browser(spec, state, snapshot, catalog, columns=columns,
+                                           rows=28, color=color, session=RenderSession())
+                    expected = frame.detail_column - 3
+                    if target is None:
+                        self.assertTrue(32 <= expected <= 37)
+                    else:
+                        self.assertEqual(expected, target)
+                    hits = [hit for hit in frame.hits if hit.kind == "item"]
+                    self.assertEqual(len(hits), 4)
+                    self.assertEqual([hit.row for hit in hits], list(range(hits[0].row, hits[0].row + 4)))
+                    rows = [strip_ansi(frame.text).splitlines()[hit.row].partition(" │ ")[0]
+                            for hit in hits]
+                    self.assertTrue(all(_text_cells(row) == expected for row in rows))
+                    self.assertTrue(all(_text_cells(line) <= columns
+                                        for line in strip_ansi(frame.text).splitlines()))
+                    self.assertEqual([row.rstrip()[-1] for row in rows], ["1", "2", "9", "1"])
+                    self.assertIn("104", rows[0])
+                    self.assertIn("105", rows[1])
+                    self.assertRegex(rows[0], r"▸\s*G\s*0?1")
+                    self.assertRegex(rows[2], r"\sG\s*0?3")
+                    self.assertRegex(rows[3], r"\sR\s*0?4")
+                    if color:
+                        self.assertIn("48;2;29;78;216", frame.text)
+                        self.assertIn("48;2;21;55;80", frame.text)
+                    else:
+                        self.assertNotIn("\x1b", frame.text)
+        short_spec = ViewerSpec(inspection=Inspection(groups=(Group("a", "Batch", (1,)),)))
+        short_catalog = bind_catalog(snapshot, short_spec.inspection)
+        short_filters = tuple(frozenset() for _ in short_catalog.facets)
+        short = _select(replace(initial, filters=short_filters,
+                                result=evaluate(snapshot, short_catalog, short_filters, None)),
+                        short_catalog, 0)
+        short_frame = render_browser(short_spec, short, snapshot, short_catalog, columns=160,
+                                     rows=28, color=False, session=RenderSession())
+        self.assertEqual(short_frame.detail_column - 3, 40)
+        narrow = render_browser(spec, replace(state, layout="single"), snapshot, catalog,
+                                columns=32, rows=28, color=False, session=RenderSession())
+        narrow_hits = [hit for hit in narrow.hits if hit.kind == "item"]
+        self.assertEqual(len(narrow_hits), 4)
+        self.assertTrue(all(_text_cells(narrow.text.splitlines()[hit.row]) == 32
+                            for hit in narrow_hits))
+        for appearance, code in (("light", "48;2;186;230;253"), ("ansi", "97;104")):
+            frame = render_browser(spec, replace(state, appearance=appearance), snapshot, catalog,
+                                   columns=200, rows=28, color=True, session=RenderSession())
+            self.assertIn(code, frame.text)
+        frame = render_browser(spec, replace(state, list_query="중복"), snapshot, catalog,
+                               columns=200, rows=28, color=True, session=RenderSession())
+        self.assertIn("48;2;251;191;36", frame.text)
+
+    def test_selected_full_values_scroll_without_growing_group_rows(self):
+        name = "StartName-" + "센서가시성" * 45 + "-NameTail"
+        identity = "id-" + "i" * 90 + "-IdentityTail"
+        spec = ViewerSpec(inspection=Inspection(groups=(Group(identity, name, (1, 2)),)),
+                          input_protocol="keys")
+        events = [_key("tab"), Checkpoint("start")]
+        for index in range(45):
+            events.extend((_text("."), Checkpoint(f"info{index}")))
+        events.extend((_text(",") for _ in range(45)))
+        events.append(Checkpoint("back"))
+        host = self._view(events, source=jsonl("batch", "sensor"), spec=spec, size=(48, 14))
+        chunks = {}
+        for frame in host.checkpoints.values():
+            lines = frame.splitlines()
+            marker = lines[-4].split(" ", 2)
+            offset = int(marker[1].split("/")[0]) - 1
+            chunks[offset] = marker[2].rstrip()
+            chunks[offset + 1] = lines[-3].strip()
+        information = "".join(chunks[index] for index in sorted(chunks))
+        self.assertIn(name, information)
+        self.assertIn(identity, information)
+        self.assertEqual(host.checkpoints["info43"], host.checkpoints["info44"])
+        self.assertEqual(host.checkpoints["start"], host.checkpoints["back"])
+        self.assertTrue(all(_text_cells(line) <= 48 for frame in host.checkpoints.values()
+                            for line in frame.splitlines()))
+
+    def test_cross_group_return_restores_deep_cursor_folds_and_scroll(self):
+        source = jsonl({"message": "batch start"},
+            {"fold_me": {"value": "fold-sentinel"},
+             "fields": {f"field_{i:02}": f"anchor-{i:02}" for i in range(30)}},
+            {"message": "sensor comparison"})
+        spec = ViewerSpec(inspection=Inspection(groups=(
+            Group("batch", "Batch", (1, 2), sections=(Section("first", "First", (1,)),
+                                                       Section("second", "Second", (2,)))),
+            Group("sensor", "Sensor", (3,)))), input_protocol="keys")
+        host = self._view((_key("down"), PaintedClick('"fold_me"', "{"), _key("enter"),
+            PaintedClick('"field_20"', "anchor-20"), _key("right"), _key("right"),
+            Checkpoint("before"), _key("tab"), _key("down"), _key("enter"),
+            Checkpoint("sensor"), _key("tab"), _key("up"), _key("enter"),
+            Checkpoint("after")), source=source, spec=spec, size=(200, 50))
+        self.assertIn("[Second]", host.checkpoints["after"])
+        self.assertIn("Record 2/2", host.checkpoints["after"])
+        self.assertNotIn("fold-sentinel", host.checkpoints["after"])
+        self.assertIn("sensor comparison", host.checkpoints["sensor"])
+        self.assertEqual(host.checkpoints["before"], host.checkpoints["after"])
+
+    def test_ungrouped_detail_arrows_preserve_ordinary_record_navigation(self):
+        source = jsonl({"message": "first audit record"}, "middle sensor record", ["last batch record"])
+        host = self._view((Checkpoint("first"), _key("down"), Checkpoint("middle"),
+                           _key("down"), Checkpoint("last"), _key("up"), Checkpoint("back")),
+                          source=source, spec=ViewerSpec(input_protocol="keys"))
+        self.assertIn("first audit record", host.checkpoints["first"])
+        self.assertIn("middle sensor record", host.checkpoints["middle"])
+        self.assertIn("last batch record", host.checkpoints["last"])
+        self.assertIn("middle sensor record", host.checkpoints["back"])
+        self.assertNotIn("last batch record", host.checkpoints["back"])
 
 
 if __name__ == "__main__":

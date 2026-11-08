@@ -30,6 +30,7 @@ class Item:
     values: tuple[Scalar, ...] = ()
     annotations: tuple[Context, ...] = ()
     grouped: bool = False
+    display_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,12 +150,13 @@ def bind_catalog(snapshot: Snapshot, description: Inspection | None) -> Catalog:
             supplied = dict(group.values)
             values = tuple(supplied.get(f.id, MISSING) for f in facets)
             items.append(Item("group:" + group.id, group.label, members, sections,
-                              values, group.annotations, True))
+                              values, group.annotations, True, group.id))
         else:
             values = tuple(_path_value(record.value, f.path) if f.path is not None else MISSING
                            for f in facets)
             items.append(Item(f"record:{record.source_line}", f"Record {record.source_line}",
-                              (index,), (BoundSection("", "Record", (index,)),), values))
+                              (index,), (BoundSection("", "Record", (index,)),), values,
+                              display_id=f"record:{record.source_line}"))
     completed_facets: list[Facet] = []
     for f_index, facet in enumerate(facets):
         options = facet.options

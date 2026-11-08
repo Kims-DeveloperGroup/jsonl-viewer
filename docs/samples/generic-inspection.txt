@@ -1,28 +1,28 @@
-JSONL VIEWER · READ ONLY
-Dataset: Audit events
-Search: None | In: All text · / Edit · c Clear
-Filters(0): All · f Edit
-Groups/records: 2 total · 2 filtered
-[Open] | Reads | Writes | Close | 
-group:trace-a · a annotations
-> R1 L1 │ {
-          ^
->    L2 │   "trace": "a",
->    L3 │   "kind": "open",
->    L4 │   "level": "info",
->    L5 │   "message": "ready"
->    L6 │ }
-
-
-
-
-
-
-
-
-
-
-
-
-Focus: Detail · 
-Single · v layout · Tab focus · ↑/↓ items/records · n/N hits · [/] sections · f filters · / search · ? help · q close
+JSONL VIEWER · READ ONLY                                                                                                                    
+Dataset: Audit events                                                                                                                       
+Search: None | In: All text · / Edit · c Clear                                                                                              
+Filters(0): All · f Edit                                                                                                                    
+Groups/records: 2 total · 2 filtered                                                                                                        
+[Open] | Reads | Writes | Close |                                                                                                           
+Item 1/2 · Record 1/5 · Trace A · trace-a · a Full annotations                                                                              
+> R1 L1 │ {                                                                                                                                 
+          ^                                                                                                                                 
+>    L2 │   "trace": "a",                                                                                                                   
+>    L3 │   "kind": "open",                                                                                                                 
+>    L4 │   "level": "info",                                                                                                                
+>    L5 │   "message": "ready"                                                                                                              
+>    L6 │ }                                                                                                                                 
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+                                                                                                                                            
+Focus: Detail ·                                                                                                                             
+Single · ↑/↓ records · Tab list · h/j/k/l cursor · Enter fold · [/] sections · v layout · p Dark · f filters · / search · ? help · q close  
